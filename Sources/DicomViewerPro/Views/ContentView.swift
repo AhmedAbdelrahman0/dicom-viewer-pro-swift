@@ -61,6 +61,7 @@ public struct ContentView: View {
         ) { result in
             handleDirectoryImport(result: result)
         }
+        .tooltipHost()  // must wrap the whole window so tooltips escape any clipping
     }
 
     // MARK: - Custom toolbar (in-content so hover + tooltips work reliably)
