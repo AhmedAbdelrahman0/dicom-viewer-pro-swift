@@ -1,6 +1,9 @@
 import XCTest
 import simd
 @testable import DicomViewerPro
+#if canImport(MetalKit)
+import MetalKit
+#endif
 
 final class GeometryAndIOTests: XCTestCase {
     func testVolumeWorldVoxelRoundTripUsesDirection() {
@@ -142,6 +145,37 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertTrue(actions.contains(.setLabelingTool(.threshold)))
         XCTAssertTrue(actions.contains(.threshold(2.5)))
     }
+
+    #if canImport(MetalKit)
+    func testMetalVolumeRendererBuildsPipelineWhenMetalIsAvailable() throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("Metal device unavailable in this test environment")
+        }
+
+        let renderer = MetalVolumeRenderer()
+        XCTAssertTrue(renderer.isReady)
+    }
+
+    func testVolumeTexturePayloadDownsamplesAndKeepsPhysicalExtent() {
+        let volume = ImageVolume(
+            pixels: Array(0..<64).map(Float.init),
+            depth: 4,
+            height: 4,
+            width: 4,
+            spacing: (2, 1, 1)
+        )
+
+        let payload = VolumeTexturePayload.make(from: volume, maxDimension: 2)
+
+        XCTAssertEqual(payload.width, 2)
+        XCTAssertEqual(payload.height, 2)
+        XCTAssertEqual(payload.depth, 2)
+        XCTAssertEqual(payload.pixels.count, 8)
+        XCTAssertEqual(payload.extent.x, 1, accuracy: 1e-6)
+        XCTAssertEqual(payload.extent.y, 0.5, accuracy: 1e-6)
+        XCTAssertEqual(payload.extent.z, 0.5, accuracy: 1e-6)
+    }
+    #endif
 }
 
 private extension Data {

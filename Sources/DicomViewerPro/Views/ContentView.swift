@@ -128,7 +128,7 @@ public struct ContentView: View {
             Spacer()
 
             HStack(spacing: 10) {
-                Label("MPR + MIP", systemImage: "rectangle.grid.2x2")
+                Label("MPR + VR", systemImage: "rectangle.grid.2x2")
                 Label(vm.activeTool.displayName, systemImage: vm.activeTool.systemImage)
             }
                 .font(.system(size: 11, weight: .medium))
@@ -376,65 +376,11 @@ struct MPRLayoutView: View {
                 HStack(spacing: 2) {
                     SliceView(axis: 1, title: "Coronal")
                         .frame(width: w, height: h)
-                    ThreeDPlaceholderView()
+                    VolumeRenderingPane()
                         .frame(width: w, height: h)
                 }
             }
         }
         .background(Color.black)
-    }
-}
-
-struct ThreeDPlaceholderView: View {
-    @EnvironmentObject var vm: ViewerViewModel
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("3D MIP")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundColor(.blue)
-                Spacer()
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(Color(.displayP3, white: 0.1))
-
-            ZStack {
-                Color.black
-                if let img = makeMIP() {
-                    Image(decorative: img, scale: 1.0)
-                        .resizable()
-                        .scaledToFit()
-                } else {
-                    Text("3D view (MIP)")
-                        .foregroundColor(.gray)
-                }
-            }
-        }
-        .background(Color(.displayP3, white: 0.08))
-    }
-
-    private func makeMIP() -> CGImage? {
-        guard let v = vm.currentVolume else { return nil }
-        // Coronal MIP: max along axis 1 (height)
-        let w = v.width, h = v.height, d = v.depth
-        var mip = [Float](repeating: -.infinity, count: d * w)
-        for z in 0..<d {
-            for y in 0..<h {
-                let rowStart = z * h * w + y * w
-                for x in 0..<w {
-                    let idx = z * w + x
-                    let p = v.pixels[rowStart + x]
-                    if p > mip[idx] { mip[idx] = p }
-                }
-            }
-        }
-        // Flip vertically to put head on top
-        let flipped = SliceTransform.flipVertical(mip, width: w, height: d)
-        return PixelRenderer.makeGrayImage(
-            pixels: flipped, width: w, height: d,
-            window: vm.window, level: vm.level, invert: false
-        )
     }
 }
