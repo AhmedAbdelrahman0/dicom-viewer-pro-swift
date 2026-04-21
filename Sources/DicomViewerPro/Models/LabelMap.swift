@@ -188,8 +188,9 @@ public struct RegionStats {
     public let tlg: Double?         // Total lesion glycolysis = mean × volume (for SUV data)
 
     public static func compute(_ volume: ImageVolume,
-                                _ labelMap: LabelMap,
-                                classID: UInt16) -> RegionStats {
+                               _ labelMap: LabelMap,
+                               classID: UInt16,
+                               suvTransform: ((Double) -> Double)? = nil) -> RegionStats {
         guard volume.depth == labelMap.depth,
               volume.height == labelMap.height,
               volume.width == labelMap.width else {
@@ -221,11 +222,18 @@ public struct RegionStats {
         let volMM3 = Double(vals.count) * voxVol
 
         let isPET = Modality.normalize(volume.modality) == .PT
-        let suvScale = volume.suvScaleFactor ?? (isPET ? 1.0 : 0.0)
+        let defaultSUVTransform: ((Double) -> Double)? = {
+            if let suvScale = volume.suvScaleFactor {
+                return { $0 * suvScale }
+            }
+            return isPET ? { $0 } : nil
+        }()
+        let transform = suvTransform ?? defaultSUVTransform
 
-        let suvMax: Double? = isPET ? mx * suvScale : nil
-        let suvMean: Double? = isPET ? mean * suvScale : nil
-        let tlg: Double? = (isPET && suvMean != nil) ? suvMean! * (volMM3 / 1000) : nil  // TLG = SUVmean × volume(mL)
+        let suvValues = transform.map { mapper in vals.map(mapper) }
+        let suvMax: Double? = suvValues?.max()
+        let suvMean: Double? = suvValues.map { $0.reduce(0, +) / Double($0.count) }
+        let tlg: Double? = (transform != nil && suvMean != nil) ? suvMean! * (volMM3 / 1000) : nil
 
         return RegionStats(
             count: vals.count,

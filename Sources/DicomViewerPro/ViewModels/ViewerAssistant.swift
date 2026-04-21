@@ -115,13 +115,42 @@ public extension ViewerViewModel {
                 ensureLabelMapForAssistant(defaultPreset: defaultPresetFor(volume: volume), warnings: &warnings)
                 labeling.thresholdValue = threshold
                 labeling.labelingTool = .threshold
-                labeling.thresholdAll(volume: volume, above: threshold)
-                applied.append("Segmented voxels at or above \(String(format: "%.2f", threshold)) into the active class.")
+                thresholdActiveLabel(atOrAbove: threshold)
+                applied.append("Segmented voxels at or above \(String(format: "%.2f", threshold)) using the active SUV/intensity calculation.")
 
             case .setPercentOfMax(let percent):
                 labeling.percentOfMax = percent
                 labeling.labelingTool = .threshold
                 applied.append("Set seed segmentation to \(Int(percent * 100))% of SUVmax/intensity max.")
+
+            case .setSUVMode(let mode):
+                suvSettings.mode = mode
+                applied.append("SUV calculation set to \(mode.displayName).")
+
+            case .setSUVActivityUnit(let unit):
+                suvSettings.activityUnit = unit
+                applied.append("PET input activity unit set to \(unit.displayName).")
+
+            case .setSUVManualScale(let factor):
+                suvSettings.mode = .manualScale
+                suvSettings.manualScaleFactor = factor
+                applied.append("Manual SUV scale factor set to \(String(format: "%.4g", factor)).")
+
+            case .setSUVPatientWeight(let weight):
+                suvSettings.patientWeightKg = weight
+                applied.append("Patient weight set to \(String(format: "%.1f", weight)) kg for SUV.")
+
+            case .setSUVPatientHeight(let height):
+                suvSettings.patientHeightCm = height
+                applied.append("Patient height set to \(String(format: "%.1f", height)) cm for SUV.")
+
+            case .setSUVInjectedDose(let dose):
+                suvSettings.injectedDoseMBq = dose
+                applied.append("Injected dose set to \(String(format: "%.1f", dose)) MBq.")
+
+            case .setSUVResidualDose(let dose):
+                suvSettings.residualDoseMBq = dose
+                applied.append("Residual dose set to \(String(format: "%.1f", dose)) MBq.")
             }
         }
 
@@ -143,6 +172,10 @@ public extension ViewerViewModel {
 
         if let fusion {
             lines.append("Fusion overlay: \(fusion.overlayVolume.seriesDescription), opacity \(Int(fusion.opacity * 100))%, colormap \(fusion.colormap.displayName).")
+        }
+
+        if activePETQuantificationVolume != nil {
+            lines.append("SUV calculation: \(suvSettings.mode.displayName). \(suvSettings.scaleDescription)")
         }
 
         if let map = labeling.activeLabelMap {

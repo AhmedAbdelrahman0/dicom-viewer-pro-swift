@@ -111,6 +111,7 @@ public final class ViewerViewModel: ObservableObject {
     @Published public var overlayColormap: Colormap = .hot
     @Published public var overlayWindow: Double = 6
     @Published public var overlayLevel: Double = 3
+    @Published public var suvSettings = SUVCalculationSettings()
 
     // Annotations per view
     @Published public var annotations: [Annotation] = []
@@ -131,6 +132,20 @@ public final class ViewerViewModel: ObservableObject {
 
     public var loadedPETVolumes: [ImageVolume] {
         loadedVolumes.filter { Modality.normalize($0.modality) == .PT }
+    }
+
+    public var activePETQuantificationVolume: ImageVolume? {
+        if let fusion {
+            return fusion.displayedOverlay
+        }
+        if let currentVolume, Modality.normalize(currentVolume.modality) == .PT {
+            return currentVolume
+        }
+        return loadedPETVolumes.first
+    }
+
+    public var activePETSourceVolume: ImageVolume? {
+        fusion?.overlayVolume ?? activePETQuantificationVolume
     }
 
     // MARK: - Loading
@@ -362,6 +377,10 @@ public final class ViewerViewModel: ObservableObject {
         if Modality.normalize(overlay.modality) == .PT {
             overlayOpacity = 0.55
             overlayColormap = .petRainbow
+            if overlay.suvScaleFactor != nil {
+                suvSettings.mode = .manualScale
+                suvSettings.manualScaleFactor = overlay.suvScaleFactor ?? 1
+            }
 
             let maxValue = Double(overlay.intensityRange.max)
             if maxValue.isFinite, maxValue > 0, maxValue <= 25 {
@@ -511,6 +530,135 @@ public final class ViewerViewModel: ObservableObject {
         let (w, l) = autoWindowLevel(pixels: v.pixels)
         window = w
         level = l
+    }
+
+    public func suvValue(rawStoredValue: Double) -> Double {
+        suvSettings.suv(forStoredValue: rawStoredValue)
+    }
+
+    public func activePETProbe() -> SUVProbe? {
+        guard let pet = activePETQuantificationVolume else { return nil }
+        let z = min(max(sliceIndices[2], 0), pet.depth - 1)
+        let y = min(max(sliceIndices[1], 0), pet.height - 1)
+        let x = min(max(sliceIndices[0], 0), pet.width - 1)
+        return suvProbe(z: z, y: y, x: x, in: pet)
+    }
+
+    public func suvProbe(z: Int, y: Int, x: Int, in volume: ImageVolume? = nil) -> SUVProbe? {
+        let pet = volume ?? activePETQuantificationVolume
+        guard let pet else { return nil }
+        guard z >= 0, z < pet.depth, y >= 0, y < pet.height, x >= 0, x < pet.width else {
+            return nil
+        }
+        let raw = Double(pet.intensity(z: z, y: y, x: x))
+        return SUVProbe(
+            voxel: (z: z, y: y, x: x),
+            rawValue: raw,
+            suv: suvValue(rawStoredValue: raw)
+        )
+    }
+
+    public func activePETRegionStats(for labelMap: LabelMap,
+                                     classID: UInt16) -> RegionStats? {
+        guard let pet = activePETVolumeMatching(labelMap) else {
+            return nil
+        }
+        return RegionStats.compute(
+            pet,
+            labelMap,
+            classID: classID,
+            suvTransform: { [suvSettings] rawValue in
+                suvSettings.suv(forStoredValue: rawValue)
+            }
+        )
+    }
+
+    public func thresholdActiveLabel(atOrAbove threshold: Double) {
+        guard let map = labeling.activeLabelMap else {
+            statusMessage = "Create or select a label map before thresholding"
+            return
+        }
+        guard let source = activeSegmentationSource(matching: map) else {
+            statusMessage = "No current image or PET overlay matches the active label map grid"
+            return
+        }
+
+        labeling.thresholdValue = threshold
+        let transform: ((Double) -> Double)? = source.usesSUV ? suvTransform : nil
+        let count = PETSegmentation.thresholdAbove(
+            volume: source.volume,
+            label: map,
+            threshold: threshold,
+            classID: labeling.activeClassID,
+            valueTransform: transform
+        )
+        map.objectWillChange.send()
+
+        let unit = source.usesSUV ? "SUV" : "intensity"
+        statusMessage = "Segmented \(count) voxels at \(unit) >= \(String(format: "%.2f", threshold))"
+    }
+
+    public func percentOfMaxActiveLabelAroundSeed(seed: (z: Int, y: Int, x: Int),
+                                                  boxRadius: Int = 30,
+                                                  percent: Double) {
+        guard let map = labeling.activeLabelMap else {
+            statusMessage = "Create or select a label map before seed thresholding"
+            return
+        }
+        guard let source = activeSegmentationSource(matching: map) else {
+            statusMessage = "No current image or PET overlay matches the active label map grid"
+            return
+        }
+
+        labeling.percentOfMax = percent
+        let transform: ((Double) -> Double)? = source.usesSUV ? suvTransform : nil
+        let box = VoxelBox.around(seed, radius: boxRadius, in: source.volume)
+        let count = PETSegmentation.percentOfMax(
+            volume: source.volume,
+            label: map,
+            percent: percent,
+            classID: labeling.activeClassID,
+            boundingBox: box,
+            valueTransform: transform
+        )
+        map.objectWillChange.send()
+
+        let unit = source.usesSUV ? "SUVmax" : "intensity max"
+        statusMessage = "Segmented \(count) voxels at \(Int(percent * 100))% of \(unit)"
+    }
+
+    private var suvTransform: (Double) -> Double {
+        { [suvSettings] rawValue in
+            suvSettings.suv(forStoredValue: rawValue)
+        }
+    }
+
+    private func activePETVolumeMatching(_ labelMap: LabelMap) -> ImageVolume? {
+        if let fusion, sameGrid(fusion.displayedOverlay, labelMap) {
+            return fusion.displayedOverlay
+        }
+        if let currentVolume,
+           Modality.normalize(currentVolume.modality) == .PT,
+           sameGrid(currentVolume, labelMap) {
+            return currentVolume
+        }
+        return nil
+    }
+
+    private func activeSegmentationSource(matching labelMap: LabelMap) -> (volume: ImageVolume, usesSUV: Bool)? {
+        if let pet = activePETVolumeMatching(labelMap) {
+            return (pet, true)
+        }
+        if let currentVolume, sameGrid(currentVolume, labelMap) {
+            return (currentVolume, Modality.normalize(currentVolume.modality) == .PT)
+        }
+        return nil
+    }
+
+    private func sameGrid(_ volume: ImageVolume, _ labelMap: LabelMap) -> Bool {
+        volume.width == labelMap.width &&
+        volume.height == labelMap.height &&
+        volume.depth == labelMap.depth
     }
 
     // MARK: - Slice images

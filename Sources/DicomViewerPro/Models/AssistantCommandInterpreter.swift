@@ -15,6 +15,13 @@ public enum AssistantAction: Equatable {
     case removeOverlay
     case threshold(Double)
     case setPercentOfMax(Double)
+    case setSUVMode(SUVCalculationMode)
+    case setSUVActivityUnit(PETActivityUnit)
+    case setSUVManualScale(Double)
+    case setSUVPatientWeight(Double)
+    case setSUVPatientHeight(Double)
+    case setSUVInjectedDose(Double)
+    case setSUVResidualDose(Double)
 }
 
 public struct AssistantCommandInterpreter {
@@ -52,6 +59,7 @@ public struct AssistantCommandInterpreter {
 
         actions.append(contentsOf: toolActions(in: text))
         actions.append(contentsOf: sliceActions(in: text))
+        actions.append(contentsOf: suvActions(in: text))
         actions.append(contentsOf: segmentationActions(in: text))
 
         return actions.removingAdjacentDuplicates()
@@ -117,6 +125,49 @@ public struct AssistantCommandInterpreter {
             if let index = integer(after: name, in: text) {
                 actions.append(.setSlice(axis: axis, index: index))
             }
+        }
+
+        return actions
+    }
+
+    private func suvActions(in text: String) -> [AssistantAction] {
+        var actions: [AssistantAction] = []
+
+        if text.containsAny(["stored suv", "already suv"]) {
+            actions.append(.setSUVMode(.storedSUV))
+        } else if text.containsAny(["manual suv", "manual scale", "suv factor", "scale factor"]) {
+            actions.append(.setSUVMode(.manualScale))
+        } else if text.containsAny(["suvbsa", "suv bsa", "body surface area", "bsa"]) {
+            actions.append(.setSUVMode(.bodySurfaceArea))
+        } else if text.containsAny(["sul", "lean body mass", "lbm"]) {
+            actions.append(.setSUVMode(.leanBodyMass))
+        } else if text.containsAny(["suvbw", "suv bw", "body weight suv"]) {
+            actions.append(.setSUVMode(.bodyWeight))
+        }
+
+        if text.containsAny(["mbq/ml", "mbqml", "mbq per ml"]) {
+            actions.append(.setSUVActivityUnit(.mbqml))
+        } else if text.containsAny(["kbq/ml", "kbqml", "kbq per ml"]) {
+            actions.append(.setSUVActivityUnit(.kbqml))
+        } else if text.containsAny(["bq/ml", "bqml", "bq per ml"]) {
+            actions.append(.setSUVActivityUnit(.bqml))
+        }
+
+        if let factor = number(afterAny: ["suv factor", "manual factor", "scale factor"], in: text) {
+            actions.append(.setSUVMode(.manualScale))
+            actions.append(.setSUVManualScale(factor))
+        }
+        if let weight = number(afterAny: ["patient weight", "weight"], in: text) {
+            actions.append(.setSUVPatientWeight(weight))
+        }
+        if let height = number(afterAny: ["patient height", "height"], in: text) {
+            actions.append(.setSUVPatientHeight(height))
+        }
+        if let injected = number(afterAny: ["injected dose", "injection dose", "administered dose", "injected activity"], in: text) {
+            actions.append(.setSUVInjectedDose(injected))
+        }
+        if let residual = number(afterAny: ["residual dose", "residual activity"], in: text) {
+            actions.append(.setSUVResidualDose(residual))
         }
 
         return actions
@@ -225,6 +276,28 @@ public struct AssistantCommandInterpreter {
         let range = NSRange(text.startIndex..<text.endIndex, in: text)
         guard let match = regex.firstMatch(in: text, range: range),
               let numberRange = Range(match.range, in: text) else {
+            return nil
+        }
+        return Double(text[numberRange])
+    }
+
+    private func number(afterAny tokens: [String], in text: String) -> Double? {
+        for token in tokens {
+            if let value = number(after: token, in: text) {
+                return value
+            }
+        }
+        return nil
+    }
+
+    private func number(after token: String, in text: String) -> Double? {
+        let escaped = NSRegularExpression.escapedPattern(for: token)
+        let pattern = "\\b\(escaped)\\b\\s*(?:is|=|to|at|of)?\\s*([-+]?\\d*\\.?\\d+)"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, range: range),
+              match.numberOfRanges > 1,
+              let numberRange = Range(match.range(at: 1), in: text) else {
             return nil
         }
         return Double(text[numberRange])

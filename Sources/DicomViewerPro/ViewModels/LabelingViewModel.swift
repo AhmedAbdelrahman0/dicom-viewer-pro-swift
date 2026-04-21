@@ -134,11 +134,14 @@ public final class LabelingViewModel: ObservableObject {
     // MARK: - PET-specific segmentation
 
     /// Fixed threshold across the whole volume.
-    public func thresholdAll(volume: ImageVolume, above: Double) {
+    public func thresholdAll(volume: ImageVolume,
+                             above: Double,
+                             valueTransform: ((Double) -> Double)? = nil) {
         guard let map = activeLabelMap else { return }
         PETSegmentation.thresholdAbove(
             volume: volume, label: map,
-            threshold: above, classID: activeClassID
+            threshold: above, classID: activeClassID,
+            valueTransform: valueTransform
         )
         map.objectWillChange.send()
     }
@@ -147,12 +150,14 @@ public final class LabelingViewModel: ObservableObject {
     public func percentOfMaxAroundSeed(volume: ImageVolume,
                                        seed: (z: Int, y: Int, x: Int),
                                        boxRadius: Int = 30,
-                                       percent: Double) {
+                                       percent: Double,
+                                       valueTransform: ((Double) -> Double)? = nil) {
         guard let map = activeLabelMap else { return }
         let box = VoxelBox.around(seed, radius: boxRadius, in: volume)
         PETSegmentation.percentOfMax(
             volume: volume, label: map,
-            percent: percent, classID: activeClassID, boundingBox: box
+            percent: percent, classID: activeClassID, boundingBox: box,
+            valueTransform: valueTransform
         )
         map.objectWillChange.send()
     }

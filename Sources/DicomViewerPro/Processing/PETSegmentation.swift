@@ -14,7 +14,8 @@ public enum PETSegmentation {
                                        threshold: Double,
                                        classID: UInt16,
                                        mode: BrushTool.Mode = .paint,
-                                       boundingBox: VoxelBox? = nil) -> Int {
+                                       boundingBox: VoxelBox? = nil,
+                                       valueTransform: ((Double) -> Double)? = nil) -> Int {
         guard volume.depth == label.depth,
               volume.height == label.height,
               volume.width == label.width else { return 0 }
@@ -25,7 +26,8 @@ public enum PETSegmentation {
             for y in bb.minY...bb.maxY {
                 let rowStart = z * label.height * label.width + y * label.width
                 for x in bb.minX...bb.maxX {
-                    let p = Double(volume.pixels[rowStart + x])
+                    let raw = Double(volume.pixels[rowStart + x])
+                    let p = valueTransform?(raw) ?? raw
                     if p >= threshold {
                         let idx = rowStart + x
                         switch mode {
@@ -53,12 +55,14 @@ public enum PETSegmentation {
                                      label: LabelMap,
                                      percent: Double,
                                      classID: UInt16,
-                                     boundingBox: VoxelBox) -> Int {
-        let suvMax = regionMax(volume: volume, box: boundingBox)
+                                     boundingBox: VoxelBox,
+                                     valueTransform: ((Double) -> Double)? = nil) -> Int {
+        let suvMax = regionMax(volume: volume, box: boundingBox, valueTransform: valueTransform)
         let thresh = suvMax * percent
         return thresholdAbove(volume: volume, label: label,
                               threshold: thresh, classID: classID,
-                              boundingBox: boundingBox)
+                              boundingBox: boundingBox,
+                              valueTransform: valueTransform)
     }
 
     // MARK: - Seeded region growing
@@ -128,7 +132,8 @@ public enum PETSegmentation {
                                                  seed: (z: Int, y: Int, x: Int),
                                                  threshold: Double,
                                                  classID: UInt16,
-                                                 maxVoxels: Int = 10_000_000) -> Int {
+                                                 maxVoxels: Int = 10_000_000,
+                                                 valueTransform: ((Double) -> Double)? = nil) -> Int {
         var queue: [(Int, Int, Int)] = [seed]
         var visited = [Bool](repeating: false, count: volume.pixels.count)
         let seedIdx = label.index(z: seed.z, y: seed.y, x: seed.x)
@@ -138,7 +143,8 @@ public enum PETSegmentation {
         while !queue.isEmpty && count < maxVoxels {
             let (z, y, x) = queue.removeLast()
             let idx = label.index(z: z, y: y, x: x)
-            if Double(volume.pixels[idx]) < threshold { continue }
+            let raw = Double(volume.pixels[idx])
+            if (valueTransform?(raw) ?? raw) < threshold { continue }
             label.voxels[idx] = classID
             count += 1
 
@@ -220,13 +226,16 @@ public enum PETSegmentation {
 
     // MARK: - Helpers
 
-    public static func regionMax(volume: ImageVolume, box: VoxelBox) -> Double {
+    public static func regionMax(volume: ImageVolume,
+                                 box: VoxelBox,
+                                 valueTransform: ((Double) -> Double)? = nil) -> Double {
         var m = -Double.infinity
         for z in box.minZ...box.maxZ {
             for y in box.minY...box.maxY {
                 let rowStart = z * volume.height * volume.width + y * volume.width
                 for x in box.minX...box.maxX {
-                    let v = Double(volume.pixels[rowStart + x])
+                    let raw = Double(volume.pixels[rowStart + x])
+                    let v = valueTransform?(raw) ?? raw
                     if v > m { m = v }
                 }
             }

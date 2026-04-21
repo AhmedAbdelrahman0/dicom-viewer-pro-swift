@@ -146,6 +146,126 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertTrue(actions.contains(.threshold(2.5)))
     }
 
+    func testAssistantCommandInterpreterExtractsSUVCalculationActions() {
+        let actions = AssistantCommandInterpreter().actions(
+            for: "Use SUVbw from kBq/mL, patient weight 70 kg, injected dose 350 MBq"
+        )
+
+        XCTAssertTrue(actions.contains(.setSUVMode(.bodyWeight)))
+        XCTAssertTrue(actions.contains(.setSUVActivityUnit(.kbqml)))
+        XCTAssertTrue(actions.contains(.setSUVPatientWeight(70)))
+        XCTAssertTrue(actions.contains(.setSUVInjectedDose(350)))
+    }
+
+    @MainActor
+    func testAssistantCanUpdateSUVCalculationSettings() {
+        let vm = ViewerViewModel()
+        let report = vm.performAssistantCommand(
+            "Use SUVbw from kBq/mL, patient weight 70 kg, injected dose 350 MBq"
+        )
+
+        XCTAssertTrue(report.didApplyActions)
+        XCTAssertEqual(vm.suvSettings.mode, .bodyWeight)
+        XCTAssertEqual(vm.suvSettings.activityUnit, .kbqml)
+        XCTAssertEqual(vm.suvSettings.patientWeightKg, 70, accuracy: 1e-9)
+        XCTAssertEqual(vm.suvSettings.injectedDoseMBq, 350, accuracy: 1e-9)
+        XCTAssertEqual(vm.suvValue(rawStoredValue: 5), 1.0, accuracy: 1e-9)
+    }
+
+    func testSUVCalculationModesSupportClinicalInputs() {
+        var settings = SUVCalculationSettings()
+        XCTAssertEqual(settings.suv(forStoredValue: 4.2), 4.2, accuracy: 1e-9)
+
+        settings.mode = .manualScale
+        settings.manualScaleFactor = 0.01
+        XCTAssertEqual(settings.suv(forStoredValue: 420), 4.2, accuracy: 1e-9)
+
+        settings.mode = .bodyWeight
+        settings.activityUnit = .kbqml
+        settings.patientWeightKg = 70
+        settings.injectedDoseMBq = 350
+        settings.residualDoseMBq = 0
+        XCTAssertEqual(settings.suv(forStoredValue: 5), 1.0, accuracy: 1e-9)
+    }
+
+    func testRegionStatsUseSUVTransformForLabelMap() {
+        let volume = ImageVolume(
+            pixels: [1, 2, 4, 8],
+            depth: 1,
+            height: 2,
+            width: 2,
+            spacing: (1, 1, 10),
+            modality: "PT"
+        )
+        let map = LabelMap(parentSeriesUID: volume.seriesUID, depth: 1, height: 2, width: 2)
+        map.setValue(1, z: 0, y: 0, x: 1)
+        map.setValue(1, z: 0, y: 1, x: 1)
+
+        let stats = RegionStats.compute(volume, map, classID: 1) { raw in
+            raw * 2
+        }
+
+        XCTAssertEqual(stats.count, 2)
+        XCTAssertEqual(stats.mean, 5, accuracy: 1e-9)
+        XCTAssertEqual(stats.max, 8, accuracy: 1e-9)
+        XCTAssertEqual(stats.suvMax ?? 0, 16, accuracy: 1e-9)
+        XCTAssertEqual(stats.suvMean ?? 0, 10, accuracy: 1e-9)
+        XCTAssertEqual(stats.tlg ?? 0, 0.2, accuracy: 1e-9)
+    }
+
+    func testPETSegmentationThresholdUsesSUVTransform() {
+        let volume = ImageVolume(
+            pixels: [1, 2, 3, 4],
+            depth: 1,
+            height: 2,
+            width: 2,
+            modality: "PT"
+        )
+        let map = LabelMap(parentSeriesUID: volume.seriesUID, depth: 1, height: 2, width: 2)
+
+        let count = PETSegmentation.thresholdAbove(
+            volume: volume,
+            label: map,
+            threshold: 5,
+            classID: 1,
+            valueTransform: { $0 * 2 }
+        )
+
+        XCTAssertEqual(count, 2)
+        XCTAssertEqual(map.voxelCounts()[1], 2)
+    }
+
+    @MainActor
+    func testSUVThresholdUsesPETOverlayForCTLabelMap() {
+        let ct = ImageVolume(
+            pixels: [0, 0, 0, 0],
+            depth: 1,
+            height: 2,
+            width: 2,
+            modality: "CT"
+        )
+        let pet = ImageVolume(
+            pixels: [1, 2, 3, 4],
+            depth: 1,
+            height: 2,
+            width: 2,
+            modality: "PT"
+        )
+        let vm = ViewerViewModel()
+        vm.currentVolume = ct
+        let pair = FusionPair(base: ct, overlay: pet)
+        pair.resampledOverlay = pet
+        vm.fusion = pair
+        vm.suvSettings.mode = .manualScale
+        vm.suvSettings.manualScaleFactor = 2
+        let map = vm.labeling.createLabelMap(for: ct)
+
+        vm.thresholdActiveLabel(atOrAbove: 5)
+
+        XCTAssertEqual(map.voxelCounts()[1], 2)
+        XCTAssertTrue(vm.statusMessage.contains("SUV"))
+    }
+
     #if canImport(MetalKit)
     func testMetalVolumeRendererBuildsPipelineWhenMetalIsAvailable() throws {
         guard MTLCreateSystemDefaultDevice() != nil else {

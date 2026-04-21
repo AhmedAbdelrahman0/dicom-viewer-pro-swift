@@ -356,8 +356,7 @@ public struct SliceView: View {
                     axis: axis, sliceIndex: vm.sliceIndices[axis],
                     pixelX: p.0, pixelY: p.1
                 )
-                vm.labeling.percentOfMaxAroundSeed(
-                    volume: volume,
+                vm.percentOfMaxActiveLabelAroundSeed(
                     seed: (z: z, y: y, x: x),
                     boxRadius: 30,
                     percent: vm.labeling.percentOfMax

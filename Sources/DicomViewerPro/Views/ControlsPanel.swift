@@ -256,6 +256,10 @@ private struct FusionTab: View {
                     }
                 }
 
+                Divider()
+
+                suvQuantificationPanel
+
                 Button(role: .destructive) {
                     vm.removeOverlay()
                 } label: {
@@ -269,6 +273,10 @@ private struct FusionTab: View {
                 Text("Load a CT and PET series, then use Auto or choose volumes above. PET is resampled into the CT grid using DICOM/NIfTI world geometry.")
                     .font(.caption)
                     .foregroundColor(.secondary)
+                if vm.activePETQuantificationVolume != nil {
+                    Divider()
+                    suvQuantificationPanel
+                }
             }
 
             Spacer()
@@ -345,6 +353,99 @@ private struct FusionTab: View {
             ? Modality.normalize(volume.modality).displayName
             : volume.seriesDescription
         return "\(name) · \(volume.width)x\(volume.height)x\(volume.depth)"
+    }
+
+    private var suvQuantificationPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("SUV Quantification")
+                .font(.subheadline)
+
+            Picker("Mode", selection: $vm.suvSettings.mode) {
+                ForEach(SUVCalculationMode.allCases) { mode in
+                    Text(mode.displayName).tag(mode)
+                }
+            }
+
+            if vm.suvSettings.mode != .storedSUV,
+               vm.suvSettings.mode != .manualScale {
+                Picker("Input", selection: $vm.suvSettings.activityUnit) {
+                    ForEach(PETActivityUnit.allCases) { unit in
+                        Text(unit.displayName).tag(unit)
+                    }
+                }
+            }
+
+            switch vm.suvSettings.mode {
+            case .storedSUV:
+                Text("Stored PET values are treated as SUV.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+            case .manualScale:
+                NumberFieldRow("Factor", value: $vm.suvSettings.manualScaleFactor)
+
+            case .bodyWeight:
+                NumberFieldRow("Weight kg", value: $vm.suvSettings.patientWeightKg)
+                NumberFieldRow("Injected MBq", value: $vm.suvSettings.injectedDoseMBq)
+                NumberFieldRow("Residual MBq", value: $vm.suvSettings.residualDoseMBq)
+                if vm.suvSettings.activityUnit == .custom {
+                    NumberFieldRow("Bq/mL per unit", value: $vm.suvSettings.customBqPerMLPerStoredUnit)
+                }
+
+            case .leanBodyMass:
+                Picker("Sex", selection: $vm.suvSettings.sex) {
+                    ForEach(BiologicalSexForSUV.allCases) { sex in
+                        Text(sex.displayName).tag(sex)
+                    }
+                }
+                NumberFieldRow("Weight kg", value: $vm.suvSettings.patientWeightKg)
+                NumberFieldRow("Height cm", value: $vm.suvSettings.patientHeightCm)
+                NumberFieldRow("Injected MBq", value: $vm.suvSettings.injectedDoseMBq)
+                NumberFieldRow("Residual MBq", value: $vm.suvSettings.residualDoseMBq)
+                ControlStatRow("LBM", String(format: "%.1f kg", vm.suvSettings.leanBodyMassKg))
+                if vm.suvSettings.activityUnit == .custom {
+                    NumberFieldRow("Bq/mL per unit", value: $vm.suvSettings.customBqPerMLPerStoredUnit)
+                }
+
+            case .bodySurfaceArea:
+                NumberFieldRow("Weight kg", value: $vm.suvSettings.patientWeightKg)
+                NumberFieldRow("Height cm", value: $vm.suvSettings.patientHeightCm)
+                NumberFieldRow("Injected MBq", value: $vm.suvSettings.injectedDoseMBq)
+                NumberFieldRow("Residual MBq", value: $vm.suvSettings.residualDoseMBq)
+                ControlStatRow("BSA", String(format: "%.2f m²", vm.suvSettings.bodySurfaceAreaM2))
+                if vm.suvSettings.activityUnit == .custom {
+                    NumberFieldRow("Bq/mL per unit", value: $vm.suvSettings.customBqPerMLPerStoredUnit)
+                }
+            }
+
+            Text(vm.suvSettings.scaleDescription)
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            if let probe = vm.activePETProbe() {
+                ControlStatRow("Voxel", "\(probe.voxel.x), \(probe.voxel.y), \(probe.voxel.z)")
+                ControlStatRow("Stored", String(format: "%.3f", probe.rawValue))
+                ControlStatRow(vm.suvSettings.mode.displayName, String(format: "%.3f", probe.suv))
+            }
+
+            if let map = vm.labeling.activeLabelMap,
+               let cls = map.classInfo(id: vm.labeling.activeClassID),
+               let stats = vm.activePETRegionStats(for: map, classID: cls.labelID),
+               stats.count > 0 {
+                Divider()
+                Text("Active Label: \(cls.name)")
+                    .font(.system(size: 11, weight: .semibold))
+                if let suvMax = stats.suvMax {
+                    ControlStatRow("SUVmax", String(format: "%.3f", suvMax))
+                }
+                if let suvMean = stats.suvMean {
+                    ControlStatRow("SUVmean", String(format: "%.3f", suvMean))
+                }
+                if let tlg = stats.tlg {
+                    ControlStatRow("TLG", String(format: "%.1f", tlg))
+                }
+            }
+        }
     }
 }
 
@@ -439,6 +540,59 @@ private struct InfoRow: View {
             Text(value.isEmpty ? "—" : value)
                 .font(.system(size: 12))
                 .textSelection(.enabled)
+        }
+    }
+}
+
+private struct NumberFieldRow: View {
+    let label: String
+    @Binding var value: Double
+
+    init(_ label: String, value: Binding<Double>) {
+        self.label = label
+        self._value = value
+    }
+
+    var body: some View {
+        HStack {
+            Text(label)
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+            Spacer()
+            TextField("", value: $value, formatter: Self.formatter)
+                .font(.system(size: 11, design: .monospaced))
+                .multilineTextAlignment(.trailing)
+                .frame(width: 86)
+                .textFieldStyle(.roundedBorder)
+        }
+    }
+
+    private static let formatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.maximumFractionDigits = 6
+        formatter.minimumFractionDigits = 0
+        return formatter
+    }()
+}
+
+private struct ControlStatRow: View {
+    let label: String
+    let value: String
+
+    init(_ label: String, _ value: String) {
+        self.label = label
+        self.value = value
+    }
+
+    var body: some View {
+        HStack {
+            Text(label)
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+            Spacer()
+            Text(value)
+                .font(.system(size: 11, design: .monospaced))
         }
     }
 }

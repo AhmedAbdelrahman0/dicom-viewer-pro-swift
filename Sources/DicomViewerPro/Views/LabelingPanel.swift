@@ -193,10 +193,7 @@ struct LabelingPanel: View {
 
                             HStack {
                                 Button("Apply (whole volume)") {
-                                    if let v = vm.currentVolume {
-                                        vm.labeling.thresholdAll(volume: v,
-                                                                  above: vm.labeling.thresholdValue)
-                                    }
+                                    vm.thresholdActiveLabel(atOrAbove: vm.labeling.thresholdValue)
                                 }
                                 .buttonStyle(.borderedProminent)
                                 .controlSize(.small)
@@ -298,9 +295,18 @@ struct LabelingPanel: View {
                    let v = vm.currentVolume,
                    let cls = map.classInfo(id: vm.labeling.activeClassID) {
                     Group {
-                        Text("Statistics: \(cls.name)")
+                        let petStats = vm.activePETRegionStats(for: map, classID: cls.labelID)
+                        let currentSUVTransform: ((Double) -> Double)? = Modality.normalize(v.modality) == .PT
+                            ? { raw in vm.suvValue(rawStoredValue: raw) }
+                            : nil
+                        let stats = petStats ?? RegionStats.compute(
+                            v,
+                            map,
+                            classID: cls.labelID,
+                            suvTransform: currentSUVTransform
+                        )
+                        Text(petStats == nil ? "Statistics: \(cls.name)" : "PET Statistics: \(cls.name)")
                             .font(.headline)
-                        let stats = RegionStats.compute(v, map, classID: cls.labelID)
                         if stats.count == 0 {
                             Text("No voxels in this class")
                                 .font(.caption).foregroundColor(.secondary)
