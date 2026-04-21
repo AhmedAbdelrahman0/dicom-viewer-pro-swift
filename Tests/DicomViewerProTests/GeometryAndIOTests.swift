@@ -91,6 +91,35 @@ final class GeometryAndIOTests: XCTestCase {
             XCTAssertEqual(uid, "1.2.840.10008.1.2.4.50")
         }
     }
+
+    func testPACSIndexBuilderCreatesDICOMSearchableSnapshot() {
+        let dcm = DICOMFile()
+        dcm.filePath = "/tmp/series/image001.dcm"
+        let series = DICOMSeries(
+            uid: "1.2.3",
+            modality: "CT",
+            description: "Chest CT",
+            patientID: "MRN123",
+            patientName: "Test Patient",
+            studyUID: "9.8.7",
+            studyDescription: "Trauma",
+            studyDate: "20260421",
+            files: [dcm]
+        )
+
+        let record = PACSIndexBuilder.record(
+            for: series,
+            sourcePath: "/tmp/series",
+            indexedAt: Date(timeIntervalSince1970: 0)
+        )
+        let snapshot = record.snapshot
+
+        XCTAssertEqual(record.id, "dicom:1.2.3")
+        XCTAssertEqual(record.kind, .dicom)
+        XCTAssertTrue(record.searchableText.contains("Chest CT"))
+        XCTAssertEqual(snapshot.filePaths, ["/tmp/series/image001.dcm"])
+        XCTAssertEqual(snapshot.displayName, "CT - Chest CT")
+    }
 }
 
 private extension Data {

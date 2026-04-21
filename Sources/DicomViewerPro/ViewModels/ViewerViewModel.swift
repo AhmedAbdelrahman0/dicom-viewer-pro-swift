@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import Combine
+import SwiftData
 
 public enum ViewerTool: String, CaseIterable, Identifiable {
     case wl, pan, zoom, distance, angle, area
@@ -184,6 +185,44 @@ public final class ViewerViewModel: ObservableObject {
         }
     }
 
+    public func indexDirectory(url: URL, modelContext: ModelContext) async {
+        isLoading = true
+        statusMessage = "Indexing \(url.lastPathComponent)..."
+        defer { isLoading = false }
+
+        let scanResult = await Task.detached(priority: .userInitiated) {
+            let dicomSeries = DICOMLoader.scanDirectory(url)
+            let niftiURLs = findNIfTIFiles(in: url)
+            return (dicomSeries, niftiURLs)
+        }.value
+
+        let records = scanResult.0.map {
+            PACSIndexBuilder.record(for: $0, sourcePath: url.path)
+        } + scanResult.1.map {
+            PACSIndexBuilder.recordForNIfTI(url: $0)
+        }
+
+        do {
+            for record in records {
+                try upsertIndexedSeries(record, in: modelContext)
+            }
+            try modelContext.save()
+            statusMessage = "Indexed \(records.count) series in Mini-PACS"
+        } catch {
+            statusMessage = "Index error: \(error.localizedDescription)"
+        }
+    }
+
+    public func openIndexedSeries(_ entry: PACSIndexedSeriesSnapshot) async {
+        switch entry.kind {
+        case .dicom:
+            await openIndexedDICOMSeries(entry)
+        case .nifti:
+            let path = entry.filePaths.first ?? entry.sourcePath
+            await loadNIfTI(url: URL(fileURLWithPath: path))
+        }
+    }
+
     public func loadOverlay(url: URL) async {
         isLoading = true
         statusMessage = "Loading overlay..."
@@ -217,6 +256,53 @@ public final class ViewerViewModel: ObservableObject {
             statusMessage = "Fusion loaded: \(pair.fusionTypeLabel)"
         } catch {
             statusMessage = "Error: \(error.localizedDescription)"
+        }
+    }
+
+    private func openIndexedDICOMSeries(_ entry: PACSIndexedSeriesSnapshot) async {
+        isLoading = true
+        statusMessage = "Loading \(entry.displayName)..."
+        defer { isLoading = false }
+
+        do {
+            let series = try await Task.detached(priority: .userInitiated) {
+                let files = try entry.filePaths.map {
+                    try DICOMLoader.parseHeader(at: URL(fileURLWithPath: $0))
+                }
+                guard !files.isEmpty else {
+                    throw DICOMError.invalidFile("Indexed series has no files")
+                }
+                return DICOMSeries(
+                    uid: entry.seriesUID,
+                    modality: entry.modality,
+                    description: entry.seriesDescription,
+                    patientID: entry.patientID,
+                    patientName: entry.patientName,
+                    studyUID: entry.studyUID,
+                    studyDescription: entry.studyDescription,
+                    studyDate: entry.studyDate,
+                    files: files
+                )
+            }.value
+
+            await openSeries(series)
+        } catch {
+            statusMessage = "Mini-PACS load error: \(error.localizedDescription)"
+        }
+    }
+
+    private func upsertIndexedSeries(_ record: PACSIndexedSeries,
+                                     in modelContext: ModelContext) throws {
+        let id = record.id
+        var descriptor = FetchDescriptor<PACSIndexedSeries>(
+            predicate: #Predicate { $0.id == id }
+        )
+        descriptor.fetchLimit = 1
+
+        if let existing = try modelContext.fetch(descriptor).first {
+            existing.update(from: record)
+        } else {
+            modelContext.insert(record)
         }
     }
 
@@ -341,4 +427,23 @@ public final class ViewerViewModel: ObservableObject {
             baseAlpha: pair.opacity
         )
     }
+}
+
+private func findNIfTIFiles(in url: URL) -> [URL] {
+    let fm = FileManager.default
+    guard let enumerator = fm.enumerator(
+        at: url,
+        includingPropertiesForKeys: [.isRegularFileKey],
+        options: [.skipsHiddenFiles]
+    ) else {
+        return []
+    }
+
+    var files: [URL] = []
+    for case let fileURL as URL in enumerator {
+        let isFile = (try? fileURL.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) ?? false
+        guard isFile, NIfTILoader.isVolumeFile(fileURL) else { continue }
+        files.append(fileURL)
+    }
+    return files.sorted { $0.path < $1.path }
 }

@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 
 public struct DicomViewerApp: App {
     public init() {}
@@ -9,6 +10,7 @@ public struct DicomViewerApp: App {
                 .frame(minWidth: 900, minHeight: 600)
                 .preferredColorScheme(.dark)
         }
+        .modelContainer(for: PACSIndexedSeries.self)
         #if os(macOS)
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)

@@ -1,23 +1,34 @@
 import SwiftUI
+import SwiftData
 import UniformTypeIdentifiers
 #if os(macOS)
 import AppKit
 #endif
 
 public struct ContentView: View {
+    @Environment(\.modelContext) private var modelContext
     @StateObject private var vm = ViewerViewModel()
     @State private var showingFileImporter = false
     @State private var showingDirectoryPicker = false
     @State private var fileImporterMode: FileImporterMode = .volume
+    @State private var directoryImporterMode: DirectoryImporterMode = .open
 
     enum FileImporterMode { case volume, overlay }
+    enum DirectoryImporterMode { case open, index }
 
     public init() {}
 
     public var body: some View {
         NavigationSplitView {
             StudyBrowserView(vm: vm,
-                             onImportFolder: { showingDirectoryPicker = true },
+                             onImportFolder: {
+                                 directoryImporterMode = .open
+                                 showingDirectoryPicker = true
+                             },
+                             onIndexFolder: {
+                                 directoryImporterMode = .index
+                                 showingDirectoryPicker = true
+                             },
                              onImportVolume: {
                                  fileImporterMode = .volume
                                  showingFileImporter = true
@@ -62,6 +73,7 @@ public struct ContentView: View {
             handleDirectoryImport(result: result)
         }
         .onReceive(NotificationCenter.default.publisher(for: .openDICOMDirectory)) { _ in
+            directoryImporterMode = .open
             showingDirectoryPicker = true
         }
         .onReceive(NotificationCenter.default.publisher(for: .openNIfTIFile)) { _ in
@@ -168,6 +180,11 @@ public struct ContentView: View {
         defer { if accessing { url.stopAccessingSecurityScopedResource() } }
 
         Task {
+            if directoryImporterMode == .index {
+                await vm.indexDirectory(url: url, modelContext: modelContext)
+                return
+            }
+
             // Inspect contents: if NIfTI files present, scan as volumes;
             // otherwise as DICOM directory.
             let fm = FileManager.default
