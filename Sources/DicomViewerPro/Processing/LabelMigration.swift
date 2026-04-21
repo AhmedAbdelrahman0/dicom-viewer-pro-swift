@@ -20,36 +20,16 @@ public enum LabelMigration {
                            name: "\(source.name) (migrated)",
                            classes: source.classes)
 
-        // Build the combined transform: target_voxel -> target_world -> source_world -> source_voxel
-        let srcSpacing = SIMD3<Double>(sourceVolume.spacing.x,
-                                       sourceVolume.spacing.y,
-                                       sourceVolume.spacing.z)
-        let srcOrigin = SIMD3<Double>(sourceVolume.origin.x,
-                                      sourceVolume.origin.y,
-                                      sourceVolume.origin.z)
-        let tgtSpacing = SIMD3<Double>(targetVolume.spacing.x,
-                                       targetVolume.spacing.y,
-                                       targetVolume.spacing.z)
-        let tgtOrigin = SIMD3<Double>(targetVolume.origin.x,
-                                      targetVolume.origin.y,
-                                      targetVolume.origin.z)
-
         for z in 0..<targetVolume.depth {
             for y in 0..<targetVolume.height {
                 let rowStart = z * targetVolume.height * targetVolume.width + y * targetVolume.width
                 for x in 0..<targetVolume.width {
-                    // Target voxel -> target world
-                    let tgtWorld = SIMD3<Double>(
-                        tgtOrigin.x + Double(x) * tgtSpacing.x,
-                        tgtOrigin.y + Double(y) * tgtSpacing.y,
-                        tgtOrigin.z + Double(z) * tgtSpacing.z
-                    )
-                    // Apply transform (target -> source)
+                    let tgtWorld = targetVolume.worldPoint(z: z, y: y, x: x)
                     let srcWorld = transform.apply(to: tgtWorld)
-                    // Source world -> source voxel
-                    let sx = Int(round((srcWorld.x - srcOrigin.x) / srcSpacing.x))
-                    let sy = Int(round((srcWorld.y - srcOrigin.y) / srcSpacing.y))
-                    let sz = Int(round((srcWorld.z - srcOrigin.z) / srcSpacing.z))
+                    let srcVoxel = sourceVolume.voxelCoordinates(from: srcWorld)
+                    let sx = Int(round(srcVoxel.x))
+                    let sy = Int(round(srcVoxel.y))
+                    let sz = Int(round(srcVoxel.z))
 
                     if sz >= 0 && sz < source.depth
                         && sy >= 0 && sy < source.height
@@ -84,26 +64,15 @@ public enum VolumeResampler {
                                  transform: Transform3D = .identity) -> ImageVolume {
         var out = [Float](repeating: 0, count: target.depth * target.height * target.width)
 
-        let srcSpacing = SIMD3<Double>(source.spacing.x, source.spacing.y, source.spacing.z)
-        let srcOrigin = SIMD3<Double>(source.origin.x, source.origin.y, source.origin.z)
-        let tgtSpacing = SIMD3<Double>(target.spacing.x, target.spacing.y, target.spacing.z)
-        let tgtOrigin = SIMD3<Double>(target.origin.x, target.origin.y, target.origin.z)
-
         for z in 0..<target.depth {
             for y in 0..<target.height {
                 let rowStart = z * target.height * target.width + y * target.width
                 for x in 0..<target.width {
-                    let tgtWorld = SIMD3<Double>(
-                        tgtOrigin.x + Double(x) * tgtSpacing.x,
-                        tgtOrigin.y + Double(y) * tgtSpacing.y,
-                        tgtOrigin.z + Double(z) * tgtSpacing.z
-                    )
+                    let tgtWorld = target.worldPoint(z: z, y: y, x: x)
                     let srcWorld = transform.apply(to: tgtWorld)
-                    let fx = (srcWorld.x - srcOrigin.x) / srcSpacing.x
-                    let fy = (srcWorld.y - srcOrigin.y) / srcSpacing.y
-                    let fz = (srcWorld.z - srcOrigin.z) / srcSpacing.z
+                    let srcVoxel = source.voxelCoordinates(from: srcWorld)
 
-                    if let v = trilinear(source, x: fx, y: fy, z: fz) {
+                    if let v = trilinear(source, x: srcVoxel.x, y: srcVoxel.y, z: srcVoxel.z) {
                         out[rowStart + x] = v
                     }
                 }
@@ -117,6 +86,7 @@ public enum VolumeResampler {
             width: target.width,
             spacing: target.spacing,
             origin: target.origin,
+            direction: target.direction,
             modality: source.modality,
             seriesUID: source.seriesUID + "_resampled",
             studyUID: source.studyUID,

@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import Compression
+import simd
 
 /// Read and write segmentation/annotation files in the major medical imaging
 /// formats:
@@ -55,6 +56,7 @@ public enum LabelIO {
         let hdr = buildNIfTIHeader(
             width: label.width, height: label.height, depth: label.depth,
             spacing: parentVolume.spacing, origin: parentVolume.origin,
+            direction: parentVolume.direction,
             datatype: 512  // UINT16
         )
 
@@ -354,6 +356,7 @@ public enum LabelIO {
     private static func buildNIfTIHeader(width: Int, height: Int, depth: Int,
                                           spacing: (Double, Double, Double),
                                           origin: (Double, Double, Double),
+                                          direction: simd_double3x3,
                                           datatype: Int16) -> Data {
         var hdr = Data(count: 352)
 
@@ -382,15 +385,32 @@ public enum LabelIO {
         hdr.writeFloat32(1.0, at: 112)              // scl_slope
         hdr.writeFloat32(0.0, at: 116)              // scl_inter
 
-        // sform: identity + translation from origin (LPS)
+        // NIfTI stores scanner coordinates as RAS. App geometry is LPS, so X/Y
+        // axes and origin are negated when writing the affine.
+        let xAxisLPS = direction[0] * spacing.0
+        let yAxisLPS = direction[1] * spacing.1
+        let zAxisLPS = direction[2] * spacing.2
+        let originLPS = SIMD3<Double>(origin.0, origin.1, origin.2)
+        let xAxisRAS = lpsVectorToRAS(xAxisLPS)
+        let yAxisRAS = lpsVectorToRAS(yAxisLPS)
+        let zAxisRAS = lpsVectorToRAS(zAxisLPS)
+        let originRAS = lpsVectorToRAS(originLPS)
+
+        // sform: full voxel-to-world affine.
         hdr.writeInt16(0, at: 252)                  // qform_code
         hdr.writeInt16(2, at: 254)                  // sform_code = 2 (aligned)
-        hdr.writeFloat32(Float(spacing.0), at: 280) // srow_x[0]
-        hdr.writeFloat32(Float(origin.0), at: 292)  // srow_x[3]
-        hdr.writeFloat32(Float(spacing.1), at: 300) // srow_y[1]
-        hdr.writeFloat32(Float(origin.1), at: 312)  // srow_y[3]
-        hdr.writeFloat32(Float(spacing.2), at: 324) // srow_z[2]
-        hdr.writeFloat32(Float(origin.2), at: 336)  // srow_z[3]
+        hdr.writeFloat32(Float(xAxisRAS.x), at: 280)
+        hdr.writeFloat32(Float(yAxisRAS.x), at: 284)
+        hdr.writeFloat32(Float(zAxisRAS.x), at: 288)
+        hdr.writeFloat32(Float(originRAS.x), at: 292)
+        hdr.writeFloat32(Float(xAxisRAS.y), at: 296)
+        hdr.writeFloat32(Float(yAxisRAS.y), at: 300)
+        hdr.writeFloat32(Float(zAxisRAS.y), at: 304)
+        hdr.writeFloat32(Float(originRAS.y), at: 308)
+        hdr.writeFloat32(Float(xAxisRAS.z), at: 312)
+        hdr.writeFloat32(Float(yAxisRAS.z), at: 316)
+        hdr.writeFloat32(Float(zAxisRAS.z), at: 320)
+        hdr.writeFloat32(Float(originRAS.z), at: 324)
 
         // Magic "n+1\0"
         hdr[344] = 0x6E  // n
@@ -416,6 +436,10 @@ public enum LabelIO {
         if n.contains("muscle") { return .muscle }
         if n.contains("fdg") || n.contains("suv") || n.contains("uptake") { return .petHotspot }
         return .organ
+    }
+
+    private static func lpsVectorToRAS(_ v: SIMD3<Double>) -> SIMD3<Double> {
+        SIMD3<Double>(-v.x, -v.y, v.z)
     }
 }
 

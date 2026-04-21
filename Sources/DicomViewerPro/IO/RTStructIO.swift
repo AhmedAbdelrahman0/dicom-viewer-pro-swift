@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import simd
 
 /// DICOM RTSTRUCT (RT Structure Set) read/write support.
 ///
@@ -67,17 +68,12 @@ public enum RTStructIO {
                                           classID: UInt16) {
         guard contour.count >= 3 else { return }
 
-        // All points of a contour should lie on a single axial slice (constant Z in LPS).
-        let meanZ = contour.reduce(0.0) { $0 + $1.z } / Double(contour.count)
-        let sliceIdx = Int(round((meanZ - volume.origin.z) / volume.spacing.z))
+        let voxelPoints = contour.map { volume.voxelCoordinates(from: $0) }
+        let meanZ = voxelPoints.reduce(0.0) { $0 + $1.z } / Double(voxelPoints.count)
+        let sliceIdx = Int(round(meanZ))
         guard sliceIdx >= 0, sliceIdx < volume.depth else { return }
 
-        // Convert world points to voxel (x, y) on this slice
-        let points2D: [(Double, Double)] = contour.map { p in
-            let x = (p.x - volume.origin.x) / volume.spacing.x
-            let y = (p.y - volume.origin.y) / volume.spacing.y
-            return (x, y)
-        }
+        let points2D: [(Double, Double)] = voxelPoints.map { ($0.x, $0.y) }
 
         // Compute 2D bounding box
         let minX = max(0, Int(floor(points2D.map(\.0).min() ?? 0)))

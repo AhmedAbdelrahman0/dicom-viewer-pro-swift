@@ -21,6 +21,26 @@ struct RegistrationPanel: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
 
+                Picker("Next point", selection: $vm.labeling.landmarkCaptureTarget) {
+                    ForEach(LandmarkCaptureTarget.allCases) { target in
+                        Text(target.displayName).tag(target)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                if vm.labeling.pendingFixedLandmark != nil || vm.labeling.pendingMovingLandmark != nil {
+                    HStack {
+                        Label("One point pending", systemImage: "mappin")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Button("Cancel") {
+                            vm.labeling.cancelPendingLandmark()
+                        }
+                        .controlSize(.small)
+                    }
+                }
+
                 HStack {
                     Text("Landmarks: \(vm.labeling.landmarks.count)")
                     Spacer()

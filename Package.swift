@@ -23,5 +23,10 @@ let package = Package(
             dependencies: ["DicomViewerPro"],
             path: "Sources/DicomViewerProApp"
         ),
+        .testTarget(
+            name: "DicomViewerProTests",
+            dependencies: ["DicomViewerPro"],
+            path: "Tests/DicomViewerProTests"
+        ),
     ]
 )

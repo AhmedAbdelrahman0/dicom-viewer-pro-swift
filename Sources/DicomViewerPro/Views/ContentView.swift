@@ -61,6 +61,13 @@ public struct ContentView: View {
         ) { result in
             handleDirectoryImport(result: result)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .openDICOMDirectory)) { _ in
+            showingDirectoryPicker = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .openNIfTIFile)) { _ in
+            fileImporterMode = .volume
+            showingFileImporter = true
+        }
         .tooltipHost()  // must wrap the whole window so tooltips escape any clipping
     }
 

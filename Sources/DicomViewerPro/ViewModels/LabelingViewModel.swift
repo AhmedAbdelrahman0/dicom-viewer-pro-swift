@@ -33,6 +33,9 @@ public final class LabelingViewModel: ObservableObject {
     @Published public var landmarks: [LandmarkPair] = []
     @Published public var currentTransform: Transform3D = .identity
     @Published public var treMM: Double = 0.0
+    @Published public var landmarkCaptureTarget: LandmarkCaptureTarget = .fixed
+    @Published public var pendingFixedLandmark: SIMD3<Double>?
+    @Published public var pendingMovingLandmark: SIMD3<Double>?
 
     // MARK: - Cross-linking
 
@@ -189,6 +192,39 @@ public final class LabelingViewModel: ObservableObject {
         updateTransform()
     }
 
+    @discardableResult
+    public func captureLandmarkPoint(_ point: SIMD3<Double>) -> String {
+        switch landmarkCaptureTarget {
+        case .fixed:
+            if let moving = pendingMovingLandmark {
+                addLandmarkPair(fixed: point, moving: moving)
+                pendingMovingLandmark = nil
+                landmarkCaptureTarget = .fixed
+                return "Landmark pair \(landmarks.count) captured"
+            }
+            pendingFixedLandmark = point
+            landmarkCaptureTarget = .moving
+            return "Fixed point captured; switch to the moving volume and click its match"
+
+        case .moving:
+            if let fixed = pendingFixedLandmark {
+                addLandmarkPair(fixed: fixed, moving: point)
+                pendingFixedLandmark = nil
+                landmarkCaptureTarget = .fixed
+                return "Landmark pair \(landmarks.count) captured"
+            }
+            pendingMovingLandmark = point
+            landmarkCaptureTarget = .fixed
+            return "Moving point captured; switch to the fixed volume and click its match"
+        }
+    }
+
+    public func cancelPendingLandmark() {
+        pendingFixedLandmark = nil
+        pendingMovingLandmark = nil
+        landmarkCaptureTarget = .fixed
+    }
+
     public func removeLandmark(id: UUID) {
         landmarks.removeAll { $0.id == id }
         updateTransform()
@@ -196,6 +232,7 @@ public final class LabelingViewModel: ObservableObject {
 
     public func clearLandmarks() {
         landmarks.removeAll()
+        cancelPendingLandmark()
         currentTransform = .identity
         treMM = 0
     }
@@ -285,6 +322,12 @@ public final class LabelingViewModel: ObservableObject {
             activeClassID = first.labelID
         }
     }
+
+    private func addLandmarkPair(fixed: SIMD3<Double>, moving: SIMD3<Double>) {
+        let label = "LM\(landmarks.count + 1)"
+        landmarks.append(LandmarkPair(fixed: fixed, moving: moving, label: label))
+        updateTransform()
+    }
 }
 
 public enum LabelingTool: String, CaseIterable, Identifiable {
@@ -342,6 +385,19 @@ public enum LabelingTool: String, CaseIterable, Identifiable {
                  + "volumes. After 3+ pairs, a rigid transform is computed\n"
                  + "and TRE is reported. Use 'Migrate Label' to transfer\n"
                  + "the mask across volumes."
+        }
+    }
+}
+
+public enum LandmarkCaptureTarget: String, CaseIterable, Identifiable {
+    case fixed, moving
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .fixed:  return "Fixed"
+        case .moving: return "Moving"
         }
     }
 }

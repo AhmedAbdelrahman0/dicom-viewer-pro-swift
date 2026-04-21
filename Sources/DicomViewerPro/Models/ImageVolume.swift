@@ -1,4 +1,5 @@
 import Foundation
+import simd
 
 /// A 3D medical image volume stored as a contiguous Float array in (Z, Y, X) order.
 public final class ImageVolume: Identifiable, ObservableObject {
@@ -13,6 +14,8 @@ public final class ImageVolume: Identifiable, ObservableObject {
     /// Spatial metadata (LPS convention after reorientation).
     public let spacing: (x: Double, y: Double, z: Double)
     public let origin: (x: Double, y: Double, z: Double)
+    /// Direction cosines in LPS space. Columns are voxel X, Y, and Z axes.
+    public let direction: simd_double3x3
 
     /// Clinical metadata.
     public let modality: String
@@ -43,6 +46,7 @@ public final class ImageVolume: Identifiable, ObservableObject {
                 width: Int,
                 spacing: (Double, Double, Double) = (1, 1, 1),
                 origin: (Double, Double, Double) = (0, 0, 0),
+                direction: simd_double3x3 = matrix_identity_double3x3,
                 modality: String = "OT",
                 seriesUID: String = UUID().uuidString,
                 studyUID: String = UUID().uuidString,
@@ -59,6 +63,7 @@ public final class ImageVolume: Identifiable, ObservableObject {
         self.width = width
         self.spacing = spacing
         self.origin = origin
+        self.direction = direction
         self.modality = modality
         self.seriesUID = seriesUID
         self.studyUID = studyUID
@@ -71,6 +76,41 @@ public final class ImageVolume: Identifiable, ObservableObject {
 
     /// Size in bytes.
     public var sizeBytes: Int { pixels.count * MemoryLayout<Float>.stride }
+
+    public var originVector: SIMD3<Double> {
+        SIMD3<Double>(origin.x, origin.y, origin.z)
+    }
+
+    public func worldPoint(z: Int, y: Int, x: Int) -> SIMD3<Double> {
+        worldPoint(voxel: SIMD3<Double>(Double(x), Double(y), Double(z)))
+    }
+
+    public func worldPoint(voxel: SIMD3<Double>) -> SIMD3<Double> {
+        let scaled = SIMD3<Double>(
+            voxel.x * spacing.x,
+            voxel.y * spacing.y,
+            voxel.z * spacing.z
+        )
+        return originVector + direction * scaled
+    }
+
+    public func voxelCoordinates(from world: SIMD3<Double>) -> SIMD3<Double> {
+        let local = direction.inverse * (world - originVector)
+        return SIMD3<Double>(
+            local.x / spacing.x,
+            local.y / spacing.y,
+            local.z / spacing.z
+        )
+    }
+
+    public func voxelIndex(from world: SIMD3<Double>) -> (z: Int, y: Int, x: Int) {
+        let v = voxelCoordinates(from: world)
+        return (
+            clamp(Int(round(v.z)), 0, depth - 1),
+            clamp(Int(round(v.y)), 0, height - 1),
+            clamp(Int(round(v.x)), 0, width - 1)
+        )
+    }
 
     /// Get a 2D slice along the given axis as a raw Float array.
     ///   axis 0 = sagittal (shape: depth x height)

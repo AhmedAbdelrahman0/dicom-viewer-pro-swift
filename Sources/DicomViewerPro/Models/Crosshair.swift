@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import simd
 
 /// World-space position (LPS mm) used to synchronize MPR views and fused volumes.
 public struct WorldPoint: Equatable {
@@ -26,26 +27,24 @@ public final class CrosshairSync: ObservableObject {
     /// Convert voxel index (z, y, x) in a volume to world LPS coordinates.
     public func worldPoint(from voxel: (z: Int, y: Int, x: Int),
                            in volume: ImageVolume) -> WorldPoint {
-        // LPS with identity direction:
-        //   world.x = origin.x + x * spacing.x
-        //   world.y = origin.y + y * spacing.y
-        //   world.z = origin.z + z * spacing.z
-        WorldPoint(
-            x: volume.origin.x + Double(voxel.x) * volume.spacing.x,
-            y: volume.origin.y + Double(voxel.y) * volume.spacing.y,
-            z: volume.origin.z + Double(voxel.z) * volume.spacing.z
+        let p = volume.worldPoint(z: voxel.z, y: voxel.y, x: voxel.x)
+        return WorldPoint(x: p.x, y: p.y, z: p.z)
+    }
+
+    public func worldPoint(from voxel: SIMD3<Double>,
+                           in volume: ImageVolume) -> WorldPoint {
+        let p = volume.worldPoint(voxel: voxel)
+        return WorldPoint(
+            x: p.x,
+            y: p.y,
+            z: p.z
         )
     }
 
     /// Convert world LPS coordinates to voxel indices for a volume.
     public func voxel(from world: WorldPoint,
                       in volume: ImageVolume) -> (z: Int, y: Int, x: Int) {
-        let x = Int(round((world.x - volume.origin.x) / volume.spacing.x))
-        let y = Int(round((world.y - volume.origin.y) / volume.spacing.y))
-        let z = Int(round((world.z - volume.origin.z) / volume.spacing.z))
-        return (clamp(z, 0, volume.depth - 1),
-                clamp(y, 0, volume.height - 1),
-                clamp(x, 0, volume.width - 1))
+        volume.voxelIndex(from: SIMD3<Double>(world.x, world.y, world.z))
     }
 
     /// The slice index on each axis for a given world point in a volume.

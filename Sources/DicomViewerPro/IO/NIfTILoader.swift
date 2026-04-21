@@ -1,5 +1,11 @@
 import Foundation
 import Compression
+import simd
+
+private enum NIfTIByteOrder {
+    case littleEndian
+    case bigEndian
+}
 
 /// Native NIfTI-1 loader. Supports .nii and .nii.gz, uncompressed data types.
 public enum NIfTILoaderError: Error, LocalizedError {
@@ -59,8 +65,21 @@ public enum NIfTILoader {
             throw NIfTILoaderError.invalidHeader("File too small for NIfTI header")
         }
 
-        // Read header values
-        let sizeofHdr = data.readInt32(at: 0)
+        // Read header values and detect endian-ness.
+        let littleEndianHeader = data.readInt32(at: 0, byteOrder: .littleEndian)
+        let bigEndianHeader = data.readInt32(at: 0, byteOrder: .bigEndian)
+        let byteOrder: NIfTIByteOrder
+        let sizeofHdr: Int32
+        if littleEndianHeader == 348 {
+            byteOrder = .littleEndian
+            sizeofHdr = littleEndianHeader
+        } else if bigEndianHeader == 348 {
+            byteOrder = .bigEndian
+            sizeofHdr = bigEndianHeader
+        } else {
+            byteOrder = .littleEndian
+            sizeofHdr = littleEndianHeader
+        }
         guard sizeofHdr == 348 else {
             throw NIfTILoaderError.invalidHeader("sizeof_hdr != 348 (got \(sizeofHdr))")
         }
@@ -72,11 +91,11 @@ public enum NIfTILoader {
         }
 
         // dim[0..7]: dim[0] = number of dimensions, dim[1..3] = x,y,z size
-        _ = Int(data.readInt16(at: 40))  // dim0 (num dimensions)
-        let nx = Int(data.readInt16(at: 42))
-        let ny = Int(data.readInt16(at: 44))
-        let nz = Int(data.readInt16(at: 46))
-        let nt = Int(data.readInt16(at: 48))
+        _ = Int(data.readInt16(at: 40, byteOrder: byteOrder))  // dim0 (num dimensions)
+        let nx = Int(data.readInt16(at: 42, byteOrder: byteOrder))
+        let ny = Int(data.readInt16(at: 44, byteOrder: byteOrder))
+        let nz = Int(data.readInt16(at: 46, byteOrder: byteOrder))
+        _ = Int(data.readInt16(at: 48, byteOrder: byteOrder))
 
         guard nx > 0, ny > 0 else {
             throw NIfTILoaderError.invalidHeader("Invalid dimensions: nx=\(nx), ny=\(ny)")
@@ -86,44 +105,40 @@ public enum NIfTILoader {
         let width = nx
 
         // datatype at offset 70
-        let datatype = Int(data.readInt16(at: 70))
+        let datatype = Int(data.readInt16(at: 70, byteOrder: byteOrder))
         // bitpix at offset 72
-        _ = Int(data.readInt16(at: 72))
+        _ = Int(data.readInt16(at: 72, byteOrder: byteOrder))
 
         // pixdim[0..7] at offset 76 (float32 each, 8 values)
-        let pdx = Double(data.readFloat32(at: 80))
-        let pdy = Double(data.readFloat32(at: 84))
-        let pdz = Double(data.readFloat32(at: 88))
+        let pdx = sanitizedSpacing(Double(data.readFloat32(at: 80, byteOrder: byteOrder)))
+        let pdy = sanitizedSpacing(Double(data.readFloat32(at: 84, byteOrder: byteOrder)))
+        let pdz = sanitizedSpacing(Double(data.readFloat32(at: 88, byteOrder: byteOrder)))
+        let geometry = affineGeometry(data: data, byteOrder: byteOrder,
+                                      fallbackSpacing: (pdx, pdy, pdz))
 
         // scl_slope, scl_inter at offsets 112 and 116
-        let sclSlope = data.readFloat32(at: 112)
-        let sclInter = data.readFloat32(at: 116)
+        let sclSlope = data.readFloat32(at: 112, byteOrder: byteOrder)
+        let sclInter = data.readFloat32(at: 116, byteOrder: byteOrder)
         let slope = sclSlope != 0 ? Double(sclSlope) : 1.0
         let inter = Double(sclInter)
 
         // vox_offset at offset 108
-        let voxOffset = Int(data.readFloat32(at: 108))
+        let voxOffset = Int(data.readFloat32(at: 108, byteOrder: byteOrder))
         let dataOffset = max(voxOffset, 352)
 
         // Parse pixel data
         let totalVoxels = depth * height * width
         guard data.count >= dataOffset + totalVoxels * bytesPerVoxel(for: datatype) else {
-            // For 4D data take just the first 3D volume
-            if nt > 1 {
-                return try parse3DVolume(data: data, dataOffset: dataOffset,
-                                         datatype: datatype, depth: depth, height: height,
-                                         width: width, slope: slope, inter: inter,
-                                         spacing: (pdx, pdy, pdz),
-                                         filename: filename, modalityHint: modalityHint,
-                                         sourcePath: sourcePath)
-            }
             throw NIfTILoaderError.invalidHeader("Data too short for declared dimensions")
         }
 
         return try parse3DVolume(data: data, dataOffset: dataOffset,
                                  datatype: datatype, depth: depth, height: height,
                                  width: width, slope: slope, inter: inter,
-                                 spacing: (pdx, pdy, pdz),
+                                 byteOrder: byteOrder,
+                                 spacing: geometry.spacing,
+                                 origin: geometry.origin,
+                                 direction: geometry.direction,
                                  filename: filename, modalityHint: modalityHint,
                                  sourcePath: sourcePath)
     }
@@ -136,43 +151,41 @@ public enum NIfTILoader {
                                        width: Int,
                                        slope: Double,
                                        inter: Double,
+                                       byteOrder: NIfTIByteOrder,
                                        spacing: (Double, Double, Double),
+                                       origin: (Double, Double, Double),
+                                       direction: simd_double3x3,
                                        filename: String,
                                        modalityHint: String,
                                        sourcePath: String) throws -> ImageVolume {
         let total = depth * height * width
         var pixels = [Float](repeating: 0, count: total)
 
-        try data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
-            let base = raw.baseAddress!.advanced(by: dataOffset)
+        let bpp = bytesPerVoxel(for: datatype)
+        for i in 0..<total {
+            let offset = dataOffset + i * bpp
+            let rawValue: Double
             switch datatype {
             case 2:   // UINT8
-                let ptr = base.assumingMemoryBound(to: UInt8.self)
-                for i in 0..<total { pixels[i] = Float(Double(ptr[i]) * slope + inter) }
+                rawValue = Double(data[offset])
             case 4:   // INT16
-                let ptr = base.assumingMemoryBound(to: Int16.self)
-                for i in 0..<total { pixels[i] = Float(Double(ptr[i]) * slope + inter) }
+                rawValue = Double(data.readInt16(at: offset, byteOrder: byteOrder))
             case 8:   // INT32
-                let ptr = base.assumingMemoryBound(to: Int32.self)
-                for i in 0..<total { pixels[i] = Float(Double(ptr[i]) * slope + inter) }
+                rawValue = Double(data.readInt32(at: offset, byteOrder: byteOrder))
             case 16:  // FLOAT32
-                let ptr = base.assumingMemoryBound(to: Float.self)
-                for i in 0..<total { pixels[i] = Float(Double(ptr[i]) * slope + inter) }
+                rawValue = Double(data.readFloat32(at: offset, byteOrder: byteOrder))
             case 64:  // FLOAT64
-                let ptr = base.assumingMemoryBound(to: Double.self)
-                for i in 0..<total { pixels[i] = Float(ptr[i] * slope + inter) }
+                rawValue = data.readFloat64(at: offset, byteOrder: byteOrder)
             case 256: // INT8
-                let ptr = base.assumingMemoryBound(to: Int8.self)
-                for i in 0..<total { pixels[i] = Float(Double(ptr[i]) * slope + inter) }
+                rawValue = Double(Int8(bitPattern: data[offset]))
             case 512: // UINT16
-                let ptr = base.assumingMemoryBound(to: UInt16.self)
-                for i in 0..<total { pixels[i] = Float(Double(ptr[i]) * slope + inter) }
+                rawValue = Double(data.readUInt16(at: offset, byteOrder: byteOrder))
             case 768: // UINT32
-                let ptr = base.assumingMemoryBound(to: UInt32.self)
-                for i in 0..<total { pixels[i] = Float(Double(ptr[i]) * slope + inter) }
+                rawValue = Double(data.readUInt32(at: offset, byteOrder: byteOrder))
             default:
                 throw NIfTILoaderError.unsupportedDataType(datatype)
             }
+            pixels[i] = Float(rawValue * slope + inter)
         }
 
         let modality = inferModality(filename: filename, parentDir: (sourcePath as NSString).deletingLastPathComponent,
@@ -185,7 +198,8 @@ public enum NIfTILoader {
             height: height,
             width: width,
             spacing: spacing,
-            origin: (0, 0, 0),
+            origin: origin,
+            direction: direction,
             modality: modality,
             seriesUID: "NIFTI_\(abs(filename.hashValue))",
             studyUID: "NIFTI_STUDY",
@@ -204,6 +218,130 @@ public enum NIfTILoader {
         case 64:            return 8
         default:            return 4
         }
+    }
+
+    private static func affineGeometry(data: Data,
+                                       byteOrder: NIfTIByteOrder,
+                                       fallbackSpacing: (Double, Double, Double))
+        -> (spacing: (Double, Double, Double),
+            origin: (Double, Double, Double),
+            direction: simd_double3x3) {
+        let qformCode = Int(data.readInt16(at: 252, byteOrder: byteOrder))
+        let sformCode = Int(data.readInt16(at: 254, byteOrder: byteOrder))
+
+        if sformCode > 0 {
+            let srowX = SIMD4<Double>(
+                Double(data.readFloat32(at: 280, byteOrder: byteOrder)),
+                Double(data.readFloat32(at: 284, byteOrder: byteOrder)),
+                Double(data.readFloat32(at: 288, byteOrder: byteOrder)),
+                Double(data.readFloat32(at: 292, byteOrder: byteOrder))
+            )
+            let srowY = SIMD4<Double>(
+                Double(data.readFloat32(at: 296, byteOrder: byteOrder)),
+                Double(data.readFloat32(at: 300, byteOrder: byteOrder)),
+                Double(data.readFloat32(at: 304, byteOrder: byteOrder)),
+                Double(data.readFloat32(at: 308, byteOrder: byteOrder))
+            )
+            let srowZ = SIMD4<Double>(
+                Double(data.readFloat32(at: 312, byteOrder: byteOrder)),
+                Double(data.readFloat32(at: 316, byteOrder: byteOrder)),
+                Double(data.readFloat32(at: 320, byteOrder: byteOrder)),
+                Double(data.readFloat32(at: 324, byteOrder: byteOrder))
+            )
+            return decomposeRASAffine(
+                xAxis: SIMD3<Double>(srowX.x, srowY.x, srowZ.x),
+                yAxis: SIMD3<Double>(srowX.y, srowY.y, srowZ.y),
+                zAxis: SIMD3<Double>(srowX.z, srowY.z, srowZ.z),
+                origin: SIMD3<Double>(srowX.w, srowY.w, srowZ.w),
+                fallbackSpacing: fallbackSpacing
+            )
+        }
+
+        if qformCode > 0 {
+            let b = Double(data.readFloat32(at: 256, byteOrder: byteOrder))
+            let c = Double(data.readFloat32(at: 260, byteOrder: byteOrder))
+            let d = Double(data.readFloat32(at: 264, byteOrder: byteOrder))
+            let xyz = SIMD3<Double>(
+                Double(data.readFloat32(at: 268, byteOrder: byteOrder)),
+                Double(data.readFloat32(at: 272, byteOrder: byteOrder)),
+                Double(data.readFloat32(at: 276, byteOrder: byteOrder))
+            )
+            let qfac = data.readFloat32(at: 76, byteOrder: byteOrder) < 0 ? -1.0 : 1.0
+            let a = sqrt(max(0, 1.0 - (b*b + c*c + d*d)))
+
+            let r11 = a*a + b*b - c*c - d*d
+            let r12 = 2*b*c - 2*a*d
+            let r13 = 2*b*d + 2*a*c
+            let r21 = 2*b*c + 2*a*d
+            let r22 = a*a + c*c - b*b - d*d
+            let r23 = 2*c*d - 2*a*b
+            let r31 = 2*b*d - 2*a*c
+            let r32 = 2*c*d + 2*a*b
+            let r33 = a*a + d*d - c*c - b*b
+
+            return decomposeRASAffine(
+                xAxis: SIMD3<Double>(r11, r21, r31) * fallbackSpacing.0,
+                yAxis: SIMD3<Double>(r12, r22, r32) * fallbackSpacing.1,
+                zAxis: SIMD3<Double>(r13, r23, r33) * fallbackSpacing.2 * qfac,
+                origin: xyz,
+                fallbackSpacing: fallbackSpacing
+            )
+        }
+
+        return (
+            fallbackSpacing,
+            (0, 0, 0),
+            matrix_identity_double3x3
+        )
+    }
+
+    private static func decomposeRASAffine(xAxis: SIMD3<Double>,
+                                           yAxis: SIMD3<Double>,
+                                           zAxis: SIMD3<Double>,
+                                           origin: SIMD3<Double>,
+                                           fallbackSpacing: (Double, Double, Double))
+        -> (spacing: (Double, Double, Double),
+            origin: (Double, Double, Double),
+            direction: simd_double3x3) {
+        let xLPS = rasVectorToLPS(xAxis)
+        let yLPS = rasVectorToLPS(yAxis)
+        let zLPS = rasVectorToLPS(zAxis)
+        let originLPS = rasVectorToLPS(origin)
+
+        let sx = vectorSpacing(xLPS, fallback: fallbackSpacing.0)
+        let sy = vectorSpacing(yLPS, fallback: fallbackSpacing.1)
+        let sz = vectorSpacing(zLPS, fallback: fallbackSpacing.2)
+
+        return (
+            (sx, sy, sz),
+            (originLPS.x, originLPS.y, originLPS.z),
+            simd_double3x3(
+                normalized(xLPS, fallback: SIMD3<Double>(1, 0, 0)),
+                normalized(yLPS, fallback: SIMD3<Double>(0, 1, 0)),
+                normalized(zLPS, fallback: SIMD3<Double>(0, 0, 1))
+            )
+        )
+    }
+
+    private static func rasVectorToLPS(_ v: SIMD3<Double>) -> SIMD3<Double> {
+        SIMD3<Double>(-v.x, -v.y, v.z)
+    }
+
+    private static func vectorSpacing(_ v: SIMD3<Double>, fallback: Double) -> Double {
+        let len = simd_length(v)
+        return len > 1e-12 ? len : fallback
+    }
+
+    private static func normalized(_ v: SIMD3<Double>,
+                                   fallback: SIMD3<Double>) -> SIMD3<Double> {
+        let len = simd_length(v)
+        guard len > 1e-12 else { return fallback }
+        return v / len
+    }
+
+    private static func sanitizedSpacing(_ value: Double) -> Double {
+        let v = abs(value)
+        return v > 1e-12 ? v : 1
     }
 
     // MARK: - Gzip decompression (using Compression framework)
@@ -343,13 +481,57 @@ public enum NIfTILoader {
 // MARK: - Data reading helpers
 
 private extension Data {
-    func readInt16(at offset: Int) -> Int16 {
-        return self.subdata(in: offset..<offset+2).withUnsafeBytes { $0.load(as: Int16.self) }
+    func readUInt16(at offset: Int, byteOrder: NIfTIByteOrder) -> UInt16 {
+        guard offset + 2 <= count else { return 0 }
+        let b0 = UInt16(self[offset])
+        let b1 = UInt16(self[offset + 1])
+        switch byteOrder {
+        case .littleEndian:
+            return b0 | (b1 << 8)
+        case .bigEndian:
+            return (b0 << 8) | b1
+        }
     }
-    func readInt32(at offset: Int) -> Int32 {
-        return self.subdata(in: offset..<offset+4).withUnsafeBytes { $0.load(as: Int32.self) }
+
+    func readInt16(at offset: Int, byteOrder: NIfTIByteOrder) -> Int16 {
+        Int16(bitPattern: readUInt16(at: offset, byteOrder: byteOrder))
     }
-    func readFloat32(at offset: Int) -> Float {
-        return self.subdata(in: offset..<offset+4).withUnsafeBytes { $0.load(as: Float.self) }
+
+    func readUInt32(at offset: Int, byteOrder: NIfTIByteOrder) -> UInt32 {
+        guard offset + 4 <= count else { return 0 }
+        let b0 = UInt32(self[offset])
+        let b1 = UInt32(self[offset + 1])
+        let b2 = UInt32(self[offset + 2])
+        let b3 = UInt32(self[offset + 3])
+        switch byteOrder {
+        case .littleEndian:
+            return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+        case .bigEndian:
+            return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+        }
+    }
+
+    func readInt32(at offset: Int, byteOrder: NIfTIByteOrder) -> Int32 {
+        Int32(bitPattern: readUInt32(at: offset, byteOrder: byteOrder))
+    }
+
+    func readUInt64(at offset: Int, byteOrder: NIfTIByteOrder) -> UInt64 {
+        guard offset + 8 <= count else { return 0 }
+        let hi = UInt64(readUInt32(at: offset, byteOrder: byteOrder))
+        let lo = UInt64(readUInt32(at: offset + 4, byteOrder: byteOrder))
+        switch byteOrder {
+        case .littleEndian:
+            return hi | (lo << 32)
+        case .bigEndian:
+            return (hi << 32) | lo
+        }
+    }
+
+    func readFloat32(at offset: Int, byteOrder: NIfTIByteOrder) -> Float {
+        Float(bitPattern: readUInt32(at: offset, byteOrder: byteOrder))
+    }
+
+    func readFloat64(at offset: Int, byteOrder: NIfTIByteOrder) -> Double {
+        Double(bitPattern: readUInt64(at: offset, byteOrder: byteOrder))
     }
 }

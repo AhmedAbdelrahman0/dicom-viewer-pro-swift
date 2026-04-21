@@ -1,4 +1,5 @@
 import Foundation
+import simd
 
 public enum DICOMError: Error, LocalizedError {
     case notADICOMFile
@@ -46,11 +47,31 @@ public final class DICOMFile {
     public var transferSyntaxUID: String = "1.2.840.10008.1.2"  // Implicit VR LE default
     public var pixelDataOffset: Int = 0
     public var pixelDataLength: Int = 0
+    public var pixelDataUndefinedLength: Bool = false
 
     public var filePath: String = ""
 }
 
 public enum DICOMLoader {
+    private static let implicitVRLittleEndian = "1.2.840.10008.1.2"
+    private static let explicitVRLittleEndian = "1.2.840.10008.1.2.1"
+
+    private static let uncompressedTransferSyntaxes: Set<String> = [
+        implicitVRLittleEndian,
+        explicitVRLittleEndian,
+    ]
+
+    private static let explicitLittleEndianEncapsulatedTransferSyntaxes: Set<String> = [
+        "1.2.840.10008.1.2.4.50",  // JPEG Baseline
+        "1.2.840.10008.1.2.4.51",  // JPEG Extended
+        "1.2.840.10008.1.2.4.57",  // JPEG Lossless
+        "1.2.840.10008.1.2.4.70",  // JPEG Lossless SV1
+        "1.2.840.10008.1.2.4.80",  // JPEG-LS Lossless
+        "1.2.840.10008.1.2.4.81",  // JPEG-LS Near-Lossless
+        "1.2.840.10008.1.2.4.90",  // JPEG 2000 Lossless
+        "1.2.840.10008.1.2.4.91",  // JPEG 2000
+        "1.2.840.10008.1.2.5",     // RLE Lossless
+    ]
 
     public static func parseHeader(at url: URL) throws -> DICOMFile {
         let data = try Data(contentsOf: url)
@@ -80,7 +101,10 @@ public enum DICOMLoader {
 
             if group != 0x0002 {
                 // Switch to dataset, transfer syntax determines VR
-                if dcm.transferSyntaxUID == "1.2.840.10008.1.2" {
+                guard canParseDataset(transferSyntaxUID: dcm.transferSyntaxUID) else {
+                    throw DICOMError.unsupportedTransferSyntax(dcm.transferSyntaxUID)
+                }
+                if dcm.transferSyntaxUID == implicitVRLittleEndian {
                     implicitVR = true
                 }
                 break
@@ -89,8 +113,7 @@ public enum DICOMLoader {
             let (value, nextOffset) = readElement(data: data, offset: offset,
                                                   implicitVR: false)
             if group == 0x0002 && element == 0x0010 {
-                dcm.transferSyntaxUID = value.asString().trimmingCharacters(in: .whitespaces)
-                    .trimmingCharacters(in: CharacterSet(charactersIn: "\0"))
+                dcm.transferSyntaxUID = trimUID(value.asString())
             }
             offset = nextOffset
         }
@@ -107,6 +130,7 @@ public enum DICOMLoader {
                                              implicitVR: implicitVR, peekOnly: true)
                 dcm.pixelDataOffset = value.dataOffset
                 dcm.pixelDataLength = value.length
+                dcm.pixelDataUndefinedLength = value.undefinedLength
                 break
             }
 
@@ -124,27 +148,24 @@ public enum DICOMLoader {
         guard !files.isEmpty else {
             throw DICOMError.invalidFile("Empty series")
         }
-        let first = files[0]
-        let rows = first.rows, cols = first.columns
+        let firstInput = files[0]
+        let rows = firstInput.rows, cols = firstInput.columns
         guard rows > 0, cols > 0 else {
             throw DICOMError.invalidFile("Invalid dimensions")
         }
 
-        // Sort by slice location or instance number
-        let sorted = files.sorted { a, b in
-            if a.imagePositionPatient.2 != b.imagePositionPatient.2 {
-                return a.imagePositionPatient.2 < b.imagePositionPatient.2
-            }
-            if a.sliceLocation != b.sliceLocation {
-                return a.sliceLocation < b.sliceLocation
-            }
-            return a.instanceNumber < b.instanceNumber
-        }
+        let directionVectors = orientationVectors(from: firstInput)
+        let sorted = sortedFiles(files, sliceNormal: directionVectors.slice)
+        let first = sorted[0]
 
         let depth = sorted.count
         var pixels = [Float](repeating: 0, count: depth * rows * cols)
 
         for (zi, f) in sorted.enumerated() {
+            try validateRenderable(f)
+            guard f.rows == rows, f.columns == cols else {
+                throw DICOMError.invalidFile("Series contains mixed slice dimensions")
+            }
             let slice = try loadSlicePixels(f)
             let dst = zi * rows * cols
             for i in 0..<(rows * cols) {
@@ -152,10 +173,11 @@ public enum DICOMLoader {
             }
         }
 
-        // Z spacing from slice position difference
+        // Z spacing from projected slice position difference along the slice normal.
         var zSpacing = first.sliceThickness
         if sorted.count > 1 {
-            let dz = abs(sorted[1].imagePositionPatient.2 - sorted[0].imagePositionPatient.2)
+            let dz = abs(slicePosition(sorted[1], normal: directionVectors.slice)
+                         - slicePosition(sorted[0], normal: directionVectors.slice))
             if dz > 0.001 { zSpacing = dz }
         }
 
@@ -164,8 +186,11 @@ public enum DICOMLoader {
             depth: depth,
             height: rows,
             width: cols,
-            spacing: (first.pixelSpacing.0, first.pixelSpacing.1, zSpacing),
+            spacing: (first.pixelSpacing.1, first.pixelSpacing.0, zSpacing),
             origin: first.imagePositionPatient,
+            direction: simd_double3x3(directionVectors.row,
+                                      directionVectors.column,
+                                      directionVectors.slice),
             modality: Modality.normalize(first.modality).rawValue,
             seriesUID: first.seriesInstanceUID,
             studyUID: first.studyInstanceUID,
@@ -184,8 +209,11 @@ public enum DICOMLoader {
 
         let offset = dcm.pixelDataOffset
         let length = dcm.pixelDataLength
+        let expectedBytes = n * max(1, dcm.bitsAllocated / 8)
 
-        guard offset + length <= data.count else {
+        try validateRenderable(dcm)
+
+        guard length >= expectedBytes, offset + expectedBytes <= data.count else {
             throw DICOMError.invalidFile("Pixel data out of bounds")
         }
 
@@ -205,6 +233,8 @@ public enum DICOMLoader {
             } else if dcm.bitsAllocated == 32 {
                 let p = base.assumingMemoryBound(to: Float.self)
                 for i in 0..<n { out[i] = Float(Double(p[i]) * dcm.rescaleSlope + dcm.rescaleIntercept) }
+            } else {
+                return
             }
         }
         return out
@@ -216,6 +246,7 @@ public enum DICOMLoader {
         var bytes: Data
         var dataOffset: Int
         var length: Int
+        var undefinedLength: Bool
 
         func asString() -> String {
             return String(data: bytes, encoding: .ascii) ?? ""
@@ -259,8 +290,8 @@ public enum DICOMLoader {
             }
         }
 
-        // Handle undefined length (0xFFFFFFFF) — treat as sequence; skip
-        if length == 0xFFFFFFFF {
+        let undefinedLength = length == 0xFFFFFFFF
+        if undefinedLength {
             length = 0
         }
 
@@ -268,7 +299,8 @@ public enum DICOMLoader {
         let dataEnd = min(pos + length, data.count)
         let valueBytes = peekOnly ? Data() : data.subdata(in: dataStart..<dataEnd)
 
-        return (ElementValue(bytes: valueBytes, dataOffset: dataStart, length: length),
+        return (ElementValue(bytes: valueBytes, dataOffset: dataStart, length: length,
+                             undefinedLength: undefinedLength),
                 dataEnd)
     }
 
@@ -314,6 +346,86 @@ public enum DICOMLoader {
     private static func trim(_ s: String) -> String {
         s.trimmingCharacters(in: .whitespaces)
          .trimmingCharacters(in: CharacterSet(charactersIn: "\0"))
+    }
+
+    private static func trimUID(_ s: String) -> String {
+        s.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\0"))
+    }
+
+    private static func canParseDataset(transferSyntaxUID: String) -> Bool {
+        let uid = trimUID(transferSyntaxUID)
+        return uncompressedTransferSyntaxes.contains(uid)
+            || explicitLittleEndianEncapsulatedTransferSyntaxes.contains(uid)
+    }
+
+    private static func validateRenderable(_ dcm: DICOMFile) throws {
+        let uid = trimUID(dcm.transferSyntaxUID)
+        guard uncompressedTransferSyntaxes.contains(uid) else {
+            throw DICOMError.unsupportedTransferSyntax(uid)
+        }
+        guard !dcm.pixelDataUndefinedLength else {
+            throw DICOMError.unsupportedTransferSyntax("\(uid) (encapsulated pixel data)")
+        }
+        guard dcm.pixelDataLength > 0 else {
+            throw DICOMError.invalidFile("Missing pixel data")
+        }
+        guard dcm.bitsAllocated == 8 || dcm.bitsAllocated == 16 || dcm.bitsAllocated == 32 else {
+            throw DICOMError.invalidFile("Unsupported pixel depth: \(dcm.bitsAllocated)")
+        }
+    }
+
+    private static func sortedFiles(_ files: [DICOMFile],
+                                    sliceNormal: SIMD3<Double>) -> [DICOMFile] {
+        files.sorted { a, b in
+            let pa = slicePosition(a, normal: sliceNormal)
+            let pb = slicePosition(b, normal: sliceNormal)
+            if abs(pa - pb) > 0.001 { return pa < pb }
+            if a.sliceLocation != b.sliceLocation {
+                return a.sliceLocation < b.sliceLocation
+            }
+            return a.instanceNumber < b.instanceNumber
+        }
+    }
+
+    private static func slicePosition(_ dcm: DICOMFile,
+                                      normal: SIMD3<Double>) -> Double {
+        let p = SIMD3<Double>(
+            dcm.imagePositionPatient.0,
+            dcm.imagePositionPatient.1,
+            dcm.imagePositionPatient.2
+        )
+        return simd_dot(p, normal)
+    }
+
+    private static func orientationVectors(from dcm: DICOMFile)
+        -> (row: SIMD3<Double>, column: SIMD3<Double>, slice: SIMD3<Double>) {
+        guard dcm.imageOrientationPatient.count >= 6 else {
+            return (
+                SIMD3<Double>(1, 0, 0),
+                SIMD3<Double>(0, 1, 0),
+                SIMD3<Double>(0, 0, 1)
+            )
+        }
+        let row = normalized(SIMD3<Double>(
+            dcm.imageOrientationPatient[0],
+            dcm.imageOrientationPatient[1],
+            dcm.imageOrientationPatient[2]
+        ), fallback: SIMD3<Double>(1, 0, 0))
+        let column = normalized(SIMD3<Double>(
+            dcm.imageOrientationPatient[3],
+            dcm.imageOrientationPatient[4],
+            dcm.imageOrientationPatient[5]
+        ), fallback: SIMD3<Double>(0, 1, 0))
+        let slice = normalized(simd_cross(row, column), fallback: SIMD3<Double>(0, 0, 1))
+        return (row, column, slice)
+    }
+
+    private static func normalized(_ v: SIMD3<Double>,
+                                   fallback: SIMD3<Double>) -> SIMD3<Double> {
+        let len = simd_length(v)
+        guard len > 1e-12 else { return fallback }
+        return v / len
     }
 
     private static func readUInt16Value(_ value: ElementValue) -> Int {

@@ -229,10 +229,26 @@ struct LabelingPanel: View {
 
                     case .landmark:
                         VStack(alignment: .leading) {
+                            Picker("Next point", selection: $vm.labeling.landmarkCaptureTarget) {
+                                ForEach(LandmarkCaptureTarget.allCases) { target in
+                                    Text(target.displayName).tag(target)
+                                }
+                            }
+                            .pickerStyle(.segmented)
                             Text("Landmark pairs: \(vm.labeling.landmarks.count)")
                             if vm.labeling.treMM > 0 {
                                 Text("TRE: \(String(format: "%.2f mm", vm.labeling.treMM))")
                                     .font(.caption).foregroundColor(.secondary)
+                            }
+                            if vm.labeling.pendingFixedLandmark != nil || vm.labeling.pendingMovingLandmark != nil {
+                                Button {
+                                    vm.labeling.cancelPendingLandmark()
+                                } label: {
+                                    Label("Cancel Pending Point", systemImage: "mappin.slash")
+                                        .font(.system(size: 11))
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
                             }
                             Button(role: .destructive) {
                                 vm.labeling.clearLandmarks()

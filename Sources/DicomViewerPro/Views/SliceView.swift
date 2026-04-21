@@ -1,5 +1,6 @@
 import SwiftUI
 import CoreGraphics
+import simd
 
 /// A single 2D slice view (axial, sagittal, or coronal) with full tool support.
 public struct SliceView: View {
@@ -59,6 +60,7 @@ public struct SliceView: View {
 
                         // Measurements overlay
                         measurementCanvas(scale: fit, imageSize: CGSize(width: imgW, height: imgH))
+                            .frame(width: imgW * fit, height: imgH * fit)
                             .offset(pan)
 
                         // Orientation letters
@@ -213,11 +215,51 @@ public struct SliceView: View {
     }
 
     private func orientationLetters(for axis: Int) -> (top: String, bottom: String, left: String, right: String) {
+        guard let volume = vm.currentVolume else {
+            return fallbackOrientationLetters(for: axis)
+        }
+
+        let rightVector: SIMD3<Double>
+        let downVector: SIMD3<Double>
+        switch axis {
+        case 0:
+            rightVector = volume.direction[1]
+            downVector = -volume.direction[2]
+        case 1:
+            rightVector = volume.direction[0]
+            downVector = -volume.direction[2]
+        default:
+            rightVector = volume.direction[0]
+            downVector = volume.direction[1]
+        }
+
+        return (
+            top: patientLetter(for: -downVector),
+            bottom: patientLetter(for: downVector),
+            left: patientLetter(for: -rightVector),
+            right: patientLetter(for: rightVector)
+        )
+    }
+
+    private func fallbackOrientationLetters(for axis: Int) -> (top: String, bottom: String, left: String, right: String) {
         switch axis {
         case 0: return ("H", "F", "A", "P")   // Sagittal
         case 1: return ("H", "F", "R", "L")   // Coronal
         default: return ("A", "P", "R", "L")  // Axial
         }
+    }
+
+    private func patientLetter(for vector: SIMD3<Double>) -> String {
+        let absX = abs(vector.x)
+        let absY = abs(vector.y)
+        let absZ = abs(vector.z)
+        if absX >= absY && absX >= absZ {
+            return vector.x >= 0 ? "L" : "R"
+        }
+        if absY >= absX && absY >= absZ {
+            return vector.y >= 0 ? "P" : "A"
+        }
+        return vector.z >= 0 ? "H" : "F"
     }
 
     // MARK: - Gestures
@@ -260,7 +302,13 @@ public struct SliceView: View {
                     break
                 }
             }
-            .onEnded { _ in
+            .onEnded { value in
+                if vm.labeling.labelingTool == .none,
+                   isMeasurementTool(vm.activeTool),
+                   isTap(value),
+                   let volume = vm.currentVolume {
+                    handleMeasurementTap(at: value.location, volume: volume, geo: geo)
+                }
                 dragStart = nil
                 lastPaintPoint = nil
             }
@@ -326,10 +374,8 @@ public struct SliceView: View {
                 let world = vm.labeling.crosshair.worldPoint(
                     from: (z: z, y: y, x: x), in: volume
                 )
-                vm.labeling.addLandmark(
-                    fixed: SIMD3(world.x, world.y, world.z),
-                    moving: SIMD3(world.x, world.y, world.z),
-                    label: "LM\(vm.labeling.landmarks.count + 1)"
+                vm.statusMessage = vm.labeling.captureLandmarkPoint(
+                    SIMD3(world.x, world.y, world.z)
                 )
                 lastPaintPoint = p
             }
@@ -358,7 +404,7 @@ public struct SliceView: View {
         let localX = point.x - originX
         let localY = point.y - originY
 
-        var px = Int(localX / fit)
+        let px = Int(localX / fit)
         var py = Int(localY / fit)
 
         // Account for vertical flip used on sagittal/coronal
@@ -368,6 +414,92 @@ public struct SliceView: View {
 
         guard px >= 0, py >= 0, px < Int(imgW), py < Int(imgH) else { return nil }
         return (px, py)
+    }
+
+    // MARK: - Measurements
+
+    private func isMeasurementTool(_ tool: ViewerTool) -> Bool {
+        tool == .distance || tool == .angle || tool == .area
+    }
+
+    private func isTap(_ value: DragGesture.Value) -> Bool {
+        abs(value.translation.width) < 4 && abs(value.translation.height) < 4
+    }
+
+    private func handleMeasurementTap(at location: CGPoint,
+                                      volume: ImageVolume,
+                                      geo: GeometryProxy) {
+        guard let pixel = mapToImagePixel(point: location, volume: volume, geo: geo),
+              let type = annotationType(for: vm.activeTool) else { return }
+
+        measurementPoints.append(CGPoint(x: pixel.0, y: pixel.1))
+        let required = Annotation(type: type, axis: axis,
+                                  sliceIndex: vm.sliceIndices[axis]).minPointsRequired
+        guard measurementPoints.count >= required else {
+            vm.statusMessage = "\(type.rawValue.capitalized): \(measurementPoints.count)/\(required) points"
+            return
+        }
+
+        var annotation = Annotation(type: type,
+                                    points: measurementPoints,
+                                    axis: axis,
+                                    sliceIndex: vm.sliceIndices[axis])
+        annotation.value = measurementValue(type: type,
+                                            points: measurementPoints,
+                                            volume: volume)
+        annotation.unit = type == .angle ? "deg" : (type == .area ? "mm2" : "mm")
+        vm.annotations.append(annotation)
+        vm.statusMessage = "Added \(annotation.displayText)"
+        measurementPoints.removeAll()
+    }
+
+    private func annotationType(for tool: ViewerTool) -> AnnotationType? {
+        switch tool {
+        case .distance: return .distance
+        case .angle:    return .angle
+        case .area:     return .area
+        default:        return nil
+        }
+    }
+
+    private func measurementValue(type: AnnotationType,
+                                  points: [CGPoint],
+                                  volume: ImageVolume) -> Double {
+        let worldPoints = points.map { worldPoint(for: $0, volume: volume) }
+        switch type {
+        case .distance:
+            guard worldPoints.count >= 2 else { return 0 }
+            return simd_length(worldPoints[1] - worldPoints[0])
+        case .angle:
+            guard worldPoints.count >= 3 else { return 0 }
+            let a = worldPoints[0] - worldPoints[1]
+            let b = worldPoints[2] - worldPoints[1]
+            let denom = max(simd_length(a) * simd_length(b), 1e-12)
+            let cosTheta = max(-1.0, min(1.0, simd_dot(a, b) / denom))
+            return acos(cosTheta) * 180 / .pi
+        case .area:
+            guard worldPoints.count >= 3 else { return 0 }
+            var crossSum = SIMD3<Double>(0, 0, 0)
+            for i in 0..<worldPoints.count {
+                crossSum += simd_cross(worldPoints[i], worldPoints[(i + 1) % worldPoints.count])
+            }
+            return 0.5 * simd_length(crossSum)
+        default:
+            return 0
+        }
+    }
+
+    private func worldPoint(for point: CGPoint, volume: ImageVolume) -> SIMD3<Double> {
+        let voxel: SIMD3<Double>
+        switch axis {
+        case 0:
+            voxel = SIMD3<Double>(Double(vm.sliceIndices[axis]), Double(point.x), Double(point.y))
+        case 1:
+            voxel = SIMD3<Double>(Double(point.x), Double(vm.sliceIndices[axis]), Double(point.y))
+        default:
+            voxel = SIMD3<Double>(Double(point.x), Double(point.y), Double(vm.sliceIndices[axis]))
+        }
+        return volume.worldPoint(voxel: voxel)
     }
 
     // MARK: - Measurement canvas
@@ -383,7 +515,9 @@ public struct SliceView: View {
 
     private func drawAnnotation(_ ann: Annotation, in context: GraphicsContext,
                                  scale: CGFloat, imageSize: CGSize) {
-        let points = ann.points.map { CGPoint(x: $0.x * scale, y: $0.y * scale) }
+        let points = ann.points
+            .map { displayPoint(for: $0, imageSize: imageSize) }
+            .map { CGPoint(x: $0.x * scale, y: $0.y * scale) }
         let strokeColor = Color.yellow
 
         switch ann.type {
@@ -436,6 +570,11 @@ public struct SliceView: View {
             .font(.system(size: 10, design: .monospaced))
             .foregroundColor(.yellow)
         context.draw(t, at: CGPoint(x: point.x + 4, y: point.y - 8))
+    }
+
+    private func displayPoint(for point: CGPoint, imageSize: CGSize) -> CGPoint {
+        guard axis == 0 || axis == 1 else { return point }
+        return CGPoint(x: point.x, y: imageSize.height - 1 - point.y)
     }
 
     // MARK: - Reset
