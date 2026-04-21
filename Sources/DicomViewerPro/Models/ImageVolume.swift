@@ -29,6 +29,9 @@ public final class ImageVolume: Identifiable, ObservableObject {
     /// Optional SUV scale factor (for PET).
     public let suvScaleFactor: Double?
 
+    /// Canonical source file paths used to create this volume, when known.
+    public let sourceFiles: [String]
+
     /// Cached intensity range for auto W/L.
     public private(set) lazy var intensityRange: (min: Float, max: Float) = {
         guard !pixels.isEmpty else { return (0, 1) }
@@ -54,7 +57,8 @@ public final class ImageVolume: Identifiable, ObservableObject {
                 patientName: String = "",
                 seriesDescription: String = "",
                 studyDescription: String = "",
-                suvScaleFactor: Double? = nil) {
+                suvScaleFactor: Double? = nil,
+                sourceFiles: [String] = []) {
         precondition(pixels.count == depth * height * width,
                      "Pixel count (\(pixels.count)) doesn't match dims \(depth)x\(height)x\(width)")
         self.pixels = pixels
@@ -72,10 +76,21 @@ public final class ImageVolume: Identifiable, ObservableObject {
         self.seriesDescription = seriesDescription
         self.studyDescription = studyDescription
         self.suvScaleFactor = suvScaleFactor
+        self.sourceFiles = sourceFiles.map(Self.canonicalPath).sorted()
     }
 
     /// Size in bytes.
     public var sizeBytes: Int { pixels.count * MemoryLayout<Float>.stride }
+
+    public var sessionIdentity: String {
+        if !seriesUID.isEmpty {
+            return "series:\(seriesUID)"
+        }
+        if !sourceFiles.isEmpty {
+            return "files:\(sourceFiles.joined(separator: "|"))"
+        }
+        return "geometry:\(modality):\(width)x\(height)x\(depth):\(patientID):\(seriesDescription)"
+    }
 
     public var originVector: SIMD3<Double> {
         SIMD3<Double>(origin.x, origin.y, origin.z)
@@ -162,6 +177,13 @@ public final class ImageVolume: Identifiable, ObservableObject {
 
     private func clamp(_ v: Int, _ lo: Int, _ hi: Int) -> Int {
         max(lo, min(hi, v))
+    }
+
+    public static func canonicalPath(_ path: String) -> String {
+        URL(fileURLWithPath: path)
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+            .path
     }
 }
 

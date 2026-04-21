@@ -197,7 +197,8 @@ public enum DICOMLoader {
             patientID: first.patientID,
             patientName: first.patientName,
             seriesDescription: first.seriesDescription,
-            studyDescription: first.studyDescription
+            studyDescription: first.studyDescription,
+            sourceFiles: sorted.map(\.filePath)
         )
     }
 
@@ -480,7 +481,8 @@ public enum DICOMLoader {
         let grouped = Dictionary(grouping: files, by: { $0.seriesInstanceUID })
         var out: [DICOMSeries] = []
         for (uid, fs) in grouped where !uid.isEmpty {
-            let first = fs[0]
+            let unique = uniqueInstanceFiles(fs)
+            guard let first = unique.first else { continue }
             let s = DICOMSeries(
                 uid: uid,
                 modality: Modality.normalize(first.modality).rawValue,
@@ -490,11 +492,27 @@ public enum DICOMLoader {
                 studyUID: first.studyInstanceUID,
                 studyDescription: first.studyDescription,
                 studyDate: first.studyDate,
-                files: fs
+                files: unique
             )
             out.append(s)
         }
         return out.sorted { $0.description < $1.description }
+    }
+
+    private static func uniqueInstanceFiles(_ files: [DICOMFile]) -> [DICOMFile] {
+        var seen = Set<String>()
+        var out: [DICOMFile] = []
+        for file in files.sorted(by: { $0.filePath < $1.filePath }) {
+            let key: String
+            if !file.sopInstanceUID.isEmpty {
+                key = "sop:\(file.sopInstanceUID)"
+            } else {
+                key = "path:\(ImageVolume.canonicalPath(file.filePath))"
+            }
+            guard seen.insert(key).inserted else { continue }
+            out.append(file)
+        }
+        return out
     }
 }
 

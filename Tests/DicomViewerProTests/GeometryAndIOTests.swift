@@ -124,6 +124,132 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(snapshot.displayName, "CT - Chest CT")
     }
 
+    @MainActor
+    func testViewerDoesNotAppendDuplicateVolumeIdentity() {
+        let vm = ViewerViewModel()
+        let first = ImageVolume(
+            pixels: [1],
+            depth: 1,
+            height: 1,
+            width: 1,
+            modality: "CT",
+            seriesUID: "1.2.3",
+            sourceFiles: ["/tmp/a/image.dcm"]
+        )
+        let duplicate = ImageVolume(
+            pixels: [2],
+            depth: 1,
+            height: 1,
+            width: 1,
+            modality: "CT",
+            seriesUID: "1.2.3",
+            sourceFiles: ["/tmp/copy/image.dcm"]
+        )
+
+        XCTAssertTrue(vm.addLoadedVolumeIfNeeded(first).inserted)
+        XCTAssertFalse(vm.addLoadedVolumeIfNeeded(duplicate).inserted)
+        XCTAssertEqual(vm.loadedVolumes.count, 1)
+        XCTAssertEqual(vm.loadedVolumes.first?.pixels, [1])
+    }
+
+    @MainActor
+    func testViewerMergesDuplicateDICOMSeriesByUIDAndSOP() {
+        let vm = ViewerViewModel()
+        let firstFile = DICOMFile()
+        firstFile.sopInstanceUID = "1.2.3.4"
+        firstFile.filePath = "/tmp/original/image001.dcm"
+        let duplicateFile = DICOMFile()
+        duplicateFile.sopInstanceUID = "1.2.3.4"
+        duplicateFile.filePath = "/tmp/copy/image001.dcm"
+        let newFile = DICOMFile()
+        newFile.sopInstanceUID = "1.2.3.5"
+        newFile.filePath = "/tmp/original/image002.dcm"
+
+        let original = DICOMSeries(
+            uid: "series.uid",
+            modality: "CT",
+            description: "CT",
+            patientID: "P1",
+            patientName: "Patient",
+            studyUID: "study.uid",
+            studyDescription: "Study",
+            studyDate: "20260421",
+            files: [firstFile]
+        )
+        let duplicate = DICOMSeries(
+            uid: "series.uid",
+            modality: "CT",
+            description: "CT",
+            patientID: "P1",
+            patientName: "Patient",
+            studyUID: "study.uid",
+            studyDescription: "Study",
+            studyDate: "20260421",
+            files: [duplicateFile]
+        )
+        let update = DICOMSeries(
+            uid: "series.uid",
+            modality: "CT",
+            description: "CT",
+            patientID: "P1",
+            patientName: "Patient",
+            studyUID: "study.uid",
+            studyDescription: "Study",
+            studyDate: "20260421",
+            files: [newFile]
+        )
+
+        let firstMerge = vm.mergeScannedSeries([original])
+        XCTAssertEqual(firstMerge.added.count, 1)
+        XCTAssertEqual(vm.loadedSeries.count, 1)
+
+        let duplicateMerge = vm.mergeScannedSeries([duplicate])
+        XCTAssertEqual(duplicateMerge.skipped, 1)
+        XCTAssertEqual(vm.loadedSeries.first?.files.count, 1)
+
+        let updateMerge = vm.mergeScannedSeries([update])
+        XCTAssertEqual(updateMerge.updated, 1)
+        XCTAssertEqual(vm.loadedSeries.first?.files.count, 2)
+    }
+
+    @MainActor
+    func testViewerLoadNIfTIDoesNotAppendSameFileTwice() async throws {
+        var data = Data(count: 352)
+        data.writeInt32LE(348, at: 0)
+        data.writeInt16LE(3, at: 40)
+        data.writeInt16LE(1, at: 42)
+        data.writeInt16LE(1, at: 44)
+        data.writeInt16LE(1, at: 46)
+        data.writeInt16LE(1, at: 48)
+        data.writeInt16LE(16, at: 70)
+        data.writeInt16LE(32, at: 72)
+        data.writeFloat32LE(1, at: 76)
+        data.writeFloat32LE(1, at: 80)
+        data.writeFloat32LE(1, at: 84)
+        data.writeFloat32LE(1, at: 88)
+        data.writeFloat32LE(352, at: 108)
+        data.writeFloat32LE(1, at: 112)
+        data[344] = 0x6E
+        data[345] = 0x2B
+        data[346] = 0x31
+        data[347] = 0x00
+        data.appendFloat32LE(7)
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("duplicate-\(UUID().uuidString).nii")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try data.write(to: url)
+
+        let vm = ViewerViewModel()
+        await vm.loadNIfTI(url: url)
+        await vm.loadNIfTI(url: url)
+
+        XCTAssertEqual(vm.loadedVolumes.count, 1)
+        XCTAssertEqual(vm.currentVolume?.pixels.first, 7)
+        XCTAssertEqual(vm.loadedVolumes.first?.sourceFiles, [NIfTILoader.canonicalSourcePath(for: url)])
+        XCTAssertTrue(vm.statusMessage.contains("Already loaded"))
+    }
+
     func testAssistantCommandInterpreterExtractsViewerActions() {
         let actions = AssistantCommandInterpreter().actions(
             for: "Show lungs, switch to distance measurement, axial 42"

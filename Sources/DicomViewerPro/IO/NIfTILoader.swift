@@ -36,6 +36,14 @@ public enum NIfTILoader {
         return extensions.contains(where: { name.hasSuffix(".\($0)") })
     }
 
+    public static func canonicalSourcePath(for url: URL) -> String {
+        ImageVolume.canonicalPath(url.path)
+    }
+
+    public static func seriesUID(for url: URL) -> String {
+        "nifti:\(canonicalSourcePath(for: url))"
+    }
+
     // MARK: - Main entry point
 
     public static func load(_ url: URL, modalityHint: String = "") throws -> ImageVolume {
@@ -201,12 +209,13 @@ public enum NIfTILoader {
             origin: origin,
             direction: direction,
             modality: modality,
-            seriesUID: "NIFTI_\(abs(filename.hashValue))",
+            seriesUID: "nifti:\(ImageVolume.canonicalPath(sourcePath))",
             studyUID: "NIFTI_STUDY",
             patientID: "NIFTI_Import",
             patientName: "NIfTI Import",
             seriesDescription: desc,
-            studyDescription: "NIfTI"
+            studyDescription: "NIfTI",
+            sourceFiles: [sourcePath]
         )
     }
 

@@ -151,6 +151,13 @@ public final class ViewerViewModel: ObservableObject {
     // MARK: - Loading
 
     public func loadNIfTI(url: URL) async {
+        let sourcePath = NIfTILoader.canonicalSourcePath(for: url)
+        if let existing = loadedVolume(sourcePath: sourcePath) {
+            displayVolume(existing)
+            statusMessage = "Already loaded: \(existing.seriesDescription)"
+            return
+        }
+
         isLoading = true
         statusMessage = "Loading \(url.lastPathComponent)..."
         defer { isLoading = false }
@@ -160,9 +167,11 @@ public final class ViewerViewModel: ObservableObject {
                 try NIfTILoader.load(url)
             }.value
 
-            displayVolume(volume)
-            loadedVolumes.append(volume)
-            statusMessage = "Loaded: \(volume.seriesDescription) | \(Modality.normalize(volume.modality).displayName) | \(volume.width)×\(volume.height)×\(volume.depth)"
+            let result = addLoadedVolumeIfNeeded(volume)
+            displayVolume(result.volume)
+            statusMessage = result.inserted
+                ? "Loaded: \(volume.seriesDescription) | \(Modality.normalize(volume.modality).displayName) | \(volume.width)×\(volume.height)×\(volume.depth)"
+                : "Already loaded: \(result.volume.seriesDescription)"
         } catch {
             statusMessage = "Error: \(error.localizedDescription)"
         }
@@ -181,16 +190,23 @@ public final class ViewerViewModel: ObservableObject {
             }
         }.value
 
-        loadedSeries.append(contentsOf: series)
-        statusMessage = "Found \(series.count) series"
+        let merge = mergeScannedSeries(series)
+        statusMessage = "Found \(series.count) series | added \(merge.added.count), updated \(merge.updated), skipped \(merge.skipped) duplicates"
 
-        // Open first series automatically
-        if let first = series.first {
+        // Open the first new series automatically; if everything was already
+        // known, select the existing match instead of loading a duplicate.
+        if let first = merge.added.first ?? series.first.flatMap({ loadedSeriesMatch(for: $0) }) {
             await openSeries(first)
         }
     }
 
     public func openSeries(_ series: DICOMSeries) async {
+        if let existing = loadedVolume(seriesUID: series.uid) {
+            displayVolume(existing)
+            statusMessage = "Already loaded: \(series.displayName)"
+            return
+        }
+
         isLoading = true
         statusMessage = "Loading \(series.displayName)..."
         defer { isLoading = false }
@@ -200,9 +216,11 @@ public final class ViewerViewModel: ObservableObject {
                 try DICOMLoader.loadSeries(series.files)
             }.value
 
-            displayVolume(volume)
-            loadedVolumes.append(volume)
-            statusMessage = "Loaded: \(volume.seriesDescription) | \(Modality.normalize(volume.modality).displayName) | \(volume.width)×\(volume.height)×\(volume.depth)"
+            let result = addLoadedVolumeIfNeeded(volume)
+            displayVolume(result.volume)
+            statusMessage = result.inserted
+                ? "Loaded: \(volume.seriesDescription) | \(Modality.normalize(volume.modality).displayName) | \(volume.width)×\(volume.height)×\(volume.depth)"
+                : "Already loaded: \(series.displayName)"
         } catch {
             statusMessage = "Error: \(error.localizedDescription)"
         }
@@ -219,11 +237,11 @@ public final class ViewerViewModel: ObservableObject {
             return (dicomSeries, niftiURLs)
         }.value
 
-        let records = scanResult.0.map {
+        let records = uniqueIndexRecords(scanResult.0.map {
             PACSIndexBuilder.record(for: $0, sourcePath: url.path)
         } + scanResult.1.map {
             PACSIndexBuilder.recordForNIfTI(url: $0)
-        }
+        })
 
         do {
             for record in records {
@@ -247,6 +265,13 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     public func loadOverlay(url: URL) async {
+        let sourcePath = NIfTILoader.canonicalSourcePath(for: url)
+        if let fusion,
+           fusion.overlayVolume.sourceFiles.contains(sourcePath) {
+            statusMessage = "Overlay already loaded: \(fusion.overlayVolume.seriesDescription)"
+            return
+        }
+
         isLoading = true
         statusMessage = "Loading overlay..."
         defer { isLoading = false }
@@ -350,6 +375,93 @@ public final class ViewerViewModel: ObservableObject {
     public func removeOverlay() {
         fusion = nil
         statusMessage = "Overlay removed"
+    }
+
+    @discardableResult
+    public func mergeScannedSeries(_ series: [DICOMSeries]) -> (added: [DICOMSeries], updated: Int, skipped: Int) {
+        var added: [DICOMSeries] = []
+        var updated = 0
+        var skipped = 0
+
+        for incoming in series {
+            guard !incoming.uid.isEmpty else {
+                skipped += 1
+                continue
+            }
+
+            if let existingIndex = loadedSeries.firstIndex(where: { $0.uid == incoming.uid }) {
+                let existingKeys = Set(loadedSeries[existingIndex].files.map(dicomFileIdentity))
+                let newFiles = incoming.files.filter {
+                    !existingKeys.contains(dicomFileIdentity($0))
+                }
+                if newFiles.isEmpty {
+                    skipped += 1
+                } else {
+                    loadedSeries[existingIndex].files.append(contentsOf: newFiles)
+                    updated += 1
+                }
+            } else {
+                loadedSeries.append(incoming)
+                added.append(incoming)
+            }
+        }
+
+        return (added, updated, skipped)
+    }
+
+    @discardableResult
+    public func addLoadedVolumeIfNeeded(_ volume: ImageVolume) -> (volume: ImageVolume, inserted: Bool) {
+        if let existing = loadedVolume(matching: volume) {
+            return (existing, false)
+        }
+        loadedVolumes.append(volume)
+        return (volume, true)
+    }
+
+    private func loadedVolume(matching volume: ImageVolume) -> ImageVolume? {
+        loadedVolumes.first { candidate in
+            if !volume.seriesUID.isEmpty, candidate.seriesUID == volume.seriesUID {
+                return true
+            }
+            if !volume.sourceFiles.isEmpty,
+               !Set(candidate.sourceFiles).isDisjoint(with: volume.sourceFiles) {
+                return true
+            }
+            return candidate.sessionIdentity == volume.sessionIdentity
+        }
+    }
+
+    private func loadedVolume(seriesUID: String) -> ImageVolume? {
+        guard !seriesUID.isEmpty else { return nil }
+        return loadedVolumes.first { $0.seriesUID == seriesUID }
+    }
+
+    private func loadedVolume(sourcePath: String) -> ImageVolume? {
+        let canonical = ImageVolume.canonicalPath(sourcePath)
+        return loadedVolumes.first { volume in
+            volume.sourceFiles.contains(canonical) ||
+            volume.seriesUID == "nifti:\(canonical)"
+        }
+    }
+
+    private func loadedSeriesMatch(for series: DICOMSeries) -> DICOMSeries? {
+        loadedSeries.first { $0.uid == series.uid }
+    }
+
+    private func uniqueIndexRecords(_ records: [PACSIndexedSeries]) -> [PACSIndexedSeries] {
+        var seen = Set<String>()
+        var unique: [PACSIndexedSeries] = []
+        for record in records where seen.insert(record.id).inserted {
+            unique.append(record)
+        }
+        return unique
+    }
+
+    private func dicomFileIdentity(_ file: DICOMFile) -> String {
+        if !file.sopInstanceUID.isEmpty {
+            return "sop:\(file.sopInstanceUID)"
+        }
+        return "path:\(ImageVolume.canonicalPath(file.filePath))"
     }
 
     @discardableResult

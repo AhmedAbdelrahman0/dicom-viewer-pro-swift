@@ -163,8 +163,8 @@ public enum PACSIndexBuilder {
             studyDescription: series.studyDescription,
             studyDate: series.studyDate,
             seriesDescription: series.description,
-            sourcePath: sourcePath,
-            filePaths: series.files.map(\.filePath).sorted(),
+            sourcePath: ImageVolume.canonicalPath(sourcePath),
+            filePaths: Array(Set(series.files.map { ImageVolume.canonicalPath($0.filePath) })).sorted(),
             instanceCount: series.instanceCount,
             indexedAt: indexedAt
         )
@@ -177,7 +177,8 @@ public enum PACSIndexBuilder {
             parentDir: url.deletingLastPathComponent().path,
             hint: ""
         )
-        let id = "nifti:\(url.path)"
+        let sourcePath = NIfTILoader.canonicalSourcePath(for: url)
+        let id = "nifti:\(sourcePath)"
         return PACSIndexedSeries(
             id: id,
             kind: .nifti,
@@ -189,8 +190,8 @@ public enum PACSIndexBuilder {
             studyDescription: url.deletingLastPathComponent().lastPathComponent,
             studyDate: "",
             seriesDescription: stripVolumeExtension(url.lastPathComponent),
-            sourcePath: url.path,
-            filePaths: [url.path],
+            sourcePath: sourcePath,
+            filePaths: [sourcePath],
             instanceCount: 1,
             indexedAt: indexedAt
         )
