@@ -235,6 +235,114 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(map.voxelCounts()[1], 2)
     }
 
+    func testNRRDLabelmapRoundTripsClassesAndVoxels() throws {
+        let volume = ImageVolume(
+            pixels: [0, 0, 0, 0],
+            depth: 1,
+            height: 2,
+            width: 2,
+            spacing: (2, 3, 4),
+            modality: "CT"
+        )
+        let map = LabelMap(parentSeriesUID: volume.seriesUID, depth: 1, height: 2, width: 2)
+        map.classes = [
+            LabelClass(labelID: 1, name: "Lesion", category: .lesion, color: .red),
+            LabelClass(labelID: 2, name: "Liver", category: .organ, color: .green)
+        ]
+        map.voxels = [0, 1, 2, 1]
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("labels-\(UUID().uuidString).seg.nrrd")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try LabelIO.saveSlicerSeg(map, to: url, parentVolume: volume)
+        let loaded = try LabelIO.loadNRRDLabelmap(from: url, parentVolume: volume)
+
+        XCTAssertEqual(loaded.voxels, map.voxels)
+        XCTAssertEqual(loaded.classes.map(\.labelID).sorted(), [1, 2])
+        XCTAssertTrue(loaded.classes.contains { $0.name == "Lesion" })
+    }
+
+    func testNativeLabelPackageRoundTripsAnnotationsAndLandmarks() throws {
+        let volume = ImageVolume(
+            pixels: [0, 0, 0, 0],
+            depth: 1,
+            height: 2,
+            width: 2,
+            modality: "CT"
+        )
+        let map = LabelMap(parentSeriesUID: volume.seriesUID, depth: 1, height: 2, width: 2, name: "Case Labels")
+        map.classes = [LabelClass(labelID: 1, name: "Tumor", category: .tumor, color: .red)]
+        map.voxels = [0, 1, 1, 0]
+        var annotation = Annotation(type: .distance, points: [CGPoint(x: 0, y: 0), CGPoint(x: 1, y: 1)], axis: 2, sliceIndex: 0)
+        annotation.value = 1.414
+        annotation.unit = "mm"
+        annotation.label = "caliper"
+        let landmark = LandmarkPair(
+            fixed: SIMD3<Double>(1, 2, 3),
+            moving: SIMD3<Double>(4, 5, 6),
+            label: "LM1"
+        )
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("labels-\(UUID().uuidString).dvlabels")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try LabelIO.saveLabelPackage(
+            labelMap: map,
+            annotations: [annotation],
+            landmarks: [landmark],
+            parentVolume: volume,
+            to: url
+        )
+        let loaded = try LabelIO.loadLabelPackage(from: url, parentVolume: volume)
+
+        XCTAssertEqual(loaded.labelMap.name, "Case Labels")
+        XCTAssertEqual(loaded.labelMap.voxels, map.voxels)
+        XCTAssertEqual(loaded.labelMap.classes.first?.name, "Tumor")
+        XCTAssertEqual(loaded.annotations.count, 1)
+        XCTAssertEqual(loaded.annotations.first?.label, "caliper")
+        XCTAssertEqual(loaded.landmarks.first?.label, "LM1")
+        XCTAssertEqual(loaded.landmarks.first?.moving.z ?? 0, 6, accuracy: 1e-9)
+    }
+
+    @MainActor
+    func testLabelUndoRedoRestoresVoxelEdits() {
+        let volume = ImageVolume(
+            pixels: [0, 0, 0, 0],
+            depth: 1,
+            height: 2,
+            width: 2
+        )
+        let labeling = LabelingViewModel()
+        let map = labeling.createLabelMap(for: volume)
+
+        labeling.paint(axis: 2, sliceIndex: 0, pixelX: 1, pixelY: 0)
+        XCTAssertEqual(map.value(z: 0, y: 0, x: 1), 1)
+        XCTAssertEqual(labeling.undoDepth, 1)
+
+        labeling.undo()
+        XCTAssertEqual(map.value(z: 0, y: 0, x: 1), 0)
+        XCTAssertEqual(labeling.redoDepth, 1)
+
+        labeling.redo()
+        XCTAssertEqual(map.value(z: 0, y: 0, x: 1), 1)
+    }
+
+    func testIslandCleanupKeepsLargestComponent() {
+        let map = LabelMap(parentSeriesUID: "series", depth: 1, height: 3, width: 4)
+        map.voxels = [
+            1, 1, 0, 1,
+            1, 0, 0, 0,
+            0, 0, 1, 1
+        ]
+
+        let removed = LabelOperations.keepLargestIsland(label: map, classID: 1)
+
+        XCTAssertEqual(removed, 3)
+        XCTAssertEqual(map.voxelCounts()[1], 3)
+    }
+
     @MainActor
     func testSUVThresholdUsesPETOverlayForCTLabelMap() {
         let ct = ImageVolume(

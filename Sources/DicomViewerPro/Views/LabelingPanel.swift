@@ -11,6 +11,9 @@ struct LabelingPanel: View {
     @State private var showingExporter = false
     @State private var showingImporter = false
     @State private var exportFormat: LabelIO.Format = .niftiLabelmap
+    @State private var marginIterations: Int = 1
+    @State private var islandMinimumVoxels: Int = 10
+    @State private var logicalSourceClassID: UInt16 = 0
 
     var body: some View {
         ScrollView {
@@ -65,16 +68,45 @@ struct LabelingPanel: View {
                             ), in: 0.1...1.0)
                         }
 
-                        Button {
-                            if let v = vm.currentVolume {
-                                vm.labeling.createLabelMap(for: v)
+                        HStack {
+                            Button {
+                                vm.labeling.undo()
+                            } label: {
+                                Label("Undo", systemImage: "arrow.uturn.backward")
+                                    .frame(maxWidth: .infinity)
                             }
-                        } label: {
-                            Label("New Label Map", systemImage: "plus")
-                                .font(.system(size: 11))
+                            .disabled(vm.labeling.undoDepth == 0)
+
+                            Button {
+                                vm.labeling.redo()
+                            } label: {
+                                Label("Redo", systemImage: "arrow.uturn.forward")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .disabled(vm.labeling.redoDepth == 0)
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
+
+                        HStack {
+                            Button {
+                                if let v = vm.currentVolume {
+                                    vm.labeling.createLabelMap(for: v)
+                                }
+                            } label: {
+                                Label("New Label Map", systemImage: "plus")
+                                    .font(.system(size: 11))
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+
+                            Spacer()
+                            if vm.labeling.hasUnsavedChanges {
+                                Text("Unsaved")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundColor(.orange)
+                            }
+                        }
                     }
                 }
 
@@ -267,21 +299,77 @@ struct LabelingPanel: View {
                 // ── Morphology shortcuts ──
                 Group {
                     Text("Morphology").font(.headline)
+                    Stepper("Margin: \(marginIterations) voxel\(marginIterations == 1 ? "" : "s")",
+                            value: $marginIterations,
+                            in: 1...20)
+                        .font(.system(size: 11))
                     HStack {
                         Button {
-                            vm.labeling.dilateActive(iterations: 1)
+                            vm.labeling.dilateActive(iterations: marginIterations)
                         } label: {
-                            Label("Dilate", systemImage: "arrow.up.left.and.arrow.down.right")
+                            Label("Grow", systemImage: "arrow.up.left.and.arrow.down.right")
                                 .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
 
                         Button {
-                            vm.labeling.erodeActive(iterations: 1)
+                            vm.labeling.erodeActive(iterations: marginIterations)
                         } label: {
-                            Label("Erode", systemImage: "arrow.down.right.and.arrow.up.left")
+                            Label("Shrink", systemImage: "arrow.down.right.and.arrow.up.left")
                                 .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+
+                    Divider()
+
+                    Text("Islands").font(.subheadline)
+                    Stepper("Minimum: \(islandMinimumVoxels) voxels",
+                            value: $islandMinimumVoxels,
+                            in: 1...100_000)
+                        .font(.system(size: 11))
+                    HStack {
+                        Button {
+                            let removed = vm.labeling.keepLargestIslandActive()
+                            vm.statusMessage = "Removed \(removed) voxels outside the largest island"
+                        } label: {
+                            Label("Keep Largest", systemImage: "circle.dashed.inset.filled")
+                                .frame(maxWidth: .infinity)
+                        }
+                        Button {
+                            let removed = vm.labeling.removeSmallIslandsActive(minVoxels: islandMinimumVoxels)
+                            vm.statusMessage = "Removed \(removed) small-island voxels"
+                        } label: {
+                            Label("Remove Small", systemImage: "minus.circle")
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    if let map = vm.labeling.activeLabelMap, map.classes.count > 1 {
+                        Divider()
+                        Text("Logical").font(.subheadline)
+                        Picker("Source", selection: logicalSourceBinding(for: map)) {
+                            ForEach(map.classes.filter { $0.labelID != vm.labeling.activeClassID }) { cls in
+                                Text(cls.name).tag(cls.labelID)
+                            }
+                        }
+                        HStack {
+                            Button {
+                                applyLogical(.union)
+                            } label: {
+                                Label("Union", systemImage: "plus.square.on.square")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            Button {
+                                applyLogical(.replace)
+                            } label: {
+                                Label("Replace", systemImage: "arrow.triangle.2.circlepath")
+                                    .frame(maxWidth: .infinity)
+                            }
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
@@ -387,13 +475,19 @@ struct LabelingPanel: View {
             isPresented: $showingExporter,
             document: LabelDocumentRef(vm: vm, format: exportFormat),
             contentType: .data,
-            defaultFilename: "labels"
+            defaultFilename: defaultExportFilename
         ) { result in
             if case .success(let url) = result,
                let v = vm.currentVolume {
-                try? vm.labeling.saveActiveLabel(to: url,
+                do {
+                    try vm.labeling.saveActiveLabel(to: url,
                                                    format: exportFormat,
-                                                   parentVolume: v)
+                                                   parentVolume: v,
+                                                   annotations: vm.annotations)
+                    vm.statusMessage = "Saved labels to \(url.lastPathComponent)"
+                } catch {
+                    vm.statusMessage = "Label save failed: \(error.localizedDescription)"
+                }
             }
         }
         .fileImporter(
@@ -405,8 +499,42 @@ struct LabelingPanel: View {
                   let v = vm.currentVolume else { return }
             let accessing = url.startAccessingSecurityScopedResource()
             defer { if accessing { url.stopAccessingSecurityScopedResource() } }
-            try? vm.labeling.loadLabel(from: url, parentVolume: v)
+            do {
+                let imported = try vm.labeling.loadLabel(from: url, parentVolume: v)
+                if !imported.annotations.isEmpty {
+                    vm.annotations = imported.annotations
+                }
+                vm.statusMessage = "Loaded labels from \(url.lastPathComponent)"
+            } catch {
+                vm.statusMessage = "Label import failed: \(error.localizedDescription)"
+            }
         }
+    }
+
+    private var defaultExportFilename: String {
+        let ext = exportFormat.fileExtensions.first ?? "dat"
+        return "labels.\(ext)"
+    }
+
+    private func logicalSourceBinding(for map: LabelMap) -> Binding<UInt16> {
+        Binding(
+            get: {
+                if logicalSourceClassID != 0,
+                   logicalSourceClassID != vm.labeling.activeClassID,
+                   map.classes.contains(where: { $0.labelID == logicalSourceClassID }) {
+                    return logicalSourceClassID
+                }
+                return map.classes.first { $0.labelID != vm.labeling.activeClassID }?.labelID ?? 0
+            },
+            set: { logicalSourceClassID = $0 }
+        )
+    }
+
+    private func applyLogical(_ operation: LabelLogicalOperation) {
+        guard let map = vm.labeling.activeLabelMap else { return }
+        let sourceID = logicalSourceBinding(for: map).wrappedValue
+        let changed = vm.labeling.applyLogicalOperation(sourceClassID: sourceID, operation: operation)
+        vm.statusMessage = "\(operation.displayName) changed \(changed) voxels"
     }
 }
 

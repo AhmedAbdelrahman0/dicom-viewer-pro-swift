@@ -17,6 +17,10 @@ public final class LabelingViewModel: ObservableObject {
     /// The currently selected class ID for painting.
     @Published public var activeClassID: UInt16 = 1
 
+    @Published public private(set) var undoDepth: Int = 0
+    @Published public private(set) var redoDepth: Int = 0
+    @Published public private(set) var hasUnsavedChanges: Bool = false
+
     // MARK: - Tool state
 
     @Published public var labelingTool: LabelingTool = .none
@@ -45,6 +49,20 @@ public final class LabelingViewModel: ObservableObject {
 
     @Published public var availablePresets: [LabelPresetSet] = LabelPresets.all
 
+    private struct VoxelEditRecord {
+        let mapID: UUID
+        let name: String
+        let indices: [Int]
+        let before: [UInt16]
+        let after: [UInt16]
+    }
+
+    private var undoStack: [VoxelEditRecord] = []
+    private var redoStack: [VoxelEditRecord] = []
+    private var activeEditBaseline: (mapID: UUID, name: String, voxels: [UInt16])?
+    private let maxUndoRecords = 40
+    private let maxTrackedChangedVoxels = 5_000_000
+
     public init() {}
 
     // MARK: - Label map lifecycle
@@ -67,6 +85,7 @@ public final class LabelingViewModel: ObservableObject {
         if let first = map.classes.first {
             activeClassID = first.labelID
         }
+        hasUnsavedChanges = true
         return map
     }
 
@@ -74,11 +93,17 @@ public final class LabelingViewModel: ObservableObject {
     public func applyPreset(_ preset: LabelPresetSet) {
         guard let map = activeLabelMap else { return }
         let existing = Set(map.classes.map { $0.labelID })
+        var added = false
         for cls in preset.classes where !existing.contains(cls.labelID) {
             map.classes.append(cls)
+            added = true
         }
         if let first = preset.classes.first {
             activeClassID = first.labelID
+        }
+        if added {
+            hasUnsavedChanges = true
+            map.objectWillChange.send()
         }
     }
 
@@ -90,6 +115,8 @@ public final class LabelingViewModel: ObservableObject {
                          category: LabelCategory = .custom) {
         guard let map = activeLabelMap else { return }
         map.addClass(LabelClass(name: name, category: category, color: color))
+        hasUnsavedChanges = true
+        map.objectWillChange.send()
     }
 
     public func removeLabelMap(_ map: LabelMap) {
@@ -97,13 +124,81 @@ public final class LabelingViewModel: ObservableObject {
         if activeLabelMap?.id == map.id {
             activeLabelMap = labelMaps.first
         }
+        undoStack.removeAll { $0.mapID == map.id }
+        redoStack.removeAll { $0.mapID == map.id }
+        refreshHistoryDepths()
+        hasUnsavedChanges = true
+    }
+
+    public func beginVoxelEdit(named name: String) {
+        guard activeEditBaseline == nil, let map = activeLabelMap else { return }
+        activeEditBaseline = (map.id, name, map.voxels)
+    }
+
+    public func commitVoxelEdit() {
+        guard let baseline = activeEditBaseline else { return }
+        activeEditBaseline = nil
+        guard let map = labelMaps.first(where: { $0.id == baseline.mapID }) else { return }
+        recordVoxelChanges(map: map, name: baseline.name, before: baseline.voxels)
+    }
+
+    public func cancelVoxelEdit() {
+        activeEditBaseline = nil
+    }
+
+    public func recordVoxelEdit(named name: String, _ body: () -> Void) {
+        guard activeEditBaseline == nil, let map = activeLabelMap else {
+            body()
+            return
+        }
+        let before = map.voxels
+        body()
+        recordVoxelChanges(map: map, name: name, before: before)
+    }
+
+    public func markSaved() {
+        hasUnsavedChanges = false
+    }
+
+    public func undo() {
+        guard let record = undoStack.popLast(),
+              let map = labelMaps.first(where: { $0.id == record.mapID }) else {
+            refreshHistoryDepths()
+            return
+        }
+        for i in 0..<record.indices.count {
+            map.voxels[record.indices[i]] = record.before[i]
+        }
+        redoStack.append(record)
+        activeLabelMap = map
+        hasUnsavedChanges = true
+        map.objectWillChange.send()
+        refreshHistoryDepths()
+    }
+
+    public func redo() {
+        guard let record = redoStack.popLast(),
+              let map = labelMaps.first(where: { $0.id == record.mapID }) else {
+            refreshHistoryDepths()
+            return
+        }
+        for i in 0..<record.indices.count {
+            map.voxels[record.indices[i]] = record.after[i]
+        }
+        undoStack.append(record)
+        activeLabelMap = map
+        hasUnsavedChanges = true
+        map.objectWillChange.send()
+        refreshHistoryDepths()
     }
 
     // MARK: - Brush painting
 
     public func paint(axis: Int, sliceIndex: Int, pixelX: Int, pixelY: Int,
-                      erase: Bool = false) {
+                      erase: Bool = false, recordUndo: Bool = true) {
         guard let map = activeLabelMap else { return }
+        let ownsEdit = recordUndo && activeEditBaseline == nil
+        if ownsEdit { beginVoxelEdit(named: erase ? "Erase" : "Paint") }
         if brush3D {
             let (z, y, x) = voxelCoordForClick(axis: axis, sliceIndex: sliceIndex,
                                                 pixelX: pixelX, pixelY: pixelY)
@@ -116,18 +211,22 @@ public final class LabelingViewModel: ObservableObject {
                               radius: brushRadius, classID: activeClassID,
                               mode: erase ? .erase : .paint)
         }
+        if ownsEdit { commitVoxelEdit() } else { hasUnsavedChanges = true }
         map.objectWillChange.send()
     }
 
     public func paintStroke(axis: Int, sliceIndex: Int,
                              from: (Int, Int), to: (Int, Int),
-                             erase: Bool = false) {
+                             erase: Bool = false, recordUndo: Bool = true) {
         guard let map = activeLabelMap else { return }
+        let ownsEdit = recordUndo && activeEditBaseline == nil
+        if ownsEdit { beginVoxelEdit(named: erase ? "Erase stroke" : "Paint stroke") }
         BrushTool.paintLine(label: map, axis: axis, sliceIndex: sliceIndex,
                             fromX: from.0, fromY: from.1,
                             toX: to.0, toY: to.1,
                             radius: brushRadius, classID: activeClassID,
                             mode: erase ? .erase : .paint)
+        if ownsEdit { commitVoxelEdit() } else { hasUnsavedChanges = true }
         map.objectWillChange.send()
     }
 
@@ -138,11 +237,13 @@ public final class LabelingViewModel: ObservableObject {
                              above: Double,
                              valueTransform: ((Double) -> Double)? = nil) {
         guard let map = activeLabelMap else { return }
-        PETSegmentation.thresholdAbove(
-            volume: volume, label: map,
-            threshold: above, classID: activeClassID,
-            valueTransform: valueTransform
-        )
+        recordVoxelEdit(named: "Threshold") {
+            PETSegmentation.thresholdAbove(
+                volume: volume, label: map,
+                threshold: above, classID: activeClassID,
+                valueTransform: valueTransform
+            )
+        }
         map.objectWillChange.send()
     }
 
@@ -154,11 +255,13 @@ public final class LabelingViewModel: ObservableObject {
                                        valueTransform: ((Double) -> Double)? = nil) {
         guard let map = activeLabelMap else { return }
         let box = VoxelBox.around(seed, radius: boxRadius, in: volume)
-        PETSegmentation.percentOfMax(
-            volume: volume, label: map,
-            percent: percent, classID: activeClassID, boundingBox: box,
-            valueTransform: valueTransform
-        )
+        recordVoxelEdit(named: "Percent of max") {
+            PETSegmentation.percentOfMax(
+                volume: volume, label: map,
+                percent: percent, classID: activeClassID, boundingBox: box,
+                valueTransform: valueTransform
+            )
+        }
         map.objectWillChange.send()
     }
 
@@ -167,11 +270,13 @@ public final class LabelingViewModel: ObservableObject {
                            seed: (z: Int, y: Int, x: Int),
                            tolerance: Double) {
         guard let map = activeLabelMap else { return }
-        PETSegmentation.regionGrow(
-            volume: volume, label: map,
-            seed: seed, tolerance: tolerance,
-            classID: activeClassID
-        )
+        recordVoxelEdit(named: "Region grow") {
+            PETSegmentation.regionGrow(
+                volume: volume, label: map,
+                seed: seed, tolerance: tolerance,
+                classID: activeClassID
+            )
+        }
         map.objectWillChange.send()
     }
 
@@ -179,14 +284,61 @@ public final class LabelingViewModel: ObservableObject {
 
     public func dilateActive(iterations: Int = 1) {
         guard let map = activeLabelMap else { return }
-        PETSegmentation.dilate(label: map, classID: activeClassID, iterations: iterations)
+        recordVoxelEdit(named: "Dilate") {
+            PETSegmentation.dilate(label: map, classID: activeClassID, iterations: iterations)
+        }
         map.objectWillChange.send()
     }
 
     public func erodeActive(iterations: Int = 1) {
         guard let map = activeLabelMap else { return }
-        PETSegmentation.erode(label: map, classID: activeClassID, iterations: iterations)
+        recordVoxelEdit(named: "Erode") {
+            PETSegmentation.erode(label: map, classID: activeClassID, iterations: iterations)
+        }
         map.objectWillChange.send()
+    }
+
+    @discardableResult
+    public func keepLargestIslandActive() -> Int {
+        guard let map = activeLabelMap else { return 0 }
+        var removed = 0
+        recordVoxelEdit(named: "Keep largest island") {
+            removed = LabelOperations.keepLargestIsland(label: map, classID: activeClassID)
+        }
+        map.objectWillChange.send()
+        return removed
+    }
+
+    @discardableResult
+    public func removeSmallIslandsActive(minVoxels: Int) -> Int {
+        guard let map = activeLabelMap else { return 0 }
+        var removed = 0
+        recordVoxelEdit(named: "Remove small islands") {
+            removed = LabelOperations.removeSmallIslands(
+                label: map,
+                classID: activeClassID,
+                minVoxels: minVoxels
+            )
+        }
+        map.objectWillChange.send()
+        return removed
+    }
+
+    @discardableResult
+    public func applyLogicalOperation(sourceClassID: UInt16,
+                                      operation: LabelLogicalOperation) -> Int {
+        guard let map = activeLabelMap else { return 0 }
+        var changed = 0
+        recordVoxelEdit(named: operation.displayName) {
+            changed = LabelOperations.logical(
+                label: map,
+                targetID: activeClassID,
+                modifierID: sourceClassID,
+                operation: operation
+            )
+        }
+        map.objectWillChange.send()
+        return changed
     }
 
     // MARK: - Landmark registration
@@ -281,10 +433,18 @@ public final class LabelingViewModel: ObservableObject {
 
     // MARK: - I/O
 
-    public func saveActiveLabel(to url: URL, format: LabelIO.Format,
-                                 parentVolume: ImageVolume) throws {
+    public func saveActiveLabel(to url: URL,
+                                format: LabelIO.Format,
+                                parentVolume: ImageVolume,
+                                annotations: [Annotation] = []) throws {
         guard let map = activeLabelMap else { return }
         switch format {
+        case .labelPackage:
+            try LabelIO.saveLabelPackage(labelMap: map,
+                                         annotations: annotations,
+                                         landmarks: landmarks,
+                                         parentVolume: parentVolume,
+                                         to: url)
         case .niftiLabelmap, .niftiGz, .itkSnap:
             try LabelIO.saveNIfTI(map, to: url, parentVolume: parentVolume,
                                    writeLabelDescriptor: true)
@@ -293,7 +453,7 @@ public final class LabelingViewModel: ObservableObject {
         case .slicerSeg:
             try LabelIO.saveSlicerSeg(map, to: url, parentVolume: parentVolume)
         case .json:
-            try LabelIO.saveJSON(labelMap: map, annotations: [], to: url)
+            try LabelIO.saveJSON(labelMap: map, annotations: annotations, to: url)
         case .csv:
             try LabelIO.saveLandmarks(landmarks, to: url)
         case .dicomSeg, .dicomRTStruct:
@@ -302,30 +462,56 @@ public final class LabelingViewModel: ObservableObject {
                           userInfo: [NSLocalizedDescriptionKey:
                                      "DICOM SEG/RTSTRUCT export not yet implemented; use NIfTI or NRRD"])
         }
+        markSaved()
     }
 
-    public func loadLabel(from url: URL, parentVolume: ImageVolume) throws {
+    @discardableResult
+    public func loadLabel(from url: URL, parentVolume: ImageVolume) throws -> LabelImportResult {
         let name = url.lastPathComponent.lowercased()
-        let map: LabelMap
-        if name.hasSuffix(".seg.nrrd") || name.hasSuffix(".nrrd") {
-            // TODO: NRRD reader; for now fall back to treating as NIfTI if possible
-            throw NSError(domain: "LabelIO", code: 2,
-                          userInfo: [NSLocalizedDescriptionKey:
-                                     "NRRD reader not yet implemented — convert to NIfTI first"])
+        let result: LabelImportResult
+        if name.hasSuffix(".dvlabels") {
+            let package = try LabelIO.loadLabelPackage(from: url, parentVolume: parentVolume)
+            result = LabelImportResult(
+                labelMap: package.labelMap,
+                annotations: package.annotations,
+                landmarks: package.landmarks
+            )
+        } else if name.hasSuffix(".seg.nrrd") || name.hasSuffix(".nrrd") {
+            result = LabelImportResult(
+                labelMap: try LabelIO.loadNRRDLabelmap(from: url, parentVolume: parentVolume),
+                annotations: [],
+                landmarks: []
+            )
         } else if name.hasSuffix(".nii") || name.hasSuffix(".nii.gz") {
-            map = try LabelIO.loadNIfTILabelmap(from: url, parentVolume: parentVolume)
+            result = LabelImportResult(
+                labelMap: try LabelIO.loadNIfTILabelmap(from: url, parentVolume: parentVolume),
+                annotations: [],
+                landmarks: []
+            )
         } else if name.hasSuffix(".dcm") {
             // Try RTSTRUCT
-            map = try RTStructIO.loadRTStruct(from: url, referenceVolume: parentVolume)
+            result = LabelImportResult(
+                labelMap: try RTStructIO.loadRTStruct(from: url, referenceVolume: parentVolume),
+                annotations: [],
+                landmarks: []
+            )
         } else {
             throw NSError(domain: "LabelIO", code: 3,
                           userInfo: [NSLocalizedDescriptionKey: "Unsupported label file: \(name)"])
         }
+        let map = result.labelMap
         labelMaps.append(map)
         activeLabelMap = map
         if let first = map.classes.first {
             activeClassID = first.labelID
         }
+        if !result.landmarks.isEmpty {
+            landmarks = result.landmarks
+            updateTransform()
+        }
+        clearHistory()
+        markSaved()
+        return result
     }
 
     private func addLandmarkPair(fixed: SIMD3<Double>, moving: SIMD3<Double>) {
@@ -333,6 +519,57 @@ public final class LabelingViewModel: ObservableObject {
         landmarks.append(LandmarkPair(fixed: fixed, moving: moving, label: label))
         updateTransform()
     }
+
+    private func recordVoxelChanges(map: LabelMap, name: String, before: [UInt16]) {
+        guard before.count == map.voxels.count else { return }
+        var indices: [Int] = []
+        var oldValues: [UInt16] = []
+        var newValues: [UInt16] = []
+
+        for i in 0..<before.count where before[i] != map.voxels[i] {
+            if indices.count >= maxTrackedChangedVoxels {
+                clearHistory()
+                hasUnsavedChanges = true
+                return
+            }
+            indices.append(i)
+            oldValues.append(before[i])
+            newValues.append(map.voxels[i])
+        }
+
+        guard !indices.isEmpty else { return }
+        undoStack.append(VoxelEditRecord(
+            mapID: map.id,
+            name: name,
+            indices: indices,
+            before: oldValues,
+            after: newValues
+        ))
+        if undoStack.count > maxUndoRecords {
+            undoStack.removeFirst(undoStack.count - maxUndoRecords)
+        }
+        redoStack.removeAll()
+        hasUnsavedChanges = true
+        refreshHistoryDepths()
+    }
+
+    private func clearHistory() {
+        undoStack.removeAll()
+        redoStack.removeAll()
+        activeEditBaseline = nil
+        refreshHistoryDepths()
+    }
+
+    private func refreshHistoryDepths() {
+        undoDepth = undoStack.count
+        redoDepth = redoStack.count
+    }
+}
+
+public struct LabelImportResult {
+    public let labelMap: LabelMap
+    public let annotations: [Annotation]
+    public let landmarks: [LandmarkPair]
 }
 
 public enum LabelingTool: String, CaseIterable, Identifiable {

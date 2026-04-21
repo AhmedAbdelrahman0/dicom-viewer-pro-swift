@@ -303,6 +303,9 @@ public struct SliceView: View {
                 }
             }
             .onEnded { value in
+                if vm.labeling.labelingTool != .none {
+                    vm.labeling.commitVoxelEdit()
+                }
                 if vm.labeling.labelingTool == .none,
                    isMeasurementTool(vm.activeTool),
                    isTap(value),
@@ -322,15 +325,20 @@ public struct SliceView: View {
         switch vm.labeling.labelingTool {
         case .brush, .eraser:
             let erase = vm.labeling.labelingTool == .eraser
+            if lastPaintPoint == nil {
+                vm.labeling.beginVoxelEdit(named: erase ? "Erase stroke" : "Paint stroke")
+            }
             if let last = lastPaintPoint {
                 vm.labeling.paintStroke(
                     axis: axis,
                     sliceIndex: vm.sliceIndices[axis],
-                    from: last, to: p, erase: erase
+                    from: last, to: p, erase: erase,
+                    recordUndo: false
                 )
             } else {
                 vm.labeling.paint(axis: axis, sliceIndex: vm.sliceIndices[axis],
-                                  pixelX: p.0, pixelY: p.1, erase: erase)
+                                  pixelX: p.0, pixelY: p.1, erase: erase,
+                                  recordUndo: false)
             }
             lastPaintPoint = p
 

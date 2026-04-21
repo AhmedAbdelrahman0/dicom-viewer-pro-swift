@@ -585,13 +585,16 @@ public final class ViewerViewModel: ObservableObject {
 
         labeling.thresholdValue = threshold
         let transform: ((Double) -> Double)? = source.usesSUV ? suvTransform : nil
-        let count = PETSegmentation.thresholdAbove(
-            volume: source.volume,
-            label: map,
-            threshold: threshold,
-            classID: labeling.activeClassID,
-            valueTransform: transform
-        )
+        var count = 0
+        labeling.recordVoxelEdit(named: "SUV threshold") {
+            count = PETSegmentation.thresholdAbove(
+                volume: source.volume,
+                label: map,
+                threshold: threshold,
+                classID: labeling.activeClassID,
+                valueTransform: transform
+            )
+        }
         map.objectWillChange.send()
 
         let unit = source.usesSUV ? "SUV" : "intensity"
@@ -613,14 +616,17 @@ public final class ViewerViewModel: ObservableObject {
         labeling.percentOfMax = percent
         let transform: ((Double) -> Double)? = source.usesSUV ? suvTransform : nil
         let box = VoxelBox.around(seed, radius: boxRadius, in: source.volume)
-        let count = PETSegmentation.percentOfMax(
-            volume: source.volume,
-            label: map,
-            percent: percent,
-            classID: labeling.activeClassID,
-            boundingBox: box,
-            valueTransform: transform
-        )
+        var count = 0
+        labeling.recordVoxelEdit(named: "SUV percent of max") {
+            count = PETSegmentation.percentOfMax(
+                volume: source.volume,
+                label: map,
+                percent: percent,
+                classID: labeling.activeClassID,
+                boundingBox: box,
+                valueTransform: transform
+            )
+        }
         map.objectWillChange.send()
 
         let unit = source.usesSUV ? "SUVmax" : "intensity max"

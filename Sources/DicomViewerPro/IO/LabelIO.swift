@@ -15,9 +15,23 @@ import simd
 ///   • **JSON annotations** (COCO, CVAT-style, plain points/boxes)
 ///   • **BIDS derivatives** (NIfTI + JSON sidecar)
 public enum LabelIO {
+    public enum LabelIOError: Error, LocalizedError {
+        case unsupportedNRRD(String)
+        case invalidLabelPackage(String)
+        case geometryMismatch(String)
+
+        public var errorDescription: String? {
+            switch self {
+            case .unsupportedNRRD(let message): return "Unsupported NRRD labelmap: \(message)"
+            case .invalidLabelPackage(let message): return "Invalid label package: \(message)"
+            case .geometryMismatch(let message): return "Label geometry mismatch: \(message)"
+            }
+        }
+    }
 
     // Recognized file types
     public enum Format: String, CaseIterable, Identifiable {
+        case labelPackage = "DICOM Viewer Labels"
         case niftiLabelmap = "NIfTI Labelmap"
         case niftiGz = "NIfTI (.nii.gz)"
         case nrrdLabelmap = "NRRD Labelmap"
@@ -32,6 +46,7 @@ public enum LabelIO {
 
         public var fileExtensions: [String] {
             switch self {
+            case .labelPackage:  return ["dvlabels"]
             case .niftiLabelmap: return ["nii"]
             case .niftiGz:       return ["nii.gz"]
             case .nrrdLabelmap:  return ["nrrd"]
@@ -43,6 +58,12 @@ public enum LabelIO {
             case .csv:           return ["csv"]
             }
         }
+    }
+
+    public struct LabelPackageLoadResult {
+        public let labelMap: LabelMap
+        public let annotations: [Annotation]
+        public let landmarks: [LandmarkPair]
     }
 
     // MARK: - NIfTI labelmap save
@@ -126,6 +147,69 @@ public enum LabelIO {
         }
 
         return label
+    }
+
+    // MARK: - Native package
+
+    public static func saveLabelPackage(labelMap: LabelMap,
+                                        annotations: [Annotation],
+                                        landmarks: [LandmarkPair],
+                                        parentVolume: ImageVolume,
+                                        to url: URL) throws {
+        let package = LabelPackageDTO(
+            version: 1,
+            generator: "DICOM Viewer Pro",
+            parentSeriesUID: labelMap.parentSeriesUID,
+            name: labelMap.name,
+            dimensions: DimensionsDTO(width: labelMap.width, height: labelMap.height, depth: labelMap.depth),
+            spacing: Vector3DTO(parentVolume.spacing.x, parentVolume.spacing.y, parentVolume.spacing.z),
+            origin: Vector3DTO(parentVolume.origin.x, parentVolume.origin.y, parentVolume.origin.z),
+            directionColumns: [
+                Vector3DTO(parentVolume.direction[0].x, parentVolume.direction[0].y, parentVolume.direction[0].z),
+                Vector3DTO(parentVolume.direction[1].x, parentVolume.direction[1].y, parentVolume.direction[1].z),
+                Vector3DTO(parentVolume.direction[2].x, parentVolume.direction[2].y, parentVolume.direction[2].z)
+            ],
+            classes: labelMap.classes.map(LabelClassDTO.init),
+            voxelsRLE: encodeRLE(labelMap.voxels),
+            annotations: annotations.map(AnnotationDTO.init),
+            landmarks: landmarks.map(LandmarkDTO.init)
+        )
+        let data = try JSONEncoder.prettySorted.encode(package)
+        try data.write(to: url)
+    }
+
+    public static func loadLabelPackage(from url: URL,
+                                        parentVolume: ImageVolume? = nil) throws -> LabelPackageLoadResult {
+        let data = try Data(contentsOf: url)
+        let package = try JSONDecoder().decode(LabelPackageDTO.self, from: data)
+        let expectedCount = package.dimensions.width * package.dimensions.height * package.dimensions.depth
+        let voxels = try decodeRLE(package.voxelsRLE, expectedCount: expectedCount)
+
+        if let parentVolume {
+            guard parentVolume.width == package.dimensions.width,
+                  parentVolume.height == package.dimensions.height,
+                  parentVolume.depth == package.dimensions.depth else {
+                throw LabelIOError.geometryMismatch(
+                    "package \(package.dimensions.width)x\(package.dimensions.height)x\(package.dimensions.depth), current volume \(parentVolume.width)x\(parentVolume.height)x\(parentVolume.depth)"
+                )
+            }
+        }
+
+        let labelMap = LabelMap(
+            parentSeriesUID: parentVolume?.seriesUID ?? package.parentSeriesUID,
+            depth: package.dimensions.depth,
+            height: package.dimensions.height,
+            width: package.dimensions.width,
+            name: package.name,
+            classes: package.classes.map { $0.labelClass }
+        )
+        labelMap.voxels = voxels
+
+        return LabelPackageLoadResult(
+            labelMap: labelMap,
+            annotations: package.annotations.map(\.annotation),
+            landmarks: package.landmarks.map(\.landmark)
+        )
     }
 
     // MARK: - ITK-SNAP descriptor (.label.txt)
@@ -222,6 +306,81 @@ public enum LabelIO {
             data.append(UnsafeBufferPointer(start: buf.baseAddress, count: buf.count))
         }
         try data.write(to: url)
+    }
+
+    public static func loadNRRDLabelmap(from url: URL,
+                                        parentVolume: ImageVolume? = nil) throws -> LabelMap {
+        let data = try Data(contentsOf: url)
+        let split = try splitNRRDHeader(data)
+        guard let headerText = String(data: split.header, encoding: .ascii) else {
+            throw LabelIOError.unsupportedNRRD("header is not ASCII")
+        }
+        let fields = parseNRRDHeader(headerText)
+
+        let dimension = Int(fields["dimension"] ?? "3") ?? 3
+        guard dimension == 3 else {
+            throw LabelIOError.unsupportedNRRD("only 3D integer labelmaps are supported; got dimension \(dimension)")
+        }
+        guard let sizes = fields["sizes"]?.split(separator: " ").compactMap({ Int($0) }),
+              sizes.count >= 3 else {
+            throw LabelIOError.unsupportedNRRD("missing sizes")
+        }
+        let width = sizes[0]
+        let height = sizes[1]
+        let depth = sizes[2]
+        let total = width * height * depth
+
+        if let parentVolume {
+            guard parentVolume.width == width,
+                  parentVolume.height == height,
+                  parentVolume.depth == depth else {
+                throw LabelIOError.geometryMismatch(
+                    "labelmap \(width)x\(height)x\(depth), current volume \(parentVolume.width)x\(parentVolume.height)x\(parentVolume.depth)"
+                )
+            }
+        }
+
+        let encoding = fields["encoding"]?.lowercased() ?? "raw"
+        guard encoding == "raw" else {
+            throw LabelIOError.unsupportedNRRD("encoding \(encoding)")
+        }
+
+        let type = fields["type"]?.lowercased() ?? "ushort"
+        let endian = fields["endian"]?.lowercased() ?? "little"
+        var voxels = [UInt16](repeating: 0, count: total)
+        switch type {
+        case "ushort", "uint16", "unsigned short":
+            guard data.count >= split.dataOffset + total * 2 else {
+                throw LabelIOError.unsupportedNRRD("raw payload is shorter than declared size")
+            }
+            for i in 0..<total {
+                let offset = split.dataOffset + i * 2
+                voxels[i] = endian == "big" ? data.readUInt16BE(at: offset) : data.readUInt16LE(at: offset)
+            }
+        case "uchar", "uint8", "unsigned char":
+            guard data.count >= split.dataOffset + total else {
+                throw LabelIOError.unsupportedNRRD("raw payload is shorter than declared size")
+            }
+            for i in 0..<total {
+                voxels[i] = UInt16(data[split.dataOffset + i])
+            }
+        default:
+            throw LabelIOError.unsupportedNRRD("type \(type)")
+        }
+
+        let label = LabelMap(
+            parentSeriesUID: parentVolume?.seriesUID ?? "",
+            depth: depth,
+            height: height,
+            width: width,
+            name: url.deletingPathExtension().lastPathComponent
+        )
+        label.voxels = voxels
+        label.classes = classesFromNRRD(fields: fields, voxels: voxels)
+        if label.classes.isEmpty {
+            label.classes = autogeneratedClasses(from: voxels)
+        }
+        return label
     }
 
     // MARK: - 3D Slicer .seg.nrrd
@@ -441,11 +600,286 @@ public enum LabelIO {
     private static func lpsVectorToRAS(_ v: SIMD3<Double>) -> SIMD3<Double> {
         SIMD3<Double>(-v.x, -v.y, v.z)
     }
+
+    private static func splitNRRDHeader(_ data: Data) throws -> (header: Data, dataOffset: Int) {
+        let lf = Data([0x0A, 0x0A])
+        let crlf = Data([0x0D, 0x0A, 0x0D, 0x0A])
+        if let range = data.range(of: crlf) {
+            return (data.subdata(in: 0..<range.lowerBound), range.upperBound)
+        }
+        if let range = data.range(of: lf) {
+            return (data.subdata(in: 0..<range.lowerBound), range.upperBound)
+        }
+        throw LabelIOError.unsupportedNRRD("missing blank line after header")
+    }
+
+    private static func parseNRRDHeader(_ text: String) -> [String: String] {
+        var fields: [String: String] = [:]
+        for raw in text.components(separatedBy: .newlines) {
+            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty, !line.hasPrefix("#"), !line.hasPrefix("NRRD") else { continue }
+            let separator = line.range(of: ":=") ?? line.range(of: ":")
+            guard let separator else { continue }
+            let key = String(line[..<separator.lowerBound]).trimmingCharacters(in: .whitespaces)
+            let value = String(line[separator.upperBound...]).trimmingCharacters(in: .whitespaces)
+            fields[key] = value
+        }
+        return fields
+    }
+
+    private static func classesFromNRRD(fields: [String: String], voxels: [UInt16]) -> [LabelClass] {
+        let unique = Set(voxels.filter { $0 != 0 })
+        let segmentIndices = fields.keys.compactMap { key -> Int? in
+            guard key.hasPrefix("Segment") else { return nil }
+            let digits = key.dropFirst("Segment".count).prefix { $0.isNumber }
+            return Int(digits)
+        }
+        let uniqueSegmentIndices = Array(Set(segmentIndices)).sorted()
+        var classes: [LabelClass] = []
+
+        for segmentIndex in uniqueSegmentIndices {
+            let prefix = "Segment\(segmentIndex)_"
+            guard let labelValueText = fields["\(prefix)LabelValue"],
+                  let labelValue = UInt16(labelValueText),
+                  labelValue != 0,
+                  unique.contains(labelValue) || unique.isEmpty else { continue }
+            let name = fields["\(prefix)Name"] ?? "Label \(labelValue)"
+            let color = colorFromSlicerString(fields["\(prefix)Color"]) ?? autogeneratedColor(index: classes.count)
+            classes.append(LabelClass(
+                labelID: labelValue,
+                name: name,
+                category: inferCategory(from: name),
+                color: color
+            ))
+        }
+
+        return classes
+    }
+
+    private static func autogeneratedClasses(from voxels: [UInt16]) -> [LabelClass] {
+        Set(voxels.filter { $0 != 0 }).sorted().enumerated().map { index, value in
+            LabelClass(
+                labelID: value,
+                name: "Label \(value)",
+                category: .custom,
+                color: autogeneratedColor(index: index)
+            )
+        }
+    }
+
+    private static func autogeneratedColor(index: Int) -> Color {
+        let colors: [Color] = [.red, .green, .blue, .yellow, .orange, .purple, .pink,
+                               .cyan, .mint, .indigo, .teal, .brown]
+        return colors[index % colors.count]
+    }
+
+    private static func colorFromSlicerString(_ value: String?) -> Color? {
+        guard let value else { return nil }
+        let parts = value.split(separator: " ").compactMap { Double($0) }
+        guard parts.count >= 3 else { return nil }
+        return Color(
+            .displayP3,
+            red: max(0, min(1, parts[0])),
+            green: max(0, min(1, parts[1])),
+            blue: max(0, min(1, parts[2])),
+            opacity: 1
+        )
+    }
+
+    private static func encodeRLE(_ voxels: [UInt16]) -> [RLEEntryDTO] {
+        guard let first = voxels.first else { return [] }
+        var result: [RLEEntryDTO] = []
+        var current = first
+        var count = 0
+        for voxel in voxels {
+            if voxel == current {
+                count += 1
+            } else {
+                result.append(RLEEntryDTO(value: current, count: count))
+                current = voxel
+                count = 1
+            }
+        }
+        result.append(RLEEntryDTO(value: current, count: count))
+        return result
+    }
+
+    private static func decodeRLE(_ entries: [RLEEntryDTO], expectedCount: Int) throws -> [UInt16] {
+        var voxels: [UInt16] = []
+        voxels.reserveCapacity(expectedCount)
+        for entry in entries {
+            guard entry.count >= 0 else {
+                throw LabelIOError.invalidLabelPackage("negative RLE count")
+            }
+            voxels.append(contentsOf: repeatElement(entry.value, count: entry.count))
+        }
+        guard voxels.count == expectedCount else {
+            throw LabelIOError.invalidLabelPackage("RLE voxel count \(voxels.count) does not match \(expectedCount)")
+        }
+        return voxels
+    }
+}
+
+private struct LabelPackageDTO: Codable {
+    let version: Int
+    let generator: String
+    let parentSeriesUID: String
+    let name: String
+    let dimensions: DimensionsDTO
+    let spacing: Vector3DTO
+    let origin: Vector3DTO
+    let directionColumns: [Vector3DTO]
+    let classes: [LabelClassDTO]
+    let voxelsRLE: [RLEEntryDTO]
+    let annotations: [AnnotationDTO]
+    let landmarks: [LandmarkDTO]
+}
+
+private struct DimensionsDTO: Codable {
+    let width: Int
+    let height: Int
+    let depth: Int
+}
+
+private struct Vector3DTO: Codable {
+    let x: Double
+    let y: Double
+    let z: Double
+
+    init(_ x: Double, _ y: Double, _ z: Double) {
+        self.x = x
+        self.y = y
+        self.z = z
+    }
+}
+
+private struct RLEEntryDTO: Codable {
+    let value: UInt16
+    let count: Int
+}
+
+private struct LabelClassDTO: Codable {
+    let labelID: UInt16
+    let name: String
+    let category: String
+    let color: RGBDTO
+    let dicomCode: String?
+    let fmaID: String?
+    let notes: String
+    let opacity: Double
+    let visible: Bool
+
+    init(_ labelClass: LabelClass) {
+        let (r, g, b) = labelClass.color.rgbBytes()
+        self.labelID = labelClass.labelID
+        self.name = labelClass.name
+        self.category = labelClass.category.rawValue
+        self.color = RGBDTO(r: r, g: g, b: b)
+        self.dicomCode = labelClass.dicomCode
+        self.fmaID = labelClass.fmaID
+        self.notes = labelClass.notes
+        self.opacity = labelClass.opacity
+        self.visible = labelClass.visible
+    }
+
+    var labelClass: LabelClass {
+        LabelClass(
+            labelID: labelID,
+            name: name,
+            category: LabelCategory(rawValue: category) ?? .custom,
+            color: Color(r: Int(color.r), g: Int(color.g), b: Int(color.b)),
+            dicomCode: dicomCode,
+            fmaID: fmaID,
+            notes: notes,
+            opacity: opacity,
+            visible: visible
+        )
+    }
+}
+
+private struct RGBDTO: Codable {
+    let r: UInt8
+    let g: UInt8
+    let b: UInt8
+}
+
+private struct AnnotationDTO: Codable {
+    let type: String
+    let points: [PointDTO]
+    let axis: Int
+    let sliceIndex: Int
+    let value: Double?
+    let unit: String
+    let label: String
+
+    init(_ annotation: Annotation) {
+        self.type = annotation.type.rawValue
+        self.points = annotation.points.map { PointDTO(x: Double($0.x), y: Double($0.y)) }
+        self.axis = annotation.axis
+        self.sliceIndex = annotation.sliceIndex
+        self.value = annotation.value
+        self.unit = annotation.unit
+        self.label = annotation.label
+    }
+
+    var annotation: Annotation {
+        var annotation = Annotation(
+            type: AnnotationType(rawValue: type) ?? .text,
+            points: points.map { CGPoint(x: $0.x, y: $0.y) },
+            axis: axis,
+            sliceIndex: sliceIndex
+        )
+        annotation.value = value
+        annotation.unit = unit
+        annotation.label = label
+        return annotation
+    }
+}
+
+private struct PointDTO: Codable {
+    let x: Double
+    let y: Double
+}
+
+private struct LandmarkDTO: Codable {
+    let label: String
+    let fixed: Vector3DTO
+    let moving: Vector3DTO
+
+    init(_ landmark: LandmarkPair) {
+        self.label = landmark.label
+        self.fixed = Vector3DTO(landmark.fixed.x, landmark.fixed.y, landmark.fixed.z)
+        self.moving = Vector3DTO(landmark.moving.x, landmark.moving.y, landmark.moving.z)
+    }
+
+    var landmark: LandmarkPair {
+        LandmarkPair(
+            fixed: SIMD3(fixed.x, fixed.y, fixed.z),
+            moving: SIMD3(moving.x, moving.y, moving.z),
+            label: label
+        )
+    }
+}
+
+private extension JSONEncoder {
+    static var prettySorted: JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return encoder
+    }
 }
 
 // MARK: - Data write helpers
 
 private extension Data {
+    func readUInt16LE(at offset: Int) -> UInt16 {
+        UInt16(self[offset]) | (UInt16(self[offset + 1]) << 8)
+    }
+
+    func readUInt16BE(at offset: Int) -> UInt16 {
+        (UInt16(self[offset]) << 8) | UInt16(self[offset + 1])
+    }
+
     mutating func writeInt16(_ value: Int16, at offset: Int) {
         var v = value
         Swift.withUnsafeBytes(of: &v) { src in

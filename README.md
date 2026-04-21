@@ -121,7 +121,9 @@ Full multimodality labeling support with emphasis on PET/CT:
 | **SUV Threshold** | Fixed threshold (e.g. SUV ≥ 2.5) across whole volume |
 | **40% SUVmax** | EANM-standard PET tumor segmentation around a seed |
 | **Region Growing** | Flood-fill connected voxels within tolerance of seed |
-| **Dilate / Erode** | Morphological clean-up |
+| **Grow / Shrink** | Margin-style morphological clean-up |
+| **Islands** | Keep largest connected component or remove small islands |
+| **Logical** | Union / replace one class into another in the current labelmap |
 | **Landmark** | Click matching points for rigid registration |
 
 ### Built-in Label Presets (all known schemes)
@@ -138,9 +140,10 @@ Full multimodality labeling support with emphasis on PET/CT:
 - **Spine Vertebrae** — C1–L5 individually labeled
 
 ### Annotation File Formats
+- **DICOM Viewer Labels** (`.dvlabels`) — native package with label voxels, classes, annotations, landmarks, and geometry
 - **NIfTI labelmap** (`.nii` / `.nii.gz`) — integer mask
-- **NRRD labelmap** (`.nrrd`)
-- **3D Slicer segmentation** (`.seg.nrrd`) with segment metadata
+- **NRRD labelmap** (`.nrrd`) import/export
+- **3D Slicer segmentation** (`.seg.nrrd`) import/export with segment metadata
 - **ITK-SNAP** (`.nii` + `.label.txt` sidecar)
 - **DICOM RTSTRUCT** (read) — parses contour sequences and rasterizes to voxel grid
 - **JSON annotations** (COCO/CVAT-compatible subset)
@@ -153,9 +156,8 @@ max, min, std, SUV max, SUV mean, SUV peak, and **TLG** (Total Lesion Glycolysis
 ## Limitations
 
 - DICOM JPEG-compressed pixel data not yet supported
-- Full 3D volume rendering yet (2D + MIP only)
-- NRRD label import (export works)
-- DICOM SEG export (read-only for now)
+- DICOM SEG export not yet implemented
+- Exclusive labelmaps are used, so overlapping Slicer segments are flattened on import/export
 
 ## License
 
