@@ -28,15 +28,17 @@ public struct ContentView: View {
                              })
                 .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
         } content: {
-            MPRLayoutView()
-                .environmentObject(vm)
-                .navigationSplitViewColumnWidth(min: 400, ideal: 900)
+            VStack(spacing: 0) {
+                customToolbar
+                MPRLayoutView()
+                    .environmentObject(vm)
+            }
+            .navigationSplitViewColumnWidth(min: 400, ideal: 900)
         } detail: {
             ControlsPanel()
                 .environmentObject(vm)
                 .navigationSplitViewColumnWidth(min: 260, ideal: 320, max: 400)
         }
-        .toolbar { mainToolbar }
         .overlay(alignment: .bottom) {
             if vm.isLoading {
                 loadingIndicator
@@ -61,11 +63,10 @@ public struct ContentView: View {
         }
     }
 
-    // MARK: - Toolbar
+    // MARK: - Custom toolbar (in-content so hover + tooltips work reliably)
 
-    @ToolbarContentBuilder
-    private var mainToolbar: some ToolbarContent {
-        ToolbarItemGroup(placement: .primaryAction) {
+    private var customToolbar: some View {
+        HStack(spacing: 6) {
             ForEach(ViewerTool.allCases) { tool in
                 ToolButton(
                     tool: tool,
@@ -73,15 +74,33 @@ public struct ContentView: View {
                     action: { vm.activeTool = tool }
                 )
             }
+
             Divider()
-            Button {
+                .frame(height: 20)
+                .padding(.horizontal, 4)
+
+            HoverIconButton(
+                systemImage: "wand.and.stars",
+                tooltip: "Auto Window / Level\n"
+                       + "Automatically compute window/level from the\n"
+                       + "1–99 percentile of the current volume.\n"
+                       + "Shortcut: ⌘R"
+            ) {
                 vm.autoWL()
-            } label: {
-                Label("Auto W/L", systemImage: "wand.and.stars")
             }
-            .help("Automatically compute window/level from the 1–99 percentile of the current volume.\nShortcut: ⌘R")
             .keyboardShortcut("r", modifiers: [.command])
+
+            Spacer()
+
+            Text(vm.activeTool.displayName)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 8)
         }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(Color(.displayP3, white: 0.14))
+        .overlay(Divider(), alignment: .bottom)
     }
 
     // MARK: - Status bar
@@ -187,7 +206,7 @@ private struct ToolButton: View {
             if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
             #endif
         }
-        .help(tool.helpText)
+        .tooltip(tool.helpText)
         .modifier(KeyboardShortcutIfAvailable(character: tool.keyboardShortcut))
     }
 }
@@ -239,7 +258,7 @@ public struct HoverIconButton: View {
             if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
             #endif
         }
-        .help(tooltip)
+        .tooltip(tooltip)
     }
 }
 
