@@ -40,6 +40,9 @@ public final class ViewerViewModel: ObservableObject {
     // Fusion (optional)
     @Published public var fusion: FusionPair?
 
+    // Labeling (delegate to dedicated VM)
+    @Published public var labeling = LabelingViewModel()
+
     // Window/Level
     @Published public var window: Double = 400
     @Published public var level: Double = 40
@@ -245,6 +248,32 @@ public final class ViewerViewModel: ObservableObject {
             pixels: pixels, width: w, height: h,
             window: window, level: level, invert: invertColors
         )
+    }
+
+    public func makeLabelImage(for axis: Int, outlineOnly: Bool = false) -> CGImage? {
+        guard let map = labeling.activeLabelMap else { return nil }
+        guard map.visible else { return nil }
+        let slice = map.slice(axis: axis, index: sliceIndices[axis])
+        var values = slice.values
+        let w = slice.width, h = slice.height
+        // Flip for sagittal/coronal (match base slice orientation)
+        if axis == 0 || axis == 1 {
+            var flipped = [UInt16](repeating: 0, count: values.count)
+            for row in 0..<h {
+                for col in 0..<w {
+                    flipped[(h - 1 - row) * w + col] = values[row * w + col]
+                }
+            }
+            values = flipped
+        }
+        if outlineOnly {
+            return LabelRenderer.makeOutlineImage(values: values, width: w, height: h,
+                                                    classes: map.classes,
+                                                    baseAlpha: map.opacity)
+        }
+        return LabelRenderer.makeImage(values: values, width: w, height: h,
+                                         classes: map.classes,
+                                         baseAlpha: map.opacity)
     }
 
     public func makeOverlayImage(for axis: Int) -> CGImage? {

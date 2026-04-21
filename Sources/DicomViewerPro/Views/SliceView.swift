@@ -13,6 +13,7 @@ public struct SliceView: View {
     @State private var measurementPoints: [CGPoint] = []
     @State private var activeMeasurement: Annotation?
     @State private var dragStart: CGPoint?
+    @State private var lastPaintPoint: (Int, Int)?
 
     public init(axis: Int, title: String) {
         self.axis = axis
@@ -43,6 +44,15 @@ public struct SliceView: View {
                             Image(decorative: ov, scale: 1.0)
                                 .resizable()
                                 .interpolation(.medium)
+                                .frame(width: imgW * fit, height: imgH * fit)
+                                .offset(pan)
+                        }
+
+                        // Label overlay
+                        if let lbl = vm.makeLabelImage(for: axis) {
+                            Image(decorative: lbl, scale: 1.0)
+                                .resizable()
+                                .interpolation(.none)
                                 .frame(width: imgW * fit, height: imgH * fit)
                                 .offset(pan)
                         }
@@ -203,14 +213,20 @@ public struct SliceView: View {
     }
 
     private func dragGesture(geo: GeometryProxy) -> some Gesture {
-        DragGesture(minimumDistance: 1)
+        DragGesture(minimumDistance: 0)
             .onChanged { value in
                 let translation = value.translation
                 if dragStart == nil { dragStart = value.location }
 
+                // Labeling tools take priority over viewer tools
+                if vm.labeling.labelingTool != .none,
+                   let v = vm.currentVolume {
+                    handleLabelingDrag(value: value, volume: v, geo: geo)
+                    return
+                }
+
                 switch vm.activeTool {
                 case .wl:
-                    // Apply incrementally using delta from last mouse position
                     if let start = dragStart {
                         let dx = value.location.x - start.x
                         let dy = value.location.y - start.y
@@ -220,16 +236,120 @@ public struct SliceView: View {
                 case .pan:
                     pan = translation
                 case .zoom:
-                    // Drag up zooms in, drag down zooms out
                     let factor = 1.0 + Double(-translation.height) * 0.005
                     zoom = CGFloat(max(0.25, min(10.0, Double(zoom) * factor)))
                 case .distance, .angle, .area:
-                    break  // handled on tap
+                    break
                 }
             }
             .onEnded { _ in
                 dragStart = nil
+                lastPaintPoint = nil
             }
+    }
+
+    private func handleLabelingDrag(value: DragGesture.Value, volume: ImageVolume,
+                                     geo: GeometryProxy) {
+        let pixel = mapToImagePixel(point: value.location, volume: volume, geo: geo)
+        guard let p = pixel else { return }
+
+        switch vm.labeling.labelingTool {
+        case .brush, .eraser:
+            let erase = vm.labeling.labelingTool == .eraser
+            if let last = lastPaintPoint {
+                vm.labeling.paintStroke(
+                    axis: axis,
+                    sliceIndex: vm.sliceIndices[axis],
+                    from: last, to: p, erase: erase
+                )
+            } else {
+                vm.labeling.paint(axis: axis, sliceIndex: vm.sliceIndices[axis],
+                                  pixelX: p.0, pixelY: p.1, erase: erase)
+            }
+            lastPaintPoint = p
+
+        case .regionGrow:
+            // Single click -> region grow from seed
+            if lastPaintPoint == nil {
+                let (z, y, x) = vm.labeling.voxelCoordForClick(
+                    axis: axis, sliceIndex: vm.sliceIndices[axis],
+                    pixelX: p.0, pixelY: p.1
+                )
+                vm.labeling.regionGrow(
+                    volume: volume,
+                    seed: (z: z, y: y, x: x),
+                    tolerance: vm.labeling.regionGrowTolerance
+                )
+                lastPaintPoint = p
+            }
+
+        case .threshold:
+            // Single click -> percent-of-max around seed
+            if lastPaintPoint == nil {
+                let (z, y, x) = vm.labeling.voxelCoordForClick(
+                    axis: axis, sliceIndex: vm.sliceIndices[axis],
+                    pixelX: p.0, pixelY: p.1
+                )
+                vm.labeling.percentOfMaxAroundSeed(
+                    volume: volume,
+                    seed: (z: z, y: y, x: x),
+                    boxRadius: 30,
+                    percent: vm.labeling.percentOfMax
+                )
+                lastPaintPoint = p
+            }
+
+        case .landmark:
+            if lastPaintPoint == nil {
+                let (z, y, x) = vm.labeling.voxelCoordForClick(
+                    axis: axis, sliceIndex: vm.sliceIndices[axis],
+                    pixelX: p.0, pixelY: p.1
+                )
+                let world = vm.labeling.crosshair.worldPoint(
+                    from: (z: z, y: y, x: x), in: volume
+                )
+                vm.labeling.addLandmark(
+                    fixed: SIMD3(world.x, world.y, world.z),
+                    moving: SIMD3(world.x, world.y, world.z),
+                    label: "LM\(vm.labeling.landmarks.count + 1)"
+                )
+                lastPaintPoint = p
+            }
+
+        default: break
+        }
+    }
+
+    /// Convert a view point to image pixel coordinates (taking zoom/pan/flip into account).
+    private func mapToImagePixel(point: CGPoint, volume: ImageVolume,
+                                   geo: GeometryProxy) -> (Int, Int)? {
+        // Image dimensions depend on axis
+        let imgW: CGFloat
+        let imgH: CGFloat
+        switch axis {
+        case 0: imgW = CGFloat(volume.height); imgH = CGFloat(volume.depth)
+        case 1: imgW = CGFloat(volume.width);  imgH = CGFloat(volume.depth)
+        default: imgW = CGFloat(volume.width); imgH = CGFloat(volume.height)
+        }
+        let fit = min(geo.size.width / imgW, geo.size.height / imgH) * zoom
+        let displayW = imgW * fit
+        let displayH = imgH * fit
+        let originX = (geo.size.width - displayW) / 2 + pan.width
+        let originY = (geo.size.height - displayH) / 2 + pan.height
+
+        let localX = point.x - originX
+        let localY = point.y - originY
+
+        var px = Int(localX / fit)
+        var py = Int(localY / fit)
+
+        // Account for vertical flip used on sagittal/coronal
+        if axis == 0 || axis == 1 {
+            py = Int(imgH) - 1 - py
+        }
+
+        guard px >= 0, py >= 0, px < Int(imgW), py < Int(imgH) else { return nil }
+        return (px, py)
     }
 
     // MARK: - Measurement canvas

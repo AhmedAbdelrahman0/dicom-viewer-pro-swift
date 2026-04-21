@@ -101,11 +101,61 @@ Select a tool from the toolbar, then drag on any slice view:
 - DICOM: `*.dcm`, `*.DCM`, `.IMA` (uncompressed pixel data only)
 - NIfTI: `*.nii`, `*.nii.gz`
 
+## Labeling & Segmentation Pipeline
+
+Full multimodality labeling support with emphasis on PET/CT:
+
+### Features
+- **3D label maps** (`UInt16` voxels) aligned to each parent volume
+- **Cross-linked MPR views** — world-space crosshair syncs across all views
+- **Landmark-based rigid registration** — click matching anatomical points in fixed
+  and moving volumes; SVD-based Horn 1987 closed-form solution computes the
+  best rigid transform with TRE reporting
+- **Label migration** — transfer labels from one volume to a fused/registered
+  volume through the computed transform (nearest-neighbor resampling)
+
+### Tools
+| Tool | Purpose |
+|------|---------|
+| **Brush / Eraser** | Manual 2D or 3D spherical painting (1–20 voxel radius) |
+| **SUV Threshold** | Fixed threshold (e.g. SUV ≥ 2.5) across whole volume |
+| **40% SUVmax** | EANM-standard PET tumor segmentation around a seed |
+| **Region Growing** | Flood-fill connected voxels within tolerance of seed |
+| **Dilate / Erode** | Morphological clean-up |
+| **Landmark** | Click matching points for rigid registration |
+
+### Built-in Label Presets (all known schemes)
+- **TotalSegmentator** — 104 anatomical structures (organs, vessels, bones, muscles)
+- **AutoPET** — FDG-PET/CT lesion classification
+- **BraTS** — Brain tumor (edema, core, enhancing, necrotic)
+- **AMOS** — 15 abdominal organs
+- **MSD** — Liver, Lung, Pancreas, Prostate
+- **RT Standard** — ICRU 50/62/83 target volumes (GTV, CTV, ITV, PTV, Boost)
+- **PET Focal Uptake** — Primary, nodal, metastatic, physiological, inflammation
+- **Oncology Clinical** — Primary, nodes, mets, recurrence, response
+- **H&N, Thorax, Abdominal, Pelvic OARs** — Radiotherapy organs at risk
+- **Brain Lobes** — Major cerebral regions
+- **Spine Vertebrae** — C1–L5 individually labeled
+
+### Annotation File Formats
+- **NIfTI labelmap** (`.nii` / `.nii.gz`) — integer mask
+- **NRRD labelmap** (`.nrrd`)
+- **3D Slicer segmentation** (`.seg.nrrd`) with segment metadata
+- **ITK-SNAP** (`.nii` + `.label.txt` sidecar)
+- **DICOM RTSTRUCT** (read) — parses contour sequences and rasterizes to voxel grid
+- **JSON annotations** (COCO/CVAT-compatible subset)
+- **CSV landmarks**
+
+### PET-Specific Statistics
+For each labeled region, automatically computes: voxel count, volume (cm³), mean,
+max, min, std, SUV max, SUV mean, SUV peak, and **TLG** (Total Lesion Glycolysis).
+
 ## Limitations
 
 - DICOM JPEG-compressed pixel data not yet supported
-- No 3D volume rendering yet (2D + MIP only)
-- Registration not yet implemented (would require porting SimpleITK or a native Swift equivalent)
+- Full 3D volume rendering yet (2D + MIP only)
+- NRRD label import (export works)
+- DICOM SEG export (read-only for now)
 
 ## License
 
