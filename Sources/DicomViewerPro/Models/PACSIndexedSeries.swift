@@ -21,8 +21,12 @@ public struct PACSIndexedSeriesSnapshot: Identifiable, Hashable, Sendable {
     public var modality: String
     public var patientID: String
     public var patientName: String
+    public var accessionNumber: String = ""
     public var studyDescription: String
     public var studyDate: String
+    public var studyTime: String = ""
+    public var referringPhysicianName: String = ""
+    public var bodyPartExamined: String = ""
     public var seriesDescription: String
     public var sourcePath: String
     public var filePaths: [String]
@@ -40,8 +44,12 @@ public struct PACSIndexedSeriesSnapshot: Identifiable, Hashable, Sendable {
             modality: modality,
             patientID: patientID,
             patientName: patientName,
+            accessionNumber: accessionNumber,
             studyDescription: studyDescription,
             studyDate: studyDate,
+            studyTime: studyTime,
+            referringPhysicianName: referringPhysicianName,
+            bodyPartExamined: bodyPartExamined,
             seriesDescription: seriesDescription,
             sourcePath: sourcePath
         )
@@ -57,8 +65,12 @@ public final class PACSIndexedSeries {
     public var modality: String
     public var patientID: String
     public var patientName: String
+    public var accessionNumber: String = ""
     public var studyDescription: String
     public var studyDate: String
+    public var studyTime: String = ""
+    public var referringPhysicianName: String = ""
+    public var bodyPartExamined: String = ""
     public var seriesDescription: String
     public var sourcePath: String
     public var filePathsBlob: String
@@ -73,8 +85,12 @@ public final class PACSIndexedSeries {
                 modality: String,
                 patientID: String,
                 patientName: String,
+                accessionNumber: String = "",
                 studyDescription: String,
                 studyDate: String,
+                studyTime: String = "",
+                referringPhysicianName: String = "",
+                bodyPartExamined: String = "",
                 seriesDescription: String,
                 sourcePath: String,
                 filePaths: [String],
@@ -87,8 +103,12 @@ public final class PACSIndexedSeries {
         self.modality = modality
         self.patientID = patientID
         self.patientName = patientName
+        self.accessionNumber = accessionNumber
         self.studyDescription = studyDescription
         self.studyDate = studyDate
+        self.studyTime = studyTime
+        self.referringPhysicianName = referringPhysicianName
+        self.bodyPartExamined = bodyPartExamined
         self.seriesDescription = seriesDescription
         self.sourcePath = sourcePath
         self.filePathsBlob = filePaths.joined(separator: "\n")
@@ -99,8 +119,12 @@ public final class PACSIndexedSeries {
             modality: modality,
             patientID: patientID,
             patientName: patientName,
+            accessionNumber: accessionNumber,
             studyDescription: studyDescription,
             studyDate: studyDate,
+            studyTime: studyTime,
+            referringPhysicianName: referringPhysicianName,
+            bodyPartExamined: bodyPartExamined,
             seriesDescription: seriesDescription,
             sourcePath: sourcePath
         )
@@ -115,8 +139,12 @@ public final class PACSIndexedSeries {
             modality: snapshot.modality,
             patientID: snapshot.patientID,
             patientName: snapshot.patientName,
+            accessionNumber: snapshot.accessionNumber,
             studyDescription: snapshot.studyDescription,
             studyDate: snapshot.studyDate,
+            studyTime: snapshot.studyTime,
+            referringPhysicianName: snapshot.referringPhysicianName,
+            bodyPartExamined: snapshot.bodyPartExamined,
             seriesDescription: snapshot.seriesDescription,
             sourcePath: snapshot.sourcePath,
             filePaths: snapshot.filePaths,
@@ -153,8 +181,12 @@ public final class PACSIndexedSeries {
             modality: modality,
             patientID: patientID,
             patientName: patientName,
+            accessionNumber: accessionNumber,
             studyDescription: studyDescription,
             studyDate: studyDate,
+            studyTime: studyTime,
+            referringPhysicianName: referringPhysicianName,
+            bodyPartExamined: bodyPartExamined,
             seriesDescription: seriesDescription,
             sourcePath: sourcePath,
             filePaths: filePaths,
@@ -170,8 +202,12 @@ public final class PACSIndexedSeries {
         modality = other.modality
         patientID = other.patientID
         patientName = other.patientName
+        accessionNumber = other.accessionNumber
         studyDescription = other.studyDescription
         studyDate = other.studyDate
+        studyTime = other.studyTime
+        referringPhysicianName = other.referringPhysicianName
+        bodyPartExamined = other.bodyPartExamined
         seriesDescription = other.seriesDescription
         sourcePath = other.sourcePath
         filePathsBlob = other.filePathsBlob
@@ -187,8 +223,12 @@ public final class PACSIndexedSeries {
         modality = snapshot.modality
         patientID = snapshot.patientID
         patientName = snapshot.patientName
+        accessionNumber = snapshot.accessionNumber
         studyDescription = snapshot.studyDescription
         studyDate = snapshot.studyDate
+        studyTime = snapshot.studyTime
+        referringPhysicianName = snapshot.referringPhysicianName
+        bodyPartExamined = snapshot.bodyPartExamined
         seriesDescription = snapshot.seriesDescription
         sourcePath = snapshot.sourcePath
         filePathsBlob = snapshot.filePaths.joined(separator: "\n")
@@ -201,8 +241,12 @@ public final class PACSIndexedSeries {
                                           modality: String,
                                           patientID: String,
                                           patientName: String,
+                                          accessionNumber: String,
                                           studyDescription: String,
                                           studyDate: String,
+                                          studyTime: String,
+                                          referringPhysicianName: String,
+                                          bodyPartExamined: String,
                                           seriesDescription: String,
                                           sourcePath: String) -> String {
         [
@@ -210,8 +254,12 @@ public final class PACSIndexedSeries {
             modality,
             patientID,
             patientName,
+            accessionNumber,
             studyDescription,
             studyDate,
+            studyTime,
+            referringPhysicianName,
+            bodyPartExamined,
             seriesDescription,
             sourcePath,
         ]
@@ -232,8 +280,12 @@ public enum PACSIndexBuilder {
             modality: series.modality,
             patientID: series.patientID,
             patientName: series.patientName,
+            accessionNumber: series.accessionNumber,
             studyDescription: series.studyDescription,
             studyDate: series.studyDate,
+            studyTime: series.studyTime,
+            referringPhysicianName: series.referringPhysicianName,
+            bodyPartExamined: series.bodyPartExamined,
             seriesDescription: series.description,
             sourcePath: ImageVolume.canonicalPath(sourcePath),
             filePaths: Array(Set(series.files.map { ImageVolume.canonicalPath($0.filePath) })).sorted(),
@@ -265,8 +317,12 @@ public enum PACSIndexBuilder {
             modality: modality,
             patientID: "NIFTI_Import",
             patientName: "NIfTI Import",
+            accessionNumber: "",
             studyDescription: url.deletingLastPathComponent().lastPathComponent,
             studyDate: "",
+            studyTime: "",
+            referringPhysicianName: "",
+            bodyPartExamined: "",
             seriesDescription: stripVolumeExtension(url.lastPathComponent),
             sourcePath: sourcePath,
             filePaths: [sourcePath],

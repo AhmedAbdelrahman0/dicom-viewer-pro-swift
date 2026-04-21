@@ -288,6 +288,26 @@ public final class ViewerViewModel: ObservableObject {
         }
     }
 
+    public func openWorklistStudy(_ study: PACSWorklistStudy) async {
+        let ct = study.series.first { Modality.normalize($0.modality) == .CT }
+        let pet = study.series.first { Modality.normalize($0.modality) == .PT }
+
+        if let ct, let pet {
+            await openIndexedSeries(ct)
+            await openIndexedSeries(pet)
+            await autoFusePETCT()
+            statusMessage = "Opened PET/CT study: \(study.patientName.isEmpty ? study.patientID : study.patientName)"
+            return
+        }
+
+        guard let first = study.series.first else {
+            statusMessage = "Worklist study has no series"
+            return
+        }
+        await openIndexedSeries(first)
+        statusMessage = "Opened study: \(study.patientName.isEmpty ? study.patientID : study.patientName)"
+    }
+
     public func loadOverlay(url: URL) async {
         let sourcePath = NIfTILoader.canonicalSourcePath(for: url)
         if let fusion,

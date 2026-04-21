@@ -9,6 +9,7 @@ A native SwiftUI version of DICOM Viewer Pro that runs on **macOS 14+** and **iP
 - **Native DICOM parser**: Explicit & Implicit VR Little Endian, uncompressed pixel data
 - **PET/CT Fusion**: 9 colormaps (hot, pet_rainbow, jet, bone, cool_warm, fire, ice, grayscale, inverted_gray)
 - **Mini-PACS Index**: Recursive DICOM/NIfTI indexing for large local archives with paged search results
+- **Worklist / Viewer Split**: Study-level worklist with status/date/modality filters, separate from active viewer volumes
 - **Tools**: W/L, Pan, Zoom, Distance, Angle, Area measurements
 - **Orientation markers**: R/L/A/P/H/F overlays on every view
 - **W/L Presets**: Auto-switching based on modality (CT / MR / PET)
@@ -33,6 +34,7 @@ Sources/
 │   │   └── DicomViewerApp.swift         # @main app scene
 │   ├── Models/
 │   │   ├── ImageVolume.swift            # 3D volume data type
+│   │   ├── PACSWorklist.swift           # Study-level worklist grouping/filtering
 │   │   ├── WindowLevel.swift            # W/L presets
 │   │   ├── Annotation.swift             # Measurements model
 │   │   └── FusionPair.swift             # Fusion + colormaps
@@ -95,6 +97,8 @@ Select a tool from the toolbar, then drag on any slice view:
 
 ### Large Library Indexing
 - Use **Index** in the Worklist to recursively catalog local DICOM/NIfTI archives.
+- Worklist mode groups indexed series into studies with accession, referrer, modality, date, and local read-status filters.
+- Viewer mode only shows the active viewing session: loaded volumes, scanned directories, and overlays.
 - The indexer reads DICOM header prefixes instead of pixel data, de-duplicates copied SOP instances, saves records in batches, and pages the worklist results for large folders.
 
 ### Touch (iPad)

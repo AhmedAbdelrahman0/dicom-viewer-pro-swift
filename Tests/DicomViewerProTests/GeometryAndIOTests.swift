@@ -124,6 +124,63 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(snapshot.displayName, "CT - Chest CT")
     }
 
+    func testPACSWorklistGroupsSeriesByStudyAndFilters() {
+        let now = Date(timeIntervalSince1970: 0)
+        let ct = PACSIndexedSeriesSnapshot(
+            id: "dicom:ct",
+            kind: .dicom,
+            seriesUID: "ct",
+            studyUID: "study-1",
+            modality: "CT",
+            patientID: "MRN1",
+            patientName: "Worklist^Patient",
+            accessionNumber: "ACC-1",
+            studyDescription: "PET CT",
+            studyDate: "20260421",
+            studyTime: "103000",
+            referringPhysicianName: "Referring^Doctor",
+            bodyPartExamined: "CHEST",
+            seriesDescription: "CT AC",
+            sourcePath: "/tmp/a",
+            filePaths: ["/tmp/a/ct.dcm"],
+            instanceCount: 100,
+            indexedAt: now
+        )
+        let pet = PACSIndexedSeriesSnapshot(
+            id: "dicom:pet",
+            kind: .dicom,
+            seriesUID: "pet",
+            studyUID: "study-1",
+            modality: "PT",
+            patientID: "MRN1",
+            patientName: "Worklist^Patient",
+            accessionNumber: "ACC-1",
+            studyDescription: "PET CT",
+            studyDate: "20260421",
+            studyTime: "103000",
+            referringPhysicianName: "Referring^Doctor",
+            bodyPartExamined: "WHOLEBODY",
+            seriesDescription: "PET WB",
+            sourcePath: "/tmp/a",
+            filePaths: ["/tmp/a/pet.dcm"],
+            instanceCount: 60,
+            indexedAt: now
+        )
+
+        let studies = PACSWorklistStudy.grouped(
+            from: [pet, ct],
+            statuses: ["study:study-1": .flagged]
+        )
+
+        XCTAssertEqual(studies.count, 1)
+        XCTAssertEqual(studies[0].seriesCount, 2)
+        XCTAssertEqual(studies[0].instanceCount, 160)
+        XCTAssertEqual(studies[0].modalities, ["CT", "PET"])
+        XCTAssertEqual(studies[0].status, .flagged)
+        XCTAssertTrue(studies[0].matches(searchText: "acc-1", statusFilter: .flagged, modalityFilter: "PET", dateFilter: .all))
+        XCTAssertFalse(studies[0].matches(searchText: "", statusFilter: .complete, modalityFilter: "All", dateFilter: .all))
+    }
+
     func testPACSDirectoryIndexerDeduplicatesLargeStudyFolders() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("pacs-index-\(UUID().uuidString)", isDirectory: true)
@@ -133,8 +190,11 @@ final class GeometryAndIOTests: XCTestCase {
         try makeMinimalDICOM(
             patientName: "Alpha^Patient",
             patientID: "MRN-A",
+            accessionNumber: "ACC-A",
             studyUID: "study-a",
             studyDate: "20260421",
+            studyTime: "120000",
+            referringPhysicianName: "Ref^A",
             seriesUID: "series-a",
             seriesDescription: "PET WB",
             modality: "PT",
@@ -143,8 +203,11 @@ final class GeometryAndIOTests: XCTestCase {
         try makeMinimalDICOM(
             patientName: "Alpha^Patient",
             patientID: "MRN-A",
+            accessionNumber: "ACC-A",
             studyUID: "study-a",
             studyDate: "20260421",
+            studyTime: "120000",
+            referringPhysicianName: "Ref^A",
             seriesUID: "series-a",
             seriesDescription: "PET WB",
             modality: "PT",
@@ -153,8 +216,11 @@ final class GeometryAndIOTests: XCTestCase {
         try makeMinimalDICOM(
             patientName: "Beta^Patient",
             patientID: "MRN-B",
+            accessionNumber: "ACC-B",
             studyUID: "study-b",
             studyDate: "20260420",
+            studyTime: "121500",
+            referringPhysicianName: "Ref^B",
             seriesUID: "series-b",
             seriesDescription: "CT AC",
             modality: "CT",
@@ -172,7 +238,11 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(result.records.count, 2)
         let alpha = try XCTUnwrap(result.records.first { $0.seriesUID == "series-a" })
         XCTAssertEqual(alpha.instanceCount, 1)
+        XCTAssertEqual(alpha.accessionNumber, "ACC-A")
+        XCTAssertEqual(alpha.studyTime, "120000")
+        XCTAssertEqual(alpha.referringPhysicianName, "Ref^A")
         XCTAssertTrue(alpha.searchableText.contains("alpha"))
+        XCTAssertTrue(alpha.searchableText.contains("acc-a"))
         XCTAssertTrue(alpha.filePaths.first?.hasSuffix(".dcm") == true)
     }
 
@@ -716,8 +786,11 @@ final class GeometryAndIOTests: XCTestCase {
 
 private func makeMinimalDICOM(patientName: String,
                               patientID: String,
+                              accessionNumber: String = "",
                               studyUID: String,
                               studyDate: String,
+                              studyTime: String = "",
+                              referringPhysicianName: String = "",
                               seriesUID: String,
                               seriesDescription: String,
                               modality: String,
@@ -727,7 +800,10 @@ private func makeMinimalDICOM(patientName: String,
     data.appendDICOMElement(group: 0x0002, element: 0x0010, vr: "UI", string: "1.2.840.10008.1.2.1")
     data.appendDICOMElement(group: 0x0010, element: 0x0010, vr: "PN", string: patientName)
     data.appendDICOMElement(group: 0x0010, element: 0x0020, vr: "LO", string: patientID)
+    data.appendDICOMElement(group: 0x0008, element: 0x0050, vr: "SH", string: accessionNumber)
     data.appendDICOMElement(group: 0x0008, element: 0x0020, vr: "DA", string: studyDate)
+    data.appendDICOMElement(group: 0x0008, element: 0x0030, vr: "TM", string: studyTime)
+    data.appendDICOMElement(group: 0x0008, element: 0x0090, vr: "PN", string: referringPhysicianName)
     data.appendDICOMElement(group: 0x0008, element: 0x1030, vr: "LO", string: "Indexed Study")
     data.appendDICOMElement(group: 0x0020, element: 0x000D, vr: "UI", string: studyUID)
     data.appendDICOMElement(group: 0x0020, element: 0x000E, vr: "UI", string: seriesUID)

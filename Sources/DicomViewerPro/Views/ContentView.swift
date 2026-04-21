@@ -37,7 +37,7 @@ public struct ContentView: View {
                                  fileImporterMode = .overlay
                                  showingFileImporter = true
                              })
-                .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
+                .navigationSplitViewColumnWidth(min: 300, ideal: 380, max: 520)
         } content: {
             VStack(spacing: 0) {
                 customToolbar

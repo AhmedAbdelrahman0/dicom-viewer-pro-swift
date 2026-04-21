@@ -179,9 +179,13 @@ private struct DICOMSeriesIndexAccumulator {
     var description: String
     var patientID: String
     var patientName: String
+    var accessionNumber: String
     var studyUID: String
     var studyDescription: String
     var studyDate: String
+    var studyTime: String
+    var referringPhysicianName: String
+    var bodyPartExamined: String
     var filePaths: [String] = []
     var seenInstances: Set<String> = []
 
@@ -191,9 +195,13 @@ private struct DICOMSeriesIndexAccumulator {
         description = firstFile.seriesDescription
         patientID = firstFile.patientID
         patientName = firstFile.patientName
+        accessionNumber = firstFile.accessionNumber
         studyUID = firstFile.studyInstanceUID
         studyDescription = firstFile.studyDescription
         studyDate = firstFile.studyDate
+        studyTime = firstFile.studyTime
+        referringPhysicianName = firstFile.referringPhysicianName
+        bodyPartExamined = firstFile.bodyPartExamined
         add(firstFile)
     }
 
@@ -211,9 +219,13 @@ private struct DICOMSeriesIndexAccumulator {
         if description.isEmpty { description = file.seriesDescription }
         if patientID.isEmpty { patientID = file.patientID }
         if patientName.isEmpty { patientName = file.patientName }
+        if accessionNumber.isEmpty { accessionNumber = file.accessionNumber }
         if studyUID.isEmpty { studyUID = file.studyInstanceUID }
         if studyDescription.isEmpty { studyDescription = file.studyDescription }
         if studyDate.isEmpty { studyDate = file.studyDate }
+        if studyTime.isEmpty { studyTime = file.studyTime }
+        if referringPhysicianName.isEmpty { referringPhysicianName = file.referringPhysicianName }
+        if bodyPartExamined.isEmpty { bodyPartExamined = file.bodyPartExamined }
     }
 
     func snapshot(sourcePath: String, indexedAt: Date) -> PACSIndexedSeriesSnapshot {
@@ -225,8 +237,12 @@ private struct DICOMSeriesIndexAccumulator {
             modality: modality,
             patientID: patientID,
             patientName: patientName,
+            accessionNumber: accessionNumber,
             studyDescription: studyDescription,
             studyDate: studyDate,
+            studyTime: studyTime,
+            referringPhysicianName: referringPhysicianName,
+            bodyPartExamined: bodyPartExamined,
             seriesDescription: description,
             sourcePath: sourcePath,
             filePaths: Array(Set(filePaths)).sorted(),

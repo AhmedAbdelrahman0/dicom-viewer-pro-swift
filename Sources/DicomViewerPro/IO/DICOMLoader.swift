@@ -21,9 +21,12 @@ public enum DICOMError: Error, LocalizedError {
 public final class DICOMFile {
     public var patientID: String = ""
     public var patientName: String = ""
+    public var accessionNumber: String = ""
     public var studyInstanceUID: String = ""
     public var studyDescription: String = ""
     public var studyDate: String = ""
+    public var studyTime: String = ""
+    public var referringPhysicianName: String = ""
     public var seriesInstanceUID: String = ""
     public var seriesDescription: String = ""
     public var seriesNumber: Int = 0
@@ -317,13 +320,16 @@ public enum DICOMLoader {
                                   value: ElementValue) {
         let tag = (UInt32(group) << 16) | UInt32(element)
         switch tag {
-        case 0x00100010: dcm.patientName = value.asString()
-        case 0x00100020: dcm.patientID = value.asString()
-        case 0x00080020: dcm.studyDate = value.asString()
-        case 0x00081030: dcm.studyDescription = value.asString()
+        case 0x00100010: dcm.patientName = trim(value.asString())
+        case 0x00100020: dcm.patientID = trim(value.asString())
+        case 0x00080050: dcm.accessionNumber = trim(value.asString())
+        case 0x00080020: dcm.studyDate = trim(value.asString())
+        case 0x00080030: dcm.studyTime = trim(value.asString())
+        case 0x00080090: dcm.referringPhysicianName = trim(value.asString())
+        case 0x00081030: dcm.studyDescription = trim(value.asString())
         case 0x0020000D: dcm.studyInstanceUID = trim(value.asString())
         case 0x0020000E: dcm.seriesInstanceUID = trim(value.asString())
-        case 0x0008103E: dcm.seriesDescription = value.asString()
+        case 0x0008103E: dcm.seriesDescription = trim(value.asString())
         case 0x00200011: dcm.seriesNumber = value.asInt()
         case 0x00080060: dcm.modality = trim(value.asString())
         case 0x00080018: dcm.sopInstanceUID = trim(value.asString())
@@ -503,9 +509,13 @@ public enum DICOMLoader {
                 description: first.seriesDescription,
                 patientID: first.patientID,
                 patientName: first.patientName,
+                accessionNumber: first.accessionNumber,
                 studyUID: first.studyInstanceUID,
                 studyDescription: first.studyDescription,
                 studyDate: first.studyDate,
+                studyTime: first.studyTime,
+                referringPhysicianName: first.referringPhysicianName,
+                bodyPartExamined: first.bodyPartExamined,
                 files: unique
             )
             out.append(s)
@@ -537,9 +547,13 @@ public struct DICOMSeries: Identifiable {
     public var description: String
     public var patientID: String
     public var patientName: String
+    public var accessionNumber: String = ""
     public var studyUID: String
     public var studyDescription: String
     public var studyDate: String
+    public var studyTime: String = ""
+    public var referringPhysicianName: String = ""
+    public var bodyPartExamined: String = ""
     public var files: [DICOMFile]
     public var instanceCount: Int { files.count }
 
