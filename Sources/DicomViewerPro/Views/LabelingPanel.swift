@@ -243,6 +243,30 @@ struct LabelingPanel: View {
                             }
                         }
 
+                    case .suvGradient:
+                        VStack(alignment: .leading) {
+                            HStack {
+                                Text("SUV / Intensity ≥")
+                                Spacer()
+                                Text(String(format: "%.2f", vm.labeling.thresholdValue))
+                                    .font(.system(size: 11, design: .monospaced))
+                            }
+                            Slider(value: $vm.labeling.thresholdValue, in: 0...50)
+
+                            HStack {
+                                Text("Edge stop")
+                                Spacer()
+                                Text(String(format: "%.2f", vm.labeling.gradientCutoffFraction))
+                                    .font(.system(size: 11, design: .monospaced))
+                            }
+                            Slider(value: $vm.labeling.gradientCutoffFraction, in: 0.05...0.95)
+
+                            Stepper("Radius: \(vm.labeling.gradientSearchRadius) voxels",
+                                    value: $vm.labeling.gradientSearchRadius,
+                                    in: 5...120)
+                                .font(.system(size: 11))
+                        }
+
                     case .regionGrow:
                         VStack(alignment: .leading) {
                             HStack {

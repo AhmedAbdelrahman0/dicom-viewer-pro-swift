@@ -372,6 +372,21 @@ public struct SliceView: View {
                 lastPaintPoint = p
             }
 
+        case .suvGradient:
+            if lastPaintPoint == nil {
+                let (z, y, x) = vm.labeling.voxelCoordForClick(
+                    axis: axis, sliceIndex: vm.sliceIndices[axis],
+                    pixelX: p.0, pixelY: p.1
+                )
+                vm.gradientActiveLabelAroundSeed(
+                    seed: (z: z, y: y, x: x),
+                    minimumValue: vm.labeling.thresholdValue,
+                    gradientCutoffFraction: vm.labeling.gradientCutoffFraction,
+                    searchRadius: vm.labeling.gradientSearchRadius
+                )
+                lastPaintPoint = p
+            }
+
         case .landmark:
             if lastPaintPoint == nil {
                 let (z, y, x) = vm.labeling.voxelCoordForClick(

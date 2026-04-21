@@ -123,6 +123,16 @@ public extension ViewerViewModel {
                 labeling.labelingTool = .threshold
                 applied.append("Set seed segmentation to \(Int(percent * 100))% of SUVmax/intensity max.")
 
+            case .setGradientMinimumSUV(let value):
+                labeling.thresholdValue = value
+                labeling.labelingTool = .suvGradient
+                applied.append("Set SUV gradient floor to \(String(format: "%.2f", value)).")
+
+            case .setGradientEdgeFraction(let value):
+                labeling.gradientCutoffFraction = value
+                labeling.labelingTool = .suvGradient
+                applied.append("Set SUV gradient edge stop to \(String(format: "%.2f", value)).")
+
             case .setSUVMode(let mode):
                 suvSettings.mode = mode
                 applied.append("SUV calculation set to \(mode.displayName).")

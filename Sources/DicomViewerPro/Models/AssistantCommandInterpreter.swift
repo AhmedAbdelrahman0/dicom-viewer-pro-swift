@@ -15,6 +15,8 @@ public enum AssistantAction: Equatable {
     case removeOverlay
     case threshold(Double)
     case setPercentOfMax(Double)
+    case setGradientMinimumSUV(Double)
+    case setGradientEdgeFraction(Double)
     case setSUVMode(SUVCalculationMode)
     case setSUVActivityUnit(PETActivityUnit)
     case setSUVManualScale(Double)
@@ -105,6 +107,9 @@ public struct AssistantCommandInterpreter {
         if text.contains("threshold") {
             actions.append(.setLabelingTool(.threshold))
         }
+        if wantsGradientSegmentation(in: text) {
+            actions.append(.setLabelingTool(.suvGradient))
+        }
         if text.containsAny(["region grow", "region-growing", "grow region", "flood fill"]) {
             actions.append(.setLabelingTool(.regionGrow))
         }
@@ -190,7 +195,16 @@ public struct AssistantCommandInterpreter {
             actions.append(.selectLabel(target))
         }
 
-        if let threshold = thresholdValue(in: text) {
+        let wantsGradient = wantsGradientSegmentation(in: text)
+        if wantsGradient {
+            actions.append(.setLabelingTool(.suvGradient))
+            if let threshold = thresholdValue(in: text) {
+                actions.append(.setGradientMinimumSUV(threshold))
+            }
+            if let edge = number(afterAny: ["edge stop", "gradient stop", "edge strength"], in: text) {
+                actions.append(.setGradientEdgeFraction(max(0.05, min(0.95, edge))))
+            }
+        } else if let threshold = thresholdValue(in: text) {
             actions.append(.setLabelingTool(.threshold))
             actions.append(.threshold(threshold))
         }
@@ -250,6 +264,12 @@ public struct AssistantCommandInterpreter {
     private func thresholdValue(in text: String) -> Double? {
         guard text.containsAny(["threshold", "suv", ">="]) else { return nil }
         return firstNumber(in: text)
+    }
+
+    private func wantsGradientSegmentation(in text: String) -> Bool {
+        text.containsAny(["pet edge", "suv gradient", "gradient edge"]) ||
+        (text.contains("gradient") && text.containsAny(["pet", "suv", "lesion", "contour", "segment"])) ||
+        (text.contains("edge") && text.containsAny(["pet", "suv", "lesion", "contour"]))
     }
 
     private func percentOfMax(in text: String) -> Double? {

@@ -745,6 +745,36 @@ public final class ViewerViewModel: ObservableObject {
         statusMessage = "Segmented \(count) voxels at \(Int(percent * 100))% of \(unit)"
     }
 
+    public func gradientActiveLabelAroundSeed(seed: (z: Int, y: Int, x: Int),
+                                              minimumValue: Double,
+                                              gradientCutoffFraction: Double,
+                                              searchRadius: Int) {
+        guard let map = labeling.activeLabelMap else {
+            statusMessage = "Create or select a label map before SUV gradient segmentation"
+            return
+        }
+        guard let source = activeSegmentationSource(matching: map) else {
+            statusMessage = "No current image or PET overlay matches the active label map grid"
+            return
+        }
+
+        labeling.thresholdValue = minimumValue
+        labeling.gradientCutoffFraction = gradientCutoffFraction
+        labeling.gradientSearchRadius = searchRadius
+        let transform: ((Double) -> Double)? = source.usesSUV ? suvTransform : nil
+        let result = labeling.gradientEdge(
+            volume: source.volume,
+            seed: seed,
+            minimumValue: minimumValue,
+            gradientCutoffFraction: gradientCutoffFraction,
+            searchRadius: searchRadius,
+            valueTransform: transform
+        )
+
+        let unit = source.usesSUV ? "SUV" : "intensity"
+        statusMessage = "SUV gradient segmented \(result.voxelCount) voxels | floor \(unit) \(String(format: "%.2f", minimumValue)), peak \(String(format: "%.2f", result.maxValue)), edge \(String(format: "%.3f", result.gradientCutoff))/mm"
+    }
+
     private var suvTransform: (Double) -> Double {
         { [suvSettings] rawValue in
             suvSettings.suv(forStoredValue: rawValue)

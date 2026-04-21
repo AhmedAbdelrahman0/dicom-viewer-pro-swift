@@ -120,6 +120,7 @@ Full multimodality labeling support with emphasis on PET/CT:
 | **Brush / Eraser** | Manual 2D or 3D spherical painting (1–20 voxel radius) |
 | **SUV Threshold** | Fixed threshold (e.g. SUV ≥ 2.5) across whole volume |
 | **40% SUVmax** | EANM-standard PET tumor segmentation around a seed |
+| **SUV Gradient** | Seeded PET edge segmentation with SUV floor and gradient-boundary stopping |
 | **Region Growing** | Flood-fill connected voxels within tolerance of seed |
 | **Grow / Shrink** | Margin-style morphological clean-up |
 | **Islands** | Keep largest connected component or remove small islands |

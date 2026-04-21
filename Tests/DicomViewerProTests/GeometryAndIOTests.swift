@@ -272,6 +272,17 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertTrue(actions.contains(.threshold(2.5)))
     }
 
+    func testAssistantCommandInterpreterExtractsSUVGradientActions() {
+        let actions = AssistantCommandInterpreter().actions(
+            for: "Use PET Edge SUV 2.5 with edge stop 0.75"
+        )
+
+        XCTAssertTrue(actions.contains(.setLabelingTool(.suvGradient)))
+        XCTAssertTrue(actions.contains(.setGradientMinimumSUV(2.5)))
+        XCTAssertTrue(actions.contains(.setGradientEdgeFraction(0.75)))
+        XCTAssertFalse(actions.contains(.threshold(2.5)))
+    }
+
     func testAssistantCommandInterpreterExtractsSUVCalculationActions() {
         let actions = AssistantCommandInterpreter().actions(
             for: "Use SUVbw from kBq/mL, patient weight 70 kg, injected dose 350 MBq"
@@ -359,6 +370,31 @@ final class GeometryAndIOTests: XCTestCase {
 
         XCTAssertEqual(count, 2)
         XCTAssertEqual(map.voxelCounts()[1], 2)
+    }
+
+    func testPETSegmentationGradientEdgeStopsAtSUVDrop() {
+        let volume = ImageVolume(
+            pixels: [0, 3, 8, 6, 2, 0],
+            depth: 1,
+            height: 1,
+            width: 6,
+            modality: "PT"
+        )
+        let map = LabelMap(parentSeriesUID: volume.seriesUID, depth: 1, height: 1, width: 6)
+
+        let result = PETSegmentation.gradientEdge(
+            volume: volume,
+            label: map,
+            seed: (z: 0, y: 0, x: 2),
+            minimumValue: 2.5,
+            gradientCutoffFraction: 0.75,
+            classID: 1
+        )
+
+        XCTAssertEqual(result.voxelCount, 3)
+        XCTAssertTrue(result.stoppedAtEdge)
+        XCTAssertGreaterThan(result.gradientCutoff, 0)
+        XCTAssertEqual(map.voxels, [0, 1, 1, 1, 0, 0])
     }
 
     func testNRRDLabelmapRoundTripsClassesAndVoxels() throws {
@@ -498,6 +534,40 @@ final class GeometryAndIOTests: XCTestCase {
 
         XCTAssertEqual(map.voxelCounts()[1], 2)
         XCTAssertTrue(vm.statusMessage.contains("SUV"))
+    }
+
+    @MainActor
+    func testSUVGradientUsesPETOverlayForCTLabelMap() {
+        let ct = ImageVolume(
+            pixels: [0, 0, 0, 0, 0, 0],
+            depth: 1,
+            height: 1,
+            width: 6,
+            modality: "CT"
+        )
+        let pet = ImageVolume(
+            pixels: [0, 3, 8, 6, 2, 0],
+            depth: 1,
+            height: 1,
+            width: 6,
+            modality: "PT"
+        )
+        let vm = ViewerViewModel()
+        vm.currentVolume = ct
+        let pair = FusionPair(base: ct, overlay: pet)
+        pair.resampledOverlay = pet
+        vm.fusion = pair
+        let map = vm.labeling.createLabelMap(for: ct)
+
+        vm.gradientActiveLabelAroundSeed(
+            seed: (z: 0, y: 0, x: 2),
+            minimumValue: 2.5,
+            gradientCutoffFraction: 0.75,
+            searchRadius: 5
+        )
+
+        XCTAssertEqual(map.voxels, [0, 1, 1, 1, 0, 0])
+        XCTAssertTrue(vm.statusMessage.contains("SUV gradient"))
     }
 
     #if canImport(MetalKit)

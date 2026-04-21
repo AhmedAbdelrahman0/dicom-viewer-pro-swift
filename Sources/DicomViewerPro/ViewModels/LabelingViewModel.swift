@@ -30,6 +30,8 @@ public final class LabelingViewModel: ObservableObject {
     // SUV/threshold controls
     @Published public var thresholdValue: Double = 2.5   // typical SUV cutoff
     @Published public var percentOfMax: Double = 0.4      // 40% of SUV_max (EANM)
+    @Published public var gradientCutoffFraction: Double = 0.45
+    @Published public var gradientSearchRadius: Int = 30
     @Published public var regionGrowTolerance: Double = 50  // HU/intensity tolerance
 
     // MARK: - Landmark registration
@@ -278,6 +280,33 @@ public final class LabelingViewModel: ObservableObject {
             )
         }
         map.objectWillChange.send()
+    }
+
+    @discardableResult
+    public func gradientEdge(volume: ImageVolume,
+                             seed: (z: Int, y: Int, x: Int),
+                             minimumValue: Double,
+                             gradientCutoffFraction: Double,
+                             searchRadius: Int,
+                             valueTransform: ((Double) -> Double)? = nil) -> PETGradientSegmentationResult {
+        guard let map = activeLabelMap else {
+            return .empty(minimumValue: minimumValue)
+        }
+        var result = PETGradientSegmentationResult.empty(minimumValue: minimumValue)
+        recordVoxelEdit(named: "SUV gradient edge") {
+            result = PETSegmentation.gradientEdge(
+                volume: volume,
+                label: map,
+                seed: seed,
+                minimumValue: minimumValue,
+                gradientCutoffFraction: gradientCutoffFraction,
+                classID: activeClassID,
+                searchRadius: searchRadius,
+                valueTransform: valueTransform
+            )
+        }
+        map.objectWillChange.send()
+        return result
     }
 
     // MARK: - Morphology
@@ -573,7 +602,7 @@ public struct LabelImportResult {
 }
 
 public enum LabelingTool: String, CaseIterable, Identifiable {
-    case none, brush, eraser, threshold, regionGrow, landmark
+    case none, brush, eraser, threshold, suvGradient, regionGrow, landmark
 
     public var id: String { rawValue }
     public var displayName: String {
@@ -582,6 +611,7 @@ public enum LabelingTool: String, CaseIterable, Identifiable {
         case .brush:      return "Brush"
         case .eraser:     return "Eraser"
         case .threshold:  return "Threshold"
+        case .suvGradient: return "SUV Gradient"
         case .regionGrow: return "Region Grow"
         case .landmark:   return "Landmark"
         }
@@ -592,6 +622,7 @@ public enum LabelingTool: String, CaseIterable, Identifiable {
         case .brush:      return "paintbrush.pointed"
         case .eraser:     return "eraser"
         case .threshold:  return "thermometer.medium"
+        case .suvGradient: return "waveform.path.ecg"
         case .regionGrow: return "drop"
         case .landmark:   return "mappin.and.ellipse"
         }
@@ -616,6 +647,11 @@ public enum LabelingTool: String, CaseIterable, Identifiable {
                  + "  threshold (e.g., SUV ≥ 2.5 for PET lesions)\n"
                  + "• Click a seed voxel to auto-segment by 40% of SUVmax around it\n"
                  + "  (EANM-standard PET tumor delineation)"
+        case .suvGradient:
+            return "SUV Gradient Edge\n"
+                 + "Click a lesion seed; grows connected voxels above the SUV floor\n"
+                 + "and stops at strong local SUV gradients. Use this for PET-edge\n"
+                 + "style lesion contouring before manual clean-up."
         case .regionGrow:
             return "Region Growing\n"
                  + "Click a seed voxel; flood-fills connected voxels whose intensity\n"
