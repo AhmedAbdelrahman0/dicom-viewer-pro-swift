@@ -26,6 +26,55 @@ public enum ViewerTool: String, CaseIterable, Identifiable {
         case .area: return "skew"
         }
     }
+
+    /// Rich description shown as hover tooltip.
+    public var helpText: String {
+        switch self {
+        case .wl:
+            return "Window / Level\n"
+                 + "Drag horizontally to adjust window width,\n"
+                 + "vertically to adjust window level.\n"
+                 + "Shortcut: W"
+        case .pan:
+            return "Pan\n"
+                 + "Click and drag to move the image within the view.\n"
+                 + "Works even when the image is zoomed in.\n"
+                 + "Shortcut: P  (or middle-mouse drag at any time)"
+        case .zoom:
+            return "Zoom\n"
+                 + "Drag up/down to zoom in/out.\n"
+                 + "Scroll wheel + ⇧/⌘ also zooms.\n"
+                 + "Double-click to fit to window.\n"
+                 + "Shortcut: Z"
+        case .distance:
+            return "Distance Measurement\n"
+                 + "Click two points to measure Euclidean distance in mm.\n"
+                 + "Uses the volume's pixel spacing for calibration.\n"
+                 + "Shortcut: D"
+        case .angle:
+            return "Angle Measurement\n"
+                 + "Click three points (arm 1 → vertex → arm 2)\n"
+                 + "to measure the angle between two arms in degrees.\n"
+                 + "Shortcut: A"
+        case .area:
+            return "Area / ROI\n"
+                 + "Click multiple points to outline a polygon.\n"
+                 + "Shows the enclosed area in mm² / cm².\n"
+                 + "Shortcut: R"
+        }
+    }
+
+    /// Keyboard shortcut character for toolbar binding.
+    public var keyboardShortcut: Character? {
+        switch self {
+        case .wl: return "w"
+        case .pan: return "p"
+        case .zoom: return "z"
+        case .distance: return "d"
+        case .angle: return "a"
+        case .area: return "r"
+        }
+    }
 }
 
 @MainActor

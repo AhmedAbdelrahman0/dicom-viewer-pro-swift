@@ -106,12 +106,30 @@ public struct SliceView: View {
     // MARK: - Header
 
     private var header: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 4) {
             Text(title)
                 .font(.system(size: 11, weight: .bold))
                 .foregroundColor(.blue)
+                .help("\(title) view\nScroll wheel or slider to navigate slices")
 
             Spacer()
+
+            HoverIconButton(
+                systemImage: "circle.righthalf.filled",
+                tooltip: "Invert Colors (all views)\n"
+                       + "Toggles grayscale inversion — useful for reading MRI\n"
+                       + "or X-ray images in the radiological convention.",
+                isActive: vm.invertColors
+            ) {
+                vm.invertColors.toggle()
+            }
+
+            HoverIconButton(
+                systemImage: "rectangle.on.rectangle.angled",
+                tooltip: "Reset view (zoom + pan)\nDouble-click the view also resets."
+            ) {
+                zoom = 1.0; pan = .zero
+            }
 
             sliceScrubber
         }

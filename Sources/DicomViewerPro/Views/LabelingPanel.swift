@@ -150,12 +150,22 @@ struct LabelingPanel: View {
                 Group {
                     Text("Tools").font(.headline)
 
-                    Picker("Tool", selection: $vm.labeling.labelingTool) {
+                    // Segmented picker with per-tool hover tooltips
+                    HStack(spacing: 2) {
                         ForEach(LabelingTool.allCases) { t in
-                            Label(t.displayName, systemImage: t.systemImage).tag(t)
+                            HoverIconButton(
+                                systemImage: t.systemImage,
+                                tooltip: t.helpText,
+                                isActive: vm.labeling.labelingTool == t
+                            ) {
+                                vm.labeling.labelingTool = t
+                            }
+                            .frame(maxWidth: .infinity)
                         }
                     }
-                    .pickerStyle(.segmented)
+                    .padding(4)
+                    .background(Color.secondary.opacity(0.08))
+                    .cornerRadius(6)
 
                     switch vm.labeling.labelingTool {
                     case .brush, .eraser:

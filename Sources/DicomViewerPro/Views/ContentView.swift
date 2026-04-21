@@ -1,5 +1,8 @@
 import SwiftUI
 import UniformTypeIdentifiers
+#if os(macOS)
+import AppKit
+#endif
 
 public struct ContentView: View {
     @StateObject private var vm = ViewerViewModel()
@@ -64,13 +67,11 @@ public struct ContentView: View {
     private var mainToolbar: some ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
             ForEach(ViewerTool.allCases) { tool in
-                Button {
-                    vm.activeTool = tool
-                } label: {
-                    Label(tool.displayName, systemImage: tool.systemImage)
-                }
-                .help(tool.displayName)
-                .tint(vm.activeTool == tool ? .blue : .secondary)
+                ToolButton(
+                    tool: tool,
+                    isActive: vm.activeTool == tool,
+                    action: { vm.activeTool = tool }
+                )
             }
             Divider()
             Button {
@@ -78,6 +79,8 @@ public struct ContentView: View {
             } label: {
                 Label("Auto W/L", systemImage: "wand.and.stars")
             }
+            .help("Automatically compute window/level from the 1–99 percentile of the current volume.\nShortcut: ⌘R")
+            .keyboardShortcut("r", modifiers: [.command])
         }
     }
 
@@ -152,6 +155,91 @@ public struct ContentView: View {
                 await vm.loadDICOMDirectory(url: url)
             }
         }
+    }
+}
+
+// MARK: - Toolbar button with hover tooltip + keyboard shortcut
+
+private struct ToolButton: View {
+    let tool: ViewerTool
+    let isActive: Bool
+    let action: () -> Void
+
+    @State private var isHovering: Bool = false
+
+    var body: some View {
+        Button(action: action) {
+            Label(tool.displayName, systemImage: tool.systemImage)
+                .labelStyle(.iconOnly)
+                .font(.system(size: 14))
+                .foregroundColor(isActive ? .white : (isHovering ? .primary : .secondary))
+                .frame(width: 28, height: 24)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(isActive ? Color.accentColor :
+                              (isHovering ? Color.secondary.opacity(0.15) : Color.clear))
+                )
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.1)) { isHovering = hovering }
+            #if os(macOS)
+            if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+            #endif
+        }
+        .help(tool.helpText)
+        .modifier(KeyboardShortcutIfAvailable(character: tool.keyboardShortcut))
+    }
+}
+
+private struct KeyboardShortcutIfAvailable: ViewModifier {
+    let character: Character?
+    func body(content: Content) -> some View {
+        if let c = character {
+            content.keyboardShortcut(KeyEquivalent(c), modifiers: [])
+        } else {
+            content
+        }
+    }
+}
+
+/// Reusable small icon button with hover feedback + rich tooltip.
+public struct HoverIconButton: View {
+    let systemImage: String
+    let tooltip: String
+    let isActive: Bool
+    let action: () -> Void
+
+    @State private var isHovering: Bool = false
+
+    public init(systemImage: String, tooltip: String,
+                isActive: Bool = false, action: @escaping () -> Void) {
+        self.systemImage = systemImage
+        self.tooltip = tooltip
+        self.isActive = isActive
+        self.action = action
+    }
+
+    public var body: some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 11))
+                .foregroundColor(isActive ? .white : (isHovering ? .primary : .secondary))
+                .frame(width: 20, height: 20)
+                .background(
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(isActive ? Color.accentColor :
+                              (isHovering ? Color.secondary.opacity(0.25) : Color.clear))
+                )
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.1)) { isHovering = hovering }
+            #if os(macOS)
+            if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+            #endif
+        }
+        .help(tooltip)
     }
 }
 

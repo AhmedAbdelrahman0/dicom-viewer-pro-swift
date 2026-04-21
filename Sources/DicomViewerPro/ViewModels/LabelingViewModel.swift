@@ -311,4 +311,37 @@ public enum LabelingTool: String, CaseIterable, Identifiable {
         case .landmark:   return "mappin.and.ellipse"
         }
     }
+
+    /// Rich description shown as hover tooltip in panels.
+    public var helpText: String {
+        switch self {
+        case .none:
+            return "Viewer mode\nUse the main toolbar tools (W/L, Pan, Zoom, Measure)."
+        case .brush:
+            return "Brush\n"
+                 + "Click and drag on any slice to paint voxels with the active class.\n"
+                 + "Adjust brush size below. Toggle 3D to paint a sphere through\n"
+                 + "multiple slices at once."
+        case .eraser:
+            return "Eraser\n"
+                 + "Click and drag to erase voxels back to background (label 0)."
+        case .threshold:
+            return "Threshold / SUV Segmentation\n"
+                 + "• Click 'Apply' to segment the whole volume by fixed intensity\n"
+                 + "  threshold (e.g., SUV ≥ 2.5 for PET lesions)\n"
+                 + "• Click a seed voxel to auto-segment by 40% of SUVmax around it\n"
+                 + "  (EANM-standard PET tumor delineation)"
+        case .regionGrow:
+            return "Region Growing\n"
+                 + "Click a seed voxel; flood-fills connected voxels whose intensity\n"
+                 + "is within ±tolerance of the seed. Useful for delineating\n"
+                 + "homogeneous regions like organs."
+        case .landmark:
+            return "Landmark Registration\n"
+                 + "Click matching anatomical points in the fixed and moving\n"
+                 + "volumes. After 3+ pairs, a rigid transform is computed\n"
+                 + "and TRE is reported. Use 'Migrate Label' to transfer\n"
+                 + "the mask across volumes."
+        }
+    }
 }
