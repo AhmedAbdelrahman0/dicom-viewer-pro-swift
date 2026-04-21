@@ -13,7 +13,7 @@ APP_NAME="DICOM Viewer Pro"
 BUNDLE_ID="com.dicomviewerpro.swift"
 VERSION="1.0.0"
 EXEC_NAME="DicomViewerProApp"
-ICON_SRC="../dicom viewer pro/DicomViewerPro.icns"  # reuse the icon we already created
+ICON_SRC="Resources/AppIcon.icns"  # self-contained icon inside the Swift project
 
 # 1. Build the release executable
 echo "→ Building release executable…"
