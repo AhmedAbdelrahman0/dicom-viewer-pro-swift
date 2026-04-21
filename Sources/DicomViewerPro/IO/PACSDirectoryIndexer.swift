@@ -3,6 +3,32 @@ import Foundation
 public enum PACSIndexPhase: String, Sendable {
     case scanning
     case finalizing
+    case cancelled
+}
+
+/// Thread-safe cancellation flag for long-running PACS scans.
+///
+/// The indexer runs on a detached task and checks this flag periodically.
+/// The caller — typically a view model on `@MainActor` — sets the flag with
+/// `cancel()`. The indexer short-circuits and returns a partial result whose
+/// `cancelled` field is `true`.
+public final class PACSScanCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _cancelled = false
+
+    public init() {}
+
+    public var isCancelled: Bool {
+        lock.withLock { _cancelled }
+    }
+
+    public func cancel() {
+        lock.withLock { _cancelled = true }
+    }
+
+    public func reset() {
+        lock.withLock { _cancelled = false }
+    }
 }
 
 public struct PACSIndexScanProgress: Equatable, Sendable {
@@ -21,6 +47,8 @@ public struct PACSIndexScanProgress: Equatable, Sendable {
             return "Indexing \(scannedFiles) files | \(indexedSeries) series | \(dicomInstances) DICOM | \(niftiVolumes) NIfTI"
         case .finalizing:
             return "Finalizing \(indexedSeries) indexed series from \(scannedFiles) files"
+        case .cancelled:
+            return "Cancelled after \(scannedFiles) files | \(indexedSeries) partial series"
         }
     }
 }
@@ -32,12 +60,38 @@ public struct PACSIndexScanResult: Equatable, Sendable {
     public let dicomInstances: Int
     public let niftiVolumes: Int
     public let skippedFiles: Int
+    public let cancelled: Bool
+
+    public init(rootPath: String,
+                records: [PACSIndexedSeriesSnapshot],
+                scannedFiles: Int,
+                dicomInstances: Int,
+                niftiVolumes: Int,
+                skippedFiles: Int,
+                cancelled: Bool = false) {
+        self.rootPath = rootPath
+        self.records = records
+        self.scannedFiles = scannedFiles
+        self.dicomInstances = dicomInstances
+        self.niftiVolumes = niftiVolumes
+        self.skippedFiles = skippedFiles
+        self.cancelled = cancelled
+    }
 }
 
 public enum PACSDirectoryIndexer {
+    /// Scan a directory tree and index DICOM and NIfTI volumes.
+    ///
+    /// - Parameters:
+    ///   - isCancelled: Polled periodically (every `progressStride` files and
+    ///                  once between phases). Return `true` to short-circuit
+    ///                  the scan. The returned `PACSIndexScanResult` will have
+    ///                  `cancelled == true` and contain only the series
+    ///                  discovered before cancellation.
     public static func scan(url: URL,
                             headerByteLimit: Int = 1_048_576,
                             progressStride: Int = 100,
+                            isCancelled: @escaping @Sendable () -> Bool = { false },
                             progress: @escaping @Sendable (PACSIndexScanProgress) -> Void = { _ in }) -> PACSIndexScanResult {
         let rootPath = ImageVolume.canonicalPath(url.path)
         let indexedAt = Date()
@@ -48,6 +102,7 @@ public enum PACSDirectoryIndexer {
         var dicomSeries: [String: DICOMSeriesIndexAccumulator] = [:]
         var niftiRecords: [PACSIndexedSeriesSnapshot] = []
         var seenNIfTIPaths = Set<String>()
+        var cancelled = false
 
         progress(PACSIndexScanProgress(
             rootPath: rootPath,
@@ -59,6 +114,16 @@ public enum PACSDirectoryIndexer {
             skippedFiles: 0,
             currentPath: rootPath
         ))
+
+        if isCancelled() {
+            return cancelledResult(rootPath: rootPath,
+                                   progress: progress,
+                                   scannedFiles: 0,
+                                   dicomInstances: 0,
+                                   niftiVolumes: 0,
+                                   skippedFiles: 0,
+                                   records: [])
+        }
 
         let fm = FileManager.default
         guard let enumerator = fm.enumerator(
@@ -75,6 +140,8 @@ public enum PACSDirectoryIndexer {
                 skippedFiles: 0
             )
         }
+
+        let stride = max(1, progressStride)
 
         for case let fileURL as URL in enumerator {
             guard isRegularFile(fileURL) else { continue }
@@ -103,7 +170,7 @@ public enum PACSDirectoryIndexer {
                 skippedFiles += 1
             }
 
-            if scannedFiles % max(1, progressStride) == 0 {
+            if scannedFiles % stride == 0 {
                 progress(PACSIndexScanProgress(
                     rootPath: rootPath,
                     phase: .scanning,
@@ -114,6 +181,10 @@ public enum PACSDirectoryIndexer {
                     skippedFiles: skippedFiles,
                     currentPath: fileURL.path
                 ))
+                if isCancelled() {
+                    cancelled = true
+                    break
+                }
             }
         }
 
@@ -126,6 +197,16 @@ public enum PACSDirectoryIndexer {
                 if lhs.patientName != rhs.patientName { return lhs.patientName < rhs.patientName }
                 return lhs.seriesDescription < rhs.seriesDescription
             }
+
+        if cancelled {
+            return cancelledResult(rootPath: rootPath,
+                                   progress: progress,
+                                   scannedFiles: scannedFiles,
+                                   dicomInstances: dicomInstances,
+                                   niftiVolumes: niftiVolumes,
+                                   skippedFiles: skippedFiles,
+                                   records: records)
+        }
 
         progress(PACSIndexScanProgress(
             rootPath: rootPath,
@@ -145,6 +226,34 @@ public enum PACSDirectoryIndexer {
             dicomInstances: dicomInstances,
             niftiVolumes: niftiVolumes,
             skippedFiles: skippedFiles
+        )
+    }
+
+    private static func cancelledResult(rootPath: String,
+                                        progress: @escaping @Sendable (PACSIndexScanProgress) -> Void,
+                                        scannedFiles: Int,
+                                        dicomInstances: Int,
+                                        niftiVolumes: Int,
+                                        skippedFiles: Int,
+                                        records: [PACSIndexedSeriesSnapshot]) -> PACSIndexScanResult {
+        progress(PACSIndexScanProgress(
+            rootPath: rootPath,
+            phase: .cancelled,
+            scannedFiles: scannedFiles,
+            dicomInstances: dicomInstances,
+            niftiVolumes: niftiVolumes,
+            indexedSeries: records.count,
+            skippedFiles: skippedFiles,
+            currentPath: rootPath
+        ))
+        return PACSIndexScanResult(
+            rootPath: rootPath,
+            records: records,
+            scannedFiles: scannedFiles,
+            dicomInstances: dicomInstances,
+            niftiVolumes: niftiVolumes,
+            skippedFiles: skippedFiles,
+            cancelled: true
         )
     }
 

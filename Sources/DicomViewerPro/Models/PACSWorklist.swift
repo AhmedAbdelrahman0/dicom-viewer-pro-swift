@@ -190,14 +190,26 @@ public struct PACSWorklistStudy: Identifiable, Hashable, Sendable {
         }
     }
 
-    private static func studyKey(for snapshot: PACSIndexedSeriesSnapshot) -> String {
+    static func studyKey(for snapshot: PACSIndexedSeriesSnapshot) -> String {
         if !snapshot.studyUID.isEmpty && snapshot.studyUID != "NIFTI_STUDY" {
             return "study:\(snapshot.studyUID)"
         }
         if !snapshot.accessionNumber.isEmpty {
             return "accession:\(snapshot.accessionNumber)"
         }
-        return "synthetic:\(snapshot.patientID):\(snapshot.studyDate):\(snapshot.studyDescription):\(snapshot.sourcePath)"
+        // Disambiguate synthetic keys by the series' own parent directory,
+        // not just the scan root. Two NIfTI files in different folders with
+        // identical patient/date/description metadata now get distinct keys
+        // — so genuinely separate studies can't silently merge on shared archives.
+        let bucket = syntheticDirectoryBucket(for: snapshot)
+        return "synthetic:\(snapshot.patientID):\(snapshot.studyDate):\(snapshot.studyDescription):\(bucket)"
+    }
+
+    private static func syntheticDirectoryBucket(for snapshot: PACSIndexedSeriesSnapshot) -> String {
+        if let first = snapshot.filePaths.first, !first.isEmpty {
+            return (first as NSString).deletingLastPathComponent
+        }
+        return snapshot.sourcePath
     }
 
     private static func seriesSort(_ lhs: PACSIndexedSeriesSnapshot,

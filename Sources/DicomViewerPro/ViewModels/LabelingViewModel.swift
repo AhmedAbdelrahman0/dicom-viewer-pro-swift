@@ -57,13 +57,26 @@ public final class LabelingViewModel: ObservableObject {
         let indices: [Int]
         let before: [UInt16]
         let after: [UInt16]
+
+        /// Approximate resident memory used by this record's sparse diff.
+        /// Indices are `Int` (8 B on 64-bit) and `before`/`after` are `UInt16` (2 B each).
+        var byteSize: Int {
+            indices.count * (MemoryLayout<Int>.stride + 2 * MemoryLayout<UInt16>.stride)
+        }
     }
 
     private var undoStack: [VoxelEditRecord] = []
     private var redoStack: [VoxelEditRecord] = []
     private var activeEditBaseline: (mapID: UUID, name: String, voxels: [UInt16])?
+    private var currentHistoryBytes: Int = 0
     private let maxUndoRecords = 40
     private let maxTrackedChangedVoxels = 5_000_000
+    /// Total resident memory budget for undo + redo stacks (256 MB).
+    /// Older records are evicted when appending a new edit would exceed this.
+    private let maxHistoryBytes = 256 * 1024 * 1024
+
+    /// Published so the UI can show how much undo memory the session is using.
+    @Published public private(set) var historyMemoryBytes: Int = 0
 
     public init() {}
 
@@ -126,6 +139,11 @@ public final class LabelingViewModel: ObservableObject {
         if activeLabelMap?.id == map.id {
             activeLabelMap = labelMaps.first
         }
+        let reclaimed = (undoStack + redoStack)
+            .filter { $0.mapID == map.id }
+            .reduce(0) { $0 + $1.byteSize }
+        currentHistoryBytes -= reclaimed
+        if currentHistoryBytes < 0 { currentHistoryBytes = 0 }
         undoStack.removeAll { $0.mapID == map.id }
         redoStack.removeAll { $0.mapID == map.id }
         refreshHistoryDepths()
@@ -238,15 +256,13 @@ public final class LabelingViewModel: ObservableObject {
     public func thresholdAll(volume: ImageVolume,
                              above: Double,
                              valueTransform: ((Double) -> Double)? = nil) {
-        guard let map = activeLabelMap else { return }
-        recordVoxelEdit(named: "Threshold") {
+        applyMutation(named: "Threshold") { map in
             PETSegmentation.thresholdAbove(
                 volume: volume, label: map,
                 threshold: above, classID: activeClassID,
                 valueTransform: valueTransform
             )
         }
-        map.objectWillChange.send()
     }
 
     /// 40% of max inside a bounding box around a seed.
@@ -255,31 +271,27 @@ public final class LabelingViewModel: ObservableObject {
                                        boxRadius: Int = 30,
                                        percent: Double,
                                        valueTransform: ((Double) -> Double)? = nil) {
-        guard let map = activeLabelMap else { return }
         let box = VoxelBox.around(seed, radius: boxRadius, in: volume)
-        recordVoxelEdit(named: "Percent of max") {
+        applyMutation(named: "Percent of max") { map in
             PETSegmentation.percentOfMax(
                 volume: volume, label: map,
                 percent: percent, classID: activeClassID, boundingBox: box,
                 valueTransform: valueTransform
             )
         }
-        map.objectWillChange.send()
     }
 
     /// Region grow from a seed voxel.
     public func regionGrow(volume: ImageVolume,
                            seed: (z: Int, y: Int, x: Int),
                            tolerance: Double) {
-        guard let map = activeLabelMap else { return }
-        recordVoxelEdit(named: "Region grow") {
+        applyMutation(named: "Region grow") { map in
             PETSegmentation.regionGrow(
                 volume: volume, label: map,
                 seed: seed, tolerance: tolerance,
                 classID: activeClassID
             )
         }
-        map.objectWillChange.send()
     }
 
     @discardableResult
@@ -289,12 +301,8 @@ public final class LabelingViewModel: ObservableObject {
                              gradientCutoffFraction: Double,
                              searchRadius: Int,
                              valueTransform: ((Double) -> Double)? = nil) -> PETGradientSegmentationResult {
-        guard let map = activeLabelMap else {
-            return .empty(minimumValue: minimumValue)
-        }
-        var result = PETGradientSegmentationResult.empty(minimumValue: minimumValue)
-        recordVoxelEdit(named: "SUV gradient edge") {
-            result = PETSegmentation.gradientEdge(
+        applyMutation(named: "SUV gradient edge") { map in
+            PETSegmentation.gradientEdge(
                 volume: volume,
                 label: map,
                 seed: seed,
@@ -304,70 +312,52 @@ public final class LabelingViewModel: ObservableObject {
                 searchRadius: searchRadius,
                 valueTransform: valueTransform
             )
-        }
-        map.objectWillChange.send()
-        return result
+        } ?? .empty(minimumValue: minimumValue)
     }
 
     // MARK: - Morphology
 
     public func dilateActive(iterations: Int = 1) {
-        guard let map = activeLabelMap else { return }
-        recordVoxelEdit(named: "Dilate") {
+        applyMutation(named: "Dilate") { map in
             PETSegmentation.dilate(label: map, classID: activeClassID, iterations: iterations)
         }
-        map.objectWillChange.send()
     }
 
     public func erodeActive(iterations: Int = 1) {
-        guard let map = activeLabelMap else { return }
-        recordVoxelEdit(named: "Erode") {
+        applyMutation(named: "Erode") { map in
             PETSegmentation.erode(label: map, classID: activeClassID, iterations: iterations)
         }
-        map.objectWillChange.send()
     }
 
     @discardableResult
     public func keepLargestIslandActive() -> Int {
-        guard let map = activeLabelMap else { return 0 }
-        var removed = 0
-        recordVoxelEdit(named: "Keep largest island") {
-            removed = LabelOperations.keepLargestIsland(label: map, classID: activeClassID)
-        }
-        map.objectWillChange.send()
-        return removed
+        applyMutation(named: "Keep largest island") { map in
+            LabelOperations.keepLargestIsland(label: map, classID: activeClassID)
+        } ?? 0
     }
 
     @discardableResult
     public func removeSmallIslandsActive(minVoxels: Int) -> Int {
-        guard let map = activeLabelMap else { return 0 }
-        var removed = 0
-        recordVoxelEdit(named: "Remove small islands") {
-            removed = LabelOperations.removeSmallIslands(
+        applyMutation(named: "Remove small islands") { map in
+            LabelOperations.removeSmallIslands(
                 label: map,
                 classID: activeClassID,
                 minVoxels: minVoxels
             )
-        }
-        map.objectWillChange.send()
-        return removed
+        } ?? 0
     }
 
     @discardableResult
     public func applyLogicalOperation(sourceClassID: UInt16,
                                       operation: LabelLogicalOperation) -> Int {
-        guard let map = activeLabelMap else { return 0 }
-        var changed = 0
-        recordVoxelEdit(named: operation.displayName) {
-            changed = LabelOperations.logical(
+        applyMutation(named: operation.displayName) { map in
+            LabelOperations.logical(
                 label: map,
                 targetID: activeClassID,
                 modifierID: sourceClassID,
                 operation: operation
             )
-        }
-        map.objectWillChange.send()
-        return changed
+        } ?? 0
     }
 
     // MARK: - Landmark registration
@@ -549,6 +539,28 @@ public final class LabelingViewModel: ObservableObject {
         updateTransform()
     }
 
+    /// Single path for every label-voxel mutation on the active map.
+    ///
+    /// Handles the three things every mutation needs:
+    /// 1. Guard — returns `nil` when no map is active.
+    /// 2. Undo — records the before/after diff under `name`.
+    /// 3. Signal — fires `objectWillChange` on the mutated map so SwiftUI
+    ///    refreshes overlays that observe it.
+    ///
+    /// Using this helper instead of the `recordVoxelEdit + map.objectWillChange.send()`
+    /// pattern prevents the signal from being forgotten at a new call site.
+    @discardableResult
+    private func applyMutation<T>(named name: String,
+                                  _ body: (LabelMap) -> T) -> T? {
+        guard let map = activeLabelMap else { return nil }
+        var result: T?
+        recordVoxelEdit(named: name) {
+            result = body(map)
+        }
+        map.objectWillChange.send()
+        return result
+    }
+
     private func recordVoxelChanges(map: LabelMap, name: String, before: [UInt16]) {
         guard before.count == map.voxels.count else { return }
         var indices: [Int] = []
@@ -567,31 +579,67 @@ public final class LabelingViewModel: ObservableObject {
         }
 
         guard !indices.isEmpty else { return }
-        undoStack.append(VoxelEditRecord(
+        // A new forward edit invalidates the redo stack — reclaim its bytes.
+        dropRedoStack()
+
+        let record = VoxelEditRecord(
             mapID: map.id,
             name: name,
             indices: indices,
             before: oldValues,
             after: newValues
-        ))
-        if undoStack.count > maxUndoRecords {
-            undoStack.removeFirst(undoStack.count - maxUndoRecords)
-        }
-        redoStack.removeAll()
+        )
+        undoStack.append(record)
+        currentHistoryBytes += record.byteSize
+        trimHistoryToLimits()
         hasUnsavedChanges = true
         refreshHistoryDepths()
+    }
+
+    /// Drop the oldest records until both count and byte budgets are met.
+    private func trimHistoryToLimits() {
+        if undoStack.count > maxUndoRecords {
+            let overflow = undoStack.count - maxUndoRecords
+            for record in undoStack.prefix(overflow) {
+                currentHistoryBytes -= record.byteSize
+            }
+            undoStack.removeFirst(overflow)
+        }
+        while currentHistoryBytes > maxHistoryBytes {
+            if let oldest = undoStack.first {
+                currentHistoryBytes -= oldest.byteSize
+                undoStack.removeFirst()
+            } else if let oldestRedo = redoStack.first {
+                // Shouldn't normally happen — redo is cleared on new edits — but
+                // guard the invariant so we never overcount.
+                currentHistoryBytes -= oldestRedo.byteSize
+                redoStack.removeFirst()
+            } else {
+                break
+            }
+        }
+        if currentHistoryBytes < 0 { currentHistoryBytes = 0 }
+    }
+
+    private func dropRedoStack() {
+        let redoBytes = redoStack.reduce(0) { $0 + $1.byteSize }
+        currentHistoryBytes -= redoBytes
+        if currentHistoryBytes < 0 { currentHistoryBytes = 0 }
+        redoStack.removeAll()
     }
 
     private func clearHistory() {
         undoStack.removeAll()
         redoStack.removeAll()
         activeEditBaseline = nil
+        currentHistoryBytes = 0
         refreshHistoryDepths()
     }
 
     private func refreshHistoryDepths() {
         undoDepth = undoStack.count
         redoDepth = redoStack.count
+        historyMemoryBytes = currentHistoryBytes
     }
 }
 

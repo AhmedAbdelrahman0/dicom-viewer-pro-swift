@@ -95,8 +95,18 @@ struct StudyBrowserView: View {
 
             if let indexProgress = vm.indexProgress {
                 VStack(alignment: .leading, spacing: 3) {
-                    ProgressView()
-                        .controlSize(.small)
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Spacer()
+                        if vm.isIndexing {
+                            Button("Cancel") {
+                                vm.cancelIndexing()
+                            }
+                            .buttonStyle(.borderless)
+                            .controlSize(.small)
+                        }
+                    }
                     Text(indexProgress.statusText)
                         .font(.system(size: 10))
                         .foregroundColor(.secondary)

@@ -122,6 +122,11 @@ public final class ViewerViewModel: ObservableObject {
     @Published public var progress: Double = 0
     @Published public var indexProgress: PACSIndexScanProgress?
     @Published public var indexRevision: Int = 0
+    @Published public private(set) var isIndexing: Bool = false
+
+    /// Shared flag that lets the UI cancel a long-running PACS index scan.
+    /// Read-only outside the VM; callers cancel via `cancelIndexing()`.
+    public let indexCancellation = PACSScanCancellation()
 
     // DICOM study browser
     @Published public var loadedSeries: [DICOMSeries] = []
@@ -229,12 +234,15 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     public func indexDirectory(url: URL, modelContext: ModelContext) async {
+        indexCancellation.reset()
         isLoading = true
+        isIndexing = true
         progress = 0
         indexProgress = nil
         statusMessage = "Indexing \(url.lastPathComponent)..."
         defer {
             isLoading = false
+            isIndexing = false
             progress = 0
             indexProgress = nil
         }
@@ -246,9 +254,19 @@ public final class ViewerViewModel: ObservableObject {
             }
         }
 
+        let cancellation = indexCancellation
+        let isCancelled: @Sendable () -> Bool = { cancellation.isCancelled }
+
         let scanResult = await Task.detached(priority: .userInitiated) {
-            PACSDirectoryIndexer.scan(url: url, progress: progressHandler)
+            PACSDirectoryIndexer.scan(url: url,
+                                      isCancelled: isCancelled,
+                                      progress: progressHandler)
         }.value
+
+        if scanResult.cancelled {
+            statusMessage = "Indexing cancelled after \(scanResult.scannedFiles) files (\(scanResult.records.count) partial series discarded)"
+            return
+        }
 
         let records = uniqueIndexSnapshots(scanResult.records)
 
@@ -259,6 +277,11 @@ public final class ViewerViewModel: ObservableObject {
             let batchSize = 250
 
             while offset < records.count {
+                if indexCancellation.isCancelled {
+                    try? modelContext.save()
+                    statusMessage = "Indexing cancelled at \(offset)/\(records.count) series (inserted \(inserted), updated \(updated))"
+                    return
+                }
                 let end = min(records.count, offset + batchSize)
                 for snapshot in records[offset..<end] {
                     switch try upsertIndexedSeries(snapshot, in: modelContext) {
@@ -276,6 +299,12 @@ public final class ViewerViewModel: ObservableObject {
         } catch {
             statusMessage = "Index error: \(error.localizedDescription)"
         }
+    }
+
+    /// Request cancellation of the in-flight `indexDirectory(...)` scan.
+    /// Safe to call from any thread. No-op when no scan is running.
+    public func cancelIndexing() {
+        indexCancellation.cancel()
     }
 
     public func openIndexedSeries(_ entry: PACSIndexedSeriesSnapshot) async {

@@ -752,6 +752,210 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(resampled.depth, base.depth)
     }
 
+    // MARK: - Enhancements: cancellation, RLE guards, undo memory, synthetic keys
+
+    func testPACSIndexerHonoursCancellationTokenMidScan() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pacs-cancel-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        // 20 cheap DICOM files so we are guaranteed to cross the stride threshold.
+        for i in 0..<20 {
+            try makeMinimalDICOM(
+                patientName: "Cancel^Patient",
+                patientID: "MRN-C",
+                studyUID: "study-cancel",
+                studyDate: "20260421",
+                seriesUID: "series-cancel-\(i)",
+                seriesDescription: "Cancel Series \(i)",
+                modality: "CT",
+                sopUID: "sop-c-\(i)"
+            ).write(to: root.appendingPathComponent("c\(i).dcm"))
+        }
+
+        let cancellation = PACSScanCancellation()
+        cancellation.cancel() // Pre-cancelled — scan should short-circuit immediately.
+
+        let result = PACSDirectoryIndexer.scan(
+            url: root,
+            headerByteLimit: 4096,
+            progressStride: 1,
+            isCancelled: { cancellation.isCancelled }
+        )
+
+        XCTAssertTrue(result.cancelled, "Pre-cancelled scan must report cancelled=true")
+        XCTAssertEqual(result.records.count, 0)
+        XCTAssertEqual(result.scannedFiles, 0)
+    }
+
+    func testPACSIndexerCancelsBetweenFilesAndReturnsPartialRecords() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pacs-partial-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        for i in 0..<10 {
+            try makeMinimalDICOM(
+                patientName: "Partial^Patient",
+                patientID: "MRN-P",
+                studyUID: "study-partial",
+                studyDate: "20260421",
+                seriesUID: "series-partial-\(i)",
+                seriesDescription: "Partial \(i)",
+                modality: "CT",
+                sopUID: "sop-p-\(i)"
+            ).write(to: root.appendingPathComponent("p\(i).dcm"))
+        }
+
+        let cancellation = PACSScanCancellation()
+        let scanned = LockedCounter()
+
+        let result = PACSDirectoryIndexer.scan(
+            url: root,
+            headerByteLimit: 4096,
+            progressStride: 1,
+            isCancelled: {
+                // Cancel after the first file has been observed in progress.
+                if scanned.value >= 1 {
+                    cancellation.cancel()
+                }
+                return cancellation.isCancelled
+            },
+            progress: { update in
+                if update.phase == .scanning, update.scannedFiles >= 1 {
+                    scanned.set(update.scannedFiles)
+                }
+            }
+        )
+
+        XCTAssertTrue(result.cancelled, "Expected a mid-scan cancellation to mark result as cancelled")
+        XCTAssertLessThan(result.scannedFiles, 10,
+                          "Cancellation should stop scanning before all 10 files")
+    }
+
+    func testLabelPackageDecodeRejectsOverflowingRLERun() throws {
+        let volume = ImageVolume(
+            pixels: [0, 0, 0, 0],
+            depth: 1,
+            height: 2,
+            width: 2,
+            modality: "CT"
+        )
+        let map = LabelMap(parentSeriesUID: volume.seriesUID, depth: 1, height: 2, width: 2)
+        map.voxels = [0, 1, 0, 1]
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rle-overflow-\(UUID().uuidString).dvlabels")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try LabelIO.saveLabelPackage(
+            labelMap: map,
+            annotations: [],
+            landmarks: [],
+            parentVolume: volume,
+            to: url
+        )
+
+        // Tamper with the JSON: inflate every RLE run count. The decoder must
+        // reject this *before* allocating a multi-billion-element voxel array.
+        // (Only RLE entries have "count" keys in this package, so a blanket
+        //  replace is safe for the test fixture.)
+        var text = try String(contentsOf: url, encoding: .utf8)
+        text = text.replacingOccurrences(of: "\"count\" : 1",
+                                         with: "\"count\" : 4000000000")
+        try text.write(to: url, atomically: true, encoding: .utf8)
+
+        XCTAssertThrowsError(try LabelIO.loadLabelPackage(from: url, parentVolume: volume)) { error in
+            guard case LabelIO.LabelIOError.invalidLabelPackage(let message) = error else {
+                return XCTFail("Expected invalidLabelPackage error, got \(error)")
+            }
+            XCTAssertTrue(message.contains("exceeds remaining") || message.contains("does not match"),
+                          "Unexpected error message: \(message)")
+        }
+    }
+
+    @MainActor
+    func testLabelingUndoMemoryIsReclaimedWhenRecordsEvict() {
+        let volume = ImageVolume(
+            pixels: Array(repeating: 0, count: 4),
+            depth: 1,
+            height: 2,
+            width: 2
+        )
+        let labeling = LabelingViewModel()
+        _ = labeling.createLabelMap(for: volume)
+
+        // Single paint — one edit with one changed voxel.
+        labeling.paint(axis: 2, sliceIndex: 0, pixelX: 1, pixelY: 0)
+        XCTAssertEqual(labeling.undoDepth, 1)
+        XCTAssertGreaterThan(labeling.historyMemoryBytes, 0,
+                             "Memory counter should update after an edit is recorded")
+        let afterOne = labeling.historyMemoryBytes
+
+        // Second paint — another recorded edit, memory should roughly double.
+        labeling.paint(axis: 2, sliceIndex: 0, pixelX: 0, pixelY: 1)
+        XCTAssertGreaterThanOrEqual(labeling.historyMemoryBytes, afterOne)
+
+        // Remove the map — history for that map should be freed.
+        if let map = labeling.activeLabelMap {
+            labeling.removeLabelMap(map)
+        }
+        XCTAssertEqual(labeling.historyMemoryBytes, 0)
+        XCTAssertEqual(labeling.undoDepth, 0)
+    }
+
+    func testSyntheticWorklistKeyDistinguishesDifferentDirectories() {
+        let patient = "MRN-Z"
+        let date = "20260421"
+        let description = "Research MRI"
+
+        let seriesA = PACSIndexedSeriesSnapshot(
+            id: "nifti:/a/mri.nii",
+            kind: .nifti,
+            seriesUID: "",
+            studyUID: "NIFTI_STUDY",
+            modality: "MR",
+            patientID: patient,
+            patientName: "Patient^Z",
+            accessionNumber: "",
+            studyDescription: description,
+            studyDate: date,
+            seriesDescription: "T1",
+            sourcePath: "/archive",
+            filePaths: ["/archive/a/mri.nii"],
+            instanceCount: 1,
+            indexedAt: Date()
+        )
+        let seriesB = PACSIndexedSeriesSnapshot(
+            id: "nifti:/b/mri.nii",
+            kind: .nifti,
+            seriesUID: "",
+            studyUID: "NIFTI_STUDY",
+            modality: "MR",
+            patientID: patient,
+            patientName: "Patient^Z",
+            accessionNumber: "",
+            studyDescription: description,
+            studyDate: date,
+            seriesDescription: "T1",
+            sourcePath: "/archive",
+            filePaths: ["/archive/b/mri.nii"],
+            instanceCount: 1,
+            indexedAt: Date()
+        )
+
+        XCTAssertNotEqual(
+            PACSWorklistStudy.studyKey(for: seriesA),
+            PACSWorklistStudy.studyKey(for: seriesB),
+            "Same patient/date/description in different directories must not collapse into one synthetic study"
+        )
+
+        let studies = PACSWorklistStudy.grouped(from: [seriesA, seriesB])
+        XCTAssertEqual(studies.count, 2,
+                       "Each directory-scoped series should surface as its own worklist study")
+    }
+
     func testVolumeResamplerUsesWorldGeometry() {
         let overlay = ImageVolume(
             pixels: [
@@ -781,6 +985,22 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(resampled.pixels[0], 20, accuracy: 1e-6)
         XCTAssertEqual(resampled.origin.x, 2, accuracy: 1e-6)
         XCTAssertEqual(resampled.origin.y, 1, accuracy: 1e-6)
+    }
+}
+
+/// Simple thread-safe counter used by tests that interact with the indexer's
+/// `@Sendable` progress callback. `NSLock` is enough — we just need integer
+/// reads/writes to be atomic and visible across actor hops.
+private final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _value: Int = 0
+
+    var value: Int {
+        lock.withLock { _value }
+    }
+
+    func set(_ v: Int) {
+        lock.withLock { _value = v }
     }
 }
 

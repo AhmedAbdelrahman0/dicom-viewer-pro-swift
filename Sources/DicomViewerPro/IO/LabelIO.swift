@@ -704,17 +704,38 @@ public enum LabelIO {
         return result
     }
 
-    private static func decodeRLE(_ entries: [RLEEntryDTO], expectedCount: Int) throws -> [UInt16] {
+    /// Decode a run-length-encoded voxel stream.
+    ///
+    /// Validates each run against the declared `expectedCount` *before*
+    /// allocating memory. A corrupted package with an impossibly large run —
+    /// e.g. `count == Int.max` — would otherwise trigger an unrecoverable
+    /// out-of-memory crash inside `repeatElement(_:count:)`.
+    fileprivate static func decodeRLE(_ entries: [RLEEntryDTO], expectedCount: Int) throws -> [UInt16] {
+        guard expectedCount >= 0 else {
+            throw LabelIOError.invalidLabelPackage("negative expected voxel count \(expectedCount)")
+        }
         var voxels: [UInt16] = []
         voxels.reserveCapacity(expectedCount)
-        for entry in entries {
+        var runningTotal = 0
+        for (index, entry) in entries.enumerated() {
             guard entry.count >= 0 else {
-                throw LabelIOError.invalidLabelPackage("negative RLE count")
+                throw LabelIOError.invalidLabelPackage(
+                    "negative RLE count \(entry.count) at entry \(index)"
+                )
+            }
+            let remaining = expectedCount - runningTotal
+            guard entry.count <= remaining else {
+                throw LabelIOError.invalidLabelPackage(
+                    "RLE run of \(entry.count) at entry \(index) exceeds remaining \(remaining) voxels (expected total \(expectedCount))"
+                )
             }
             voxels.append(contentsOf: repeatElement(entry.value, count: entry.count))
+            runningTotal += entry.count
         }
-        guard voxels.count == expectedCount else {
-            throw LabelIOError.invalidLabelPackage("RLE voxel count \(voxels.count) does not match \(expectedCount)")
+        guard runningTotal == expectedCount else {
+            throw LabelIOError.invalidLabelPackage(
+                "RLE voxel count \(runningTotal) does not match declared \(expectedCount)"
+            )
         }
         return voxels
     }
