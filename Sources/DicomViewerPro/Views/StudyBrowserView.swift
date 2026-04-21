@@ -109,6 +109,15 @@ struct StudyBrowserView: View {
 
     private var headerButtons: some View {
         VStack(spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Worklist")
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer()
+                Text("\(indexedSeries.count) indexed · \(vm.loadedSeries.count) scanned")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+
             HStack(spacing: 8) {
                 Button {
                     onImportFolder()

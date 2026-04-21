@@ -1,0 +1,227 @@
+import SwiftUI
+
+struct AssistantPanel: View {
+    @EnvironmentObject var vm: ViewerViewModel
+    @State private var provider: AssistantCLIProvider = .local
+    @State private var draft: String = ""
+    @State private var messages: [AssistantChatMessage] = [
+        AssistantChatMessage(role: .assistant, text: "Ready for workstation commands.")
+    ]
+    @State private var isRunning = false
+
+    private let runner = AssistantCLIRunner()
+
+    var body: some View {
+        VStack(spacing: 0) {
+            providerStrip
+            Divider()
+            transcript
+            Divider()
+            quickCommands
+            composer
+        }
+    }
+
+    private var providerStrip: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label("Assistant", systemImage: "sparkles")
+                    .font(.headline)
+                Spacer()
+                if isRunning {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+
+            Picker("Provider", selection: $provider) {
+                ForEach(AssistantCLIProvider.allCases) { provider in
+                    Text(provider.displayName).tag(provider)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            Text(runner.availabilityText(for: provider))
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundColor(runner.isAvailable(provider) ? .secondary : .orange)
+                .lineLimit(1)
+        }
+        .padding(12)
+    }
+
+    private var transcript: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    ForEach(messages) { message in
+                        MessageRow(message: message)
+                            .id(message.id)
+                    }
+                }
+                .padding(12)
+            }
+            .onChange(of: messages.count) { _, _ in
+                guard let last = messages.last else { return }
+                withAnimation(.easeOut(duration: 0.16)) {
+                    proxy.scrollTo(last.id, anchor: .bottom)
+                }
+            }
+        }
+        .frame(minHeight: 180)
+    }
+
+    private var quickCommands: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Command Deck")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.secondary)
+
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 6) {
+                QuickCommandButton(title: "Lung", icon: "lungs") {
+                    submit("Apply lung window")
+                }
+                QuickCommandButton(title: "Bone", icon: "figure.walk") {
+                    submit("Show bone window")
+                }
+                QuickCommandButton(title: "Auto W/L", icon: "wand.and.stars") {
+                    submit("Auto window level")
+                }
+                QuickCommandButton(title: "Center", icon: "scope") {
+                    submit("Center slices")
+                }
+                QuickCommandButton(title: "Anatomy", icon: "list.bullet.rectangle") {
+                    submit("Create label map and load TotalSegmentator full anatomy preset")
+                }
+                QuickCommandButton(title: "SUV 2.5", icon: "flame") {
+                    submit("Threshold SUV 2.5")
+                }
+                QuickCommandButton(title: "Liver", icon: "target") {
+                    submit("Select and view liver")
+                }
+                QuickCommandButton(title: "Measure", icon: "ruler") {
+                    submit("Use distance measurement tool")
+                }
+            }
+        }
+        .padding(12)
+    }
+
+    private var composer: some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            TextField("Ask or command the viewer", text: $draft, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(1...4)
+                .onSubmit {
+                    submit(draft)
+                }
+
+            Button {
+                submit(draft)
+            } label: {
+                Image(systemName: "paperplane.fill")
+                    .frame(width: 24, height: 24)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isRunning)
+        }
+        .padding(12)
+    }
+
+    private func submit(_ text: String) {
+        let request = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !request.isEmpty, !isRunning else { return }
+
+        draft = ""
+        messages.append(AssistantChatMessage(role: .user, text: request))
+
+        let report = vm.performAssistantCommand(request)
+        if report.didApplyActions || !report.warnings.isEmpty || provider == .local {
+            messages.append(AssistantChatMessage(role: .assistant, text: report.summary))
+        }
+
+        guard provider != .local else { return }
+
+        isRunning = true
+        let context = vm.assistantContextSummary
+        let imageURLs = vm.exportAssistantViewportSnapshots()
+        let selectedProvider = provider
+
+        Task {
+            do {
+                let reply = try await runner.run(
+                    provider: selectedProvider,
+                    prompt: request,
+                    context: context,
+                    imageURLs: imageURLs
+                )
+                await MainActor.run {
+                    messages.append(AssistantChatMessage(role: .assistant, text: reply))
+                    isRunning = false
+                }
+            } catch {
+                await MainActor.run {
+                    messages.append(AssistantChatMessage(role: .assistant, text: "CLI unavailable: \(error.localizedDescription)"))
+                    isRunning = false
+                }
+            }
+        }
+    }
+}
+
+private struct AssistantChatMessage: Identifiable, Equatable {
+    enum Role {
+        case user
+        case assistant
+    }
+
+    let id = UUID()
+    let role: Role
+    let text: String
+}
+
+private struct MessageRow: View {
+    let message: AssistantChatMessage
+
+    var body: some View {
+        HStack(alignment: .top) {
+            if message.role == .user {
+                Spacer(minLength: 28)
+            }
+
+            Text(message.text)
+                .font(.system(size: 12))
+                .foregroundColor(message.role == .user ? .white : .primary)
+                .textSelection(.enabled)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(background)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .frame(maxWidth: 260, alignment: message.role == .user ? .trailing : .leading)
+
+            if message.role == .assistant {
+                Spacer(minLength: 28)
+            }
+        }
+    }
+
+    private var background: some ShapeStyle {
+        message.role == .user ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(Color.secondary.opacity(0.12))
+    }
+}
+
+private struct QuickCommandButton: View {
+    let title: String
+    let icon: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Label(title, systemImage: icon)
+                .font(.system(size: 11, weight: .medium))
+                .lineLimit(1)
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+    }
+}

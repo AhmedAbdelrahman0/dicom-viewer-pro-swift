@@ -120,6 +120,28 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(snapshot.filePaths, ["/tmp/series/image001.dcm"])
         XCTAssertEqual(snapshot.displayName, "CT - Chest CT")
     }
+
+    func testAssistantCommandInterpreterExtractsViewerActions() {
+        let actions = AssistantCommandInterpreter().actions(
+            for: "Show lungs, switch to distance measurement, axial 42"
+        )
+
+        XCTAssertTrue(actions.contains(.applyWindowPreset("Lung")))
+        XCTAssertTrue(actions.contains(.setViewerTool(.distance)))
+        XCTAssertTrue(actions.contains(.setSlice(axis: 2, index: 42)))
+    }
+
+    func testAssistantCommandInterpreterExtractsSegmentationActions() {
+        let actions = AssistantCommandInterpreter().actions(
+            for: "Create label map with TotalSegmentator, select liver, threshold SUV 2.5"
+        )
+
+        XCTAssertTrue(actions.contains(.createLabelMap("TotalSegmentator")))
+        XCTAssertTrue(actions.contains(.applyLabelPreset("TotalSegmentator")))
+        XCTAssertTrue(actions.contains(.selectLabel("liver")))
+        XCTAssertTrue(actions.contains(.setLabelingTool(.threshold)))
+        XCTAssertTrue(actions.contains(.threshold(2.5)))
+    }
 }
 
 private extension Data {

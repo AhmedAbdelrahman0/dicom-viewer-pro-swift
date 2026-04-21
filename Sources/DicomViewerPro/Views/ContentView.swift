@@ -41,6 +41,7 @@ public struct ContentView: View {
         } content: {
             VStack(spacing: 0) {
                 customToolbar
+                workstationHeader
                 MPRLayoutView()
                     .environmentObject(vm)
             }
@@ -87,6 +88,20 @@ public struct ContentView: View {
 
     private var customToolbar: some View {
         HStack(spacing: 6) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text("DICOM Viewer Pro")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.primary)
+                Text("diagnostic workstation")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(.secondary)
+            }
+            .frame(width: 132, alignment: .leading)
+
+            Divider()
+                .frame(height: 20)
+                .padding(.trailing, 4)
+
             ForEach(ViewerTool.allCases) { tool in
                 ToolButton(
                     tool: tool,
@@ -112,14 +127,50 @@ public struct ContentView: View {
 
             Spacer()
 
-            Text(vm.activeTool.displayName)
+            HStack(spacing: 10) {
+                Label("MPR + MIP", systemImage: "rectangle.grid.2x2")
+                Label(vm.activeTool.displayName, systemImage: vm.activeTool.systemImage)
+            }
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(.secondary)
                 .padding(.horizontal, 8)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
-        .background(Color(.displayP3, white: 0.14))
+        .background(Color(.displayP3, white: 0.115))
+        .overlay(Divider(), alignment: .bottom)
+    }
+
+    private var workstationHeader: some View {
+        HStack(spacing: 10) {
+            if let volume = vm.currentVolume {
+                StudyMetric(label: "Patient", value: volume.patientName.isEmpty ? "Unknown" : volume.patientName)
+                StudyMetric(label: "Study", value: volume.studyDescription.isEmpty ? "Untitled" : volume.studyDescription)
+                StudyMetric(label: "Series", value: volume.seriesDescription.isEmpty ? "Untitled" : volume.seriesDescription)
+                StudyMetric(label: "Modality", value: Modality.normalize(volume.modality).displayName)
+                StudyMetric(label: "W/L", value: "\(Int(vm.window)) / \(Int(vm.level))")
+                StudyMetric(label: "Slices", value: "\(vm.sliceIndices[0]) · \(vm.sliceIndices[1]) · \(vm.sliceIndices[2])")
+            } else {
+                Label("No study loaded", systemImage: "tray")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.secondary)
+            }
+
+            Spacer(minLength: 12)
+
+            HStack(spacing: 8) {
+                Label("Mini-PACS", systemImage: "server.rack")
+                Label(vm.fusion == nil ? "Fusion idle" : "Fusion active", systemImage: "square.2.stack.3d")
+                Label(vm.labeling.activeLabelMap == nil ? "Labels idle" : "Labels active", systemImage: "list.bullet.rectangle")
+                Label("AI control", systemImage: "sparkles")
+            }
+            .font(.system(size: 10, weight: .medium))
+            .foregroundColor(.secondary)
+            .lineLimit(1)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Color(.displayP3, white: 0.075))
         .overlay(Divider(), alignment: .bottom)
     }
 
@@ -199,6 +250,25 @@ public struct ContentView: View {
                 await vm.loadDICOMDirectory(url: url)
             }
         }
+    }
+}
+
+private struct StudyMetric: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(label.uppercased())
+                .font(.system(size: 8, weight: .semibold))
+                .foregroundColor(.secondary)
+            Text(value.isEmpty ? "—" : value)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(.primary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .frame(minWidth: 54, maxWidth: 150, alignment: .leading)
     }
 }
 

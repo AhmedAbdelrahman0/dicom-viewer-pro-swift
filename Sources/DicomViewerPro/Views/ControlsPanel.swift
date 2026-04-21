@@ -5,6 +5,7 @@ struct ControlsPanel: View {
     @State private var tab: Tab = .wl
 
     enum Tab: String, CaseIterable, Identifiable {
+        case assistant = "AI"
         case wl = "W/L"
         case fusion = "Fusion"
         case labels = "Labels"
@@ -29,6 +30,7 @@ struct ControlsPanel: View {
             ScrollView {
                 Group {
                     switch tab {
+                    case .assistant:    AssistantPanel()
                     case .wl:            WLTab()
                     case .fusion:        FusionTab()
                     case .labels:        LabelingPanel()
@@ -37,7 +39,7 @@ struct ControlsPanel: View {
                     case .info:          InfoTab()
                     }
                 }
-                .padding(tab == .labels || tab == .registration ? 0 : 16)
+                .padding(tab == .labels || tab == .registration || tab == .assistant ? 0 : 16)
             }
         }
         .navigationTitle("Controls")
