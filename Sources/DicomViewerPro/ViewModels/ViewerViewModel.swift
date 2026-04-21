@@ -125,6 +125,14 @@ public final class ViewerViewModel: ObservableObject {
 
     public init() {}
 
+    public var loadedCTVolumes: [ImageVolume] {
+        loadedVolumes.filter { Modality.normalize($0.modality) == .CT }
+    }
+
+    public var loadedPETVolumes: [ImageVolume] {
+        loadedVolumes.filter { Modality.normalize($0.modality) == .PT }
+    }
+
     // MARK: - Loading
 
     public func loadNIfTI(url: URL) async {
@@ -238,24 +246,42 @@ public final class ViewerViewModel: ObservableObject {
                 return
             }
 
-            let pair = FusionPair(base: base, overlay: overlay)
-            pair.opacity = overlayOpacity
-            pair.colormap = overlayColormap
-
-            // Auto SUV range for PET overlays
-            if Modality.normalize(overlay.modality) == .PT {
-                let mn = overlay.intensityRange.min
-                let mx = overlay.intensityRange.max
-                overlayWindow = Double(mx - mn) * 0.8
-                overlayLevel = Double(mn + mx) * 0.5
-                pair.overlayWindow = overlayWindow
-                pair.overlayLevel = overlayLevel
-            }
-
-            fusion = pair
+            let resampled = try await resampledOverlayIfNeeded(base: base, overlay: overlay)
+            let pair = configureFusion(base: base, overlay: overlay, resampledOverlay: resampled)
             statusMessage = "Fusion loaded: \(pair.fusionTypeLabel)"
         } catch {
             statusMessage = "Error: \(error.localizedDescription)"
+        }
+    }
+
+    public func autoFusePETCT() async {
+        guard let pair = bestPETCTPair() else {
+            statusMessage = "Load at least one CT and one PET volume first"
+            return
+        }
+        await fusePETCT(base: pair.ct, overlay: pair.pet)
+    }
+
+    public func fusePETCT(base: ImageVolume, overlay: ImageVolume) async {
+        isLoading = true
+        statusMessage = "Fusing PET/CT..."
+        defer { isLoading = false }
+
+        let ct = Modality.normalize(base.modality) == .CT ? base : overlay
+        let pet = Modality.normalize(base.modality) == .PT ? base : overlay
+
+        guard Modality.normalize(ct.modality) == .CT,
+              Modality.normalize(pet.modality) == .PT else {
+            statusMessage = "PET/CT fusion needs one CT volume and one PET volume"
+            return
+        }
+
+        do {
+            let resampled = try await resampledOverlayIfNeeded(base: ct, overlay: pet)
+            configureFusion(base: ct, overlay: pet, resampledOverlay: resampled)
+            statusMessage = "PET/CT fused: PET resampled into CT grid"
+        } catch {
+            statusMessage = "PET/CT fusion error: \(error.localizedDescription)"
         }
     }
 
@@ -309,6 +335,127 @@ public final class ViewerViewModel: ObservableObject {
     public func removeOverlay() {
         fusion = nil
         statusMessage = "Overlay removed"
+    }
+
+    @discardableResult
+    private func configureFusion(base: ImageVolume,
+                                 overlay: ImageVolume,
+                                 resampledOverlay: ImageVolume?) -> FusionPair {
+        displayVolume(base)
+        if Modality.normalize(base.modality) == .CT,
+           let softTissue = WLPresets.CT.first(where: { $0.name == "Soft Tissue" }) {
+            applyPreset(softTissue)
+        }
+
+        let pair = FusionPair(base: base, overlay: overlay)
+        pair.resampledOverlay = resampledOverlay
+        pair.isGeometryResampled = resampledOverlay != nil
+        pair.registrationNote = resampledOverlay == nil
+            ? "PET/overlay already matches base grid"
+            : "PET/overlay resampled into CT/base world geometry"
+        applyFusionDisplayDefaults(for: overlay, pair: pair)
+        fusion = pair
+        return pair
+    }
+
+    private func applyFusionDisplayDefaults(for overlay: ImageVolume, pair: FusionPair) {
+        if Modality.normalize(overlay.modality) == .PT {
+            overlayOpacity = 0.55
+            overlayColormap = .petRainbow
+
+            let maxValue = Double(overlay.intensityRange.max)
+            if maxValue.isFinite, maxValue > 0, maxValue <= 25 {
+                overlayWindow = 10
+                overlayLevel = 5
+            } else if maxValue.isFinite, maxValue > 0 {
+                overlayWindow = max(1, maxValue * 0.85)
+                overlayLevel = maxValue * 0.425
+            } else {
+                overlayWindow = 10
+                overlayLevel = 5
+            }
+        }
+
+        pair.opacity = overlayOpacity
+        pair.colormap = overlayColormap
+        pair.overlayWindow = overlayWindow
+        pair.overlayLevel = overlayLevel
+    }
+
+    private func resampledOverlayIfNeeded(base: ImageVolume,
+                                          overlay: ImageVolume) async throws -> ImageVolume? {
+        guard !hasMatchingGrid(base, overlay) else { return nil }
+        return await Task.detached(priority: .userInitiated) {
+            VolumeResampler.resample(overlay: overlay, toMatch: base, mode: .linear)
+        }.value
+    }
+
+    private func hasMatchingGrid(_ base: ImageVolume, _ overlay: ImageVolume) -> Bool {
+        guard base.width == overlay.width,
+              base.height == overlay.height,
+              base.depth == overlay.depth else {
+            return false
+        }
+
+        let tolerance = 1e-4
+        guard abs(base.spacing.x - overlay.spacing.x) < tolerance,
+              abs(base.spacing.y - overlay.spacing.y) < tolerance,
+              abs(base.spacing.z - overlay.spacing.z) < tolerance,
+              abs(base.origin.x - overlay.origin.x) < tolerance,
+              abs(base.origin.y - overlay.origin.y) < tolerance,
+              abs(base.origin.z - overlay.origin.z) < tolerance else {
+            return false
+        }
+
+        for column in 0..<3 {
+            for row in 0..<3 where abs(base.direction[column][row] - overlay.direction[column][row]) >= tolerance {
+                return false
+            }
+        }
+        return true
+    }
+
+    private func bestPETCTPair() -> (ct: ImageVolume, pet: ImageVolume)? {
+        let cts = loadedCTVolumes
+        let pets = loadedPETVolumes
+        guard !cts.isEmpty, !pets.isEmpty else { return nil }
+
+        if let current = currentVolume {
+            let currentModality = Modality.normalize(current.modality)
+            if currentModality == .CT,
+               let pet = pets.max(by: { fusionScore(ct: current, pet: $0) < fusionScore(ct: current, pet: $1) }) {
+                return (current, pet)
+            }
+            if currentModality == .PT,
+               let ct = cts.max(by: { fusionScore(ct: $0, pet: current) < fusionScore(ct: $1, pet: current) }) {
+                return (ct, current)
+            }
+        }
+
+        var best: (ct: ImageVolume, pet: ImageVolume, score: Int)?
+        for ct in cts {
+            for pet in pets {
+                let score = fusionScore(ct: ct, pet: pet)
+                if best == nil || score > best!.score {
+                    best = (ct, pet, score)
+                }
+            }
+        }
+        guard let best else { return nil }
+        return (best.ct, best.pet)
+    }
+
+    private func fusionScore(ct: ImageVolume, pet: ImageVolume) -> Int {
+        var score = 0
+        if !ct.studyUID.isEmpty, ct.studyUID == pet.studyUID { score += 8 }
+        if !ct.patientID.isEmpty, ct.patientID == pet.patientID { score += 4 }
+        if !ct.patientName.isEmpty, ct.patientName == pet.patientName { score += 2 }
+        if abs(ct.origin.x - pet.origin.x) < 50,
+           abs(ct.origin.y - pet.origin.y) < 50,
+           abs(ct.origin.z - pet.origin.z) < 50 {
+            score += 1
+        }
+        return score
     }
 
     // MARK: - Volume display
@@ -413,6 +560,7 @@ public final class ViewerViewModel: ObservableObject {
 
     public func makeOverlayImage(for axis: Int) -> CGImage? {
         guard let pair = fusion else { return nil }
+        guard pair.overlayVisible else { return nil }
         let ov = pair.displayedOverlay
         let slice = ov.slice(axis: axis, index: sliceIndices[axis])
         var pixels = slice.pixels

@@ -35,6 +35,8 @@ public final class FusionPair: ObservableObject {
     /// Resampled overlay in the base's grid (optional). If nil, overlay is
     /// used directly (assumes matching geometry).
     @Published public var resampledOverlay: ImageVolume?
+    @Published public var isGeometryResampled: Bool = false
+    @Published public var registrationNote: String = "Assumes aligned geometry"
 
     public init(base: ImageVolume, overlay: ImageVolume) {
         self.baseVolume = base
@@ -48,4 +50,17 @@ public final class FusionPair: ObservableObject {
     }
 
     public var displayedOverlay: ImageVolume { resampledOverlay ?? overlayVolume }
+
+    public var isPETCT: Bool {
+        Modality.normalize(baseVolume.modality) == .CT &&
+        Modality.normalize(overlayVolume.modality) == .PT
+    }
+
+    public var baseGridLabel: String {
+        "\(baseVolume.width)x\(baseVolume.height)x\(baseVolume.depth)"
+    }
+
+    public var overlayGridLabel: String {
+        "\(overlayVolume.width)x\(overlayVolume.height)x\(overlayVolume.depth)"
+    }
 }

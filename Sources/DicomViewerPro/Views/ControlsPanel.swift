@@ -116,25 +116,52 @@ private struct WLTab: View {
 
 private struct FusionTab: View {
     @EnvironmentObject var vm: ViewerViewModel
+    @State private var selectedCTID: UUID?
+    @State private var selectedPETID: UUID?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Fusion Overlay")
-                .font(.headline)
+            HStack {
+                Text("PET/CT Fusion")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    Task { await vm.autoFusePETCT() }
+                } label: {
+                    Label("Auto", systemImage: "wand.and.stars")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(vm.loadedCTVolumes.isEmpty || vm.loadedPETVolumes.isEmpty)
+            }
+
+            fusionBuilder
 
             if let pair = vm.fusion {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(pair.fusionTypeLabel)
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(.orange)
-                    Text(pair.overlayVolume.seriesDescription)
+                    Text(pair.overlayVolume.seriesDescription.isEmpty ? "PET overlay" : pair.overlayVolume.seriesDescription)
                         .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                    Text(pair.registrationNote)
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                    Text("CT grid \(pair.baseGridLabel) · PET grid \(pair.overlayGridLabel)")
+                        .font(.system(size: 10, design: .monospaced))
                         .foregroundColor(.secondary)
                 }
                 .padding(8)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Color.secondary.opacity(0.1))
                 .cornerRadius(6)
+
+                Toggle("Show PET overlay", isOn: Binding(
+                    get: { pair.overlayVisible },
+                    set: { pair.overlayVisible = $0; pair.objectWillChange.send() }
+                ))
 
                 // Opacity
                 VStack(alignment: .leading) {
@@ -173,8 +200,34 @@ private struct FusionTab: View {
 
                 // Overlay W/L
                 VStack(alignment: .leading) {
-                    Text("Overlay Range")
+                    Text("PET Range")
                         .font(.subheadline)
+                    HStack(spacing: 6) {
+                        Button("SUV 0-10") {
+                            vm.overlayWindow = 10
+                            vm.overlayLevel = 5
+                            vm.fusion?.overlayWindow = 10
+                            vm.fusion?.overlayLevel = 5
+                        }
+                        Button("SUV 0-15") {
+                            vm.overlayWindow = 15
+                            vm.overlayLevel = 7.5
+                            vm.fusion?.overlayWindow = 15
+                            vm.fusion?.overlayLevel = 7.5
+                        }
+                        Button("Auto") {
+                            if let overlay = vm.fusion?.overlayVolume {
+                                let maxValue = max(1, Double(overlay.intensityRange.max))
+                                vm.overlayWindow = maxValue
+                                vm.overlayLevel = maxValue * 0.5
+                                vm.fusion?.overlayWindow = vm.overlayWindow
+                                vm.fusion?.overlayLevel = vm.overlayLevel
+                            }
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+
                     HStack {
                         Text("W:")
                         Slider(value: Binding(
@@ -213,13 +266,85 @@ private struct FusionTab: View {
             } else {
                 Text("No overlay loaded")
                     .foregroundColor(.secondary)
-                Text("Use the sidebar 'Add Overlay (PET)' button to load a PET or functional volume on top of your current study.")
+                Text("Load a CT and PET series, then use Auto or choose volumes above. PET is resampled into the CT grid using DICOM/NIfTI world geometry.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
 
             Spacer()
         }
+    }
+
+    private var fusionBuilder: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if vm.loadedCTVolumes.isEmpty || vm.loadedPETVolumes.isEmpty {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "info.circle")
+                        .foregroundColor(.secondary)
+                    Text("Open the CT series and the PET series from the worklist first. Loaded CT: \(vm.loadedCTVolumes.count), PET: \(vm.loadedPETVolumes.count).")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            } else {
+                Picker("CT", selection: ctSelection) {
+                    ForEach(vm.loadedCTVolumes) { volume in
+                        Text(volumeLabel(volume)).tag(Optional(volume.id))
+                    }
+                }
+
+                Picker("PET", selection: petSelection) {
+                    ForEach(vm.loadedPETVolumes) { volume in
+                        Text(volumeLabel(volume)).tag(Optional(volume.id))
+                    }
+                }
+
+                Button {
+                    guard let ct = selectedCTVolume,
+                          let pet = selectedPETVolume else { return }
+                    Task { await vm.fusePETCT(base: ct, overlay: pet) }
+                } label: {
+                    Label("Fuse Selected PET/CT", systemImage: "square.2.layers.3d")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(selectedCTVolume == nil || selectedPETVolume == nil)
+            }
+        }
+        .onAppear {
+            selectedCTID = selectedCTID ?? vm.loadedCTVolumes.first?.id
+            selectedPETID = selectedPETID ?? vm.loadedPETVolumes.first?.id
+        }
+    }
+
+    private var ctSelection: Binding<UUID?> {
+        Binding(
+            get: { selectedCTID ?? vm.loadedCTVolumes.first?.id },
+            set: { selectedCTID = $0 }
+        )
+    }
+
+    private var petSelection: Binding<UUID?> {
+        Binding(
+            get: { selectedPETID ?? vm.loadedPETVolumes.first?.id },
+            set: { selectedPETID = $0 }
+        )
+    }
+
+    private var selectedCTVolume: ImageVolume? {
+        let id = selectedCTID ?? vm.loadedCTVolumes.first?.id
+        return vm.loadedCTVolumes.first { $0.id == id }
+    }
+
+    private var selectedPETVolume: ImageVolume? {
+        let id = selectedPETID ?? vm.loadedPETVolumes.first?.id
+        return vm.loadedPETVolumes.first { $0.id == id }
+    }
+
+    private func volumeLabel(_ volume: ImageVolume) -> String {
+        let name = volume.seriesDescription.isEmpty
+            ? Modality.normalize(volume.modality).displayName
+            : volume.seriesDescription
+        return "\(name) · \(volume.width)x\(volume.height)x\(volume.depth)"
     }
 }
 

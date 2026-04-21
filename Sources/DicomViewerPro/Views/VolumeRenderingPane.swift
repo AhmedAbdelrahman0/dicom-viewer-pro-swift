@@ -23,13 +23,13 @@ struct VolumeRenderingPane: View {
             ZStack {
                 Color.black
 
-                if let volume = vm.currentVolume {
+                if let volume = renderedVolume {
                     #if canImport(MetalKit)
                     MetalVolumeView(
                         volume: volume,
                         settings: VolumeRenderSettings(
-                            window: Float(vm.window),
-                            level: Float(vm.level),
+                            window: Float(renderWindow),
+                            level: Float(renderLevel),
                             opacity: Float(opacity),
                             density: Float(density),
                             sampleCount: UInt32(sampleCount),
@@ -37,7 +37,7 @@ struct VolumeRenderingPane: View {
                             rotationY: Float(rotation.width * .pi / 180),
                             zoom: Float(zoom),
                             mode: mode,
-                            invert: vm.invertColors
+                            invert: renderInvert
                         )
                     )
                     .gesture(rotationGesture)
@@ -67,10 +67,10 @@ struct VolumeRenderingPane: View {
 
     private var header: some View {
         HStack(spacing: 8) {
-            Text("3D GPU")
+            Text(renderTitle)
                 .font(.system(size: 11, weight: .bold))
                 .foregroundColor(.blue)
-            if let v = vm.currentVolume {
+            if let v = renderedVolume {
                 Text("\(v.width)x\(v.height)x\(v.depth)")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.secondary)
@@ -88,6 +88,26 @@ struct VolumeRenderingPane: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(Color(.displayP3, white: 0.1))
+    }
+
+    private var renderedVolume: ImageVolume? {
+        vm.fusion?.displayedOverlay ?? vm.currentVolume
+    }
+
+    private var renderWindow: Double {
+        vm.fusion == nil ? vm.window : vm.overlayWindow
+    }
+
+    private var renderLevel: Double {
+        vm.fusion == nil ? vm.level : vm.overlayLevel
+    }
+
+    private var renderInvert: Bool {
+        vm.fusion == nil ? vm.invertColors : false
+    }
+
+    private var renderTitle: String {
+        vm.fusion?.isPETCT == true ? "3D PET" : "3D GPU"
     }
 
     private var renderControls: some View {

@@ -176,6 +176,66 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(payload.extent.z, 0.5, accuracy: 1e-6)
     }
     #endif
+
+    func testVolumeResamplerPreservesValuesWhenGeometryMatches() {
+        let overlay = ImageVolume(
+            pixels: Array(0..<8).map(Float.init),
+            depth: 2,
+            height: 2,
+            width: 2,
+            spacing: (1, 1, 1),
+            origin: (0, 0, 0),
+            modality: "PT"
+        )
+        let base = ImageVolume(
+            pixels: Array(repeating: 0, count: 8),
+            depth: 2,
+            height: 2,
+            width: 2,
+            spacing: (1, 1, 1),
+            origin: (0, 0, 0),
+            modality: "CT"
+        )
+
+        let resampled = VolumeResampler.resample(overlay: overlay, toMatch: base)
+
+        XCTAssertEqual(resampled.pixels, overlay.pixels)
+        XCTAssertEqual(resampled.modality, "PT")
+        XCTAssertEqual(resampled.width, base.width)
+        XCTAssertEqual(resampled.height, base.height)
+        XCTAssertEqual(resampled.depth, base.depth)
+    }
+
+    func testVolumeResamplerUsesWorldGeometry() {
+        let overlay = ImageVolume(
+            pixels: [
+                0, 10, 20,
+                0, 10, 20,
+                0, 10, 20
+            ],
+            depth: 1,
+            height: 3,
+            width: 3,
+            spacing: (1, 1, 1),
+            origin: (0, 0, 0),
+            modality: "PT"
+        )
+        let base = ImageVolume(
+            pixels: [0],
+            depth: 1,
+            height: 1,
+            width: 1,
+            spacing: (1, 1, 1),
+            origin: (2, 1, 0),
+            modality: "CT"
+        )
+
+        let resampled = VolumeResampler.resample(overlay: overlay, toMatch: base)
+
+        XCTAssertEqual(resampled.pixels[0], 20, accuracy: 1e-6)
+        XCTAssertEqual(resampled.origin.x, 2, accuracy: 1e-6)
+        XCTAssertEqual(resampled.origin.y, 1, accuracy: 1e-6)
+    }
 }
 
 private extension Data {

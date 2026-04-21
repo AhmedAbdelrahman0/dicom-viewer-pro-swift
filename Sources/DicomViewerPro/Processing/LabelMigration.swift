@@ -56,13 +56,28 @@ public enum LabelMigration {
     }
 }
 
-/// Resample an intensity volume through a transform (linear interpolation).
+public enum VolumeResamplingMode {
+    case nearest
+    case linear
+}
+
+/// Resample an intensity volume through geometry and optional transform.
 public enum VolumeResampler {
 
+    public static func resample(overlay: ImageVolume,
+                                toMatch base: ImageVolume,
+                                mode: VolumeResamplingMode = .linear,
+                                fillValue: Float = 0) -> ImageVolume {
+        resample(source: overlay, target: base, transform: .identity,
+                 mode: mode, fillValue: fillValue)
+    }
+
     public static func resample(source: ImageVolume,
-                                 target: ImageVolume,
-                                 transform: Transform3D = .identity) -> ImageVolume {
-        var out = [Float](repeating: 0, count: target.depth * target.height * target.width)
+                                target: ImageVolume,
+                                transform: Transform3D = .identity,
+                                mode: VolumeResamplingMode = .linear,
+                                fillValue: Float = 0) -> ImageVolume {
+        var out = [Float](repeating: fillValue, count: target.depth * target.height * target.width)
 
         for z in 0..<target.depth {
             for y in 0..<target.height {
@@ -72,7 +87,7 @@ public enum VolumeResampler {
                     let srcWorld = transform.apply(to: tgtWorld)
                     let srcVoxel = source.voxelCoordinates(from: srcWorld)
 
-                    if let v = trilinear(source, x: srcVoxel.x, y: srcVoxel.y, z: srcVoxel.z) {
+                    if let v = sample(source, x: srcVoxel.x, y: srcVoxel.y, z: srcVoxel.z, mode: mode) {
                         out[rowStart + x] = v
                     }
                 }
@@ -99,11 +114,35 @@ public enum VolumeResampler {
     }
 
     @inline(__always)
+    private static func sample(_ v: ImageVolume,
+                               x: Double,
+                               y: Double,
+                               z: Double,
+                               mode: VolumeResamplingMode) -> Float? {
+        switch mode {
+        case .nearest:
+            let xi = Int(round(x))
+            let yi = Int(round(y))
+            let zi = Int(round(z))
+            guard xi >= 0, yi >= 0, zi >= 0,
+                  xi < v.width, yi < v.height, zi < v.depth else { return nil }
+            return v.pixels[zi * v.height * v.width + yi * v.width + xi]
+        case .linear:
+            return trilinear(v, x: x, y: y, z: z)
+        }
+    }
+
+    @inline(__always)
     private static func trilinear(_ v: ImageVolume, x: Double, y: Double, z: Double) -> Float? {
         let x0 = Int(floor(x)), y0 = Int(floor(y)), z0 = Int(floor(z))
-        let x1 = x0 + 1, y1 = y0 + 1, z1 = z0 + 1
         guard x0 >= 0, y0 >= 0, z0 >= 0,
-              x1 < v.width, y1 < v.height, z1 < v.depth else { return nil }
+              x <= Double(v.width - 1),
+              y <= Double(v.height - 1),
+              z <= Double(v.depth - 1) else { return nil }
+
+        let x1 = min(x0 + 1, v.width - 1)
+        let y1 = min(y0 + 1, v.height - 1)
+        let z1 = min(z0 + 1, v.depth - 1)
 
         let dx = Float(x - Double(x0))
         let dy = Float(y - Double(y0))
