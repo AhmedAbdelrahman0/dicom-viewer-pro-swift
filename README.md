@@ -8,6 +8,7 @@ A native SwiftUI version of DICOM Viewer Pro that runs on **macOS 14+** and **iP
 - **Native NIfTI parser**: Pure Swift, supports `.nii` and `.nii.gz` with built-in gzip decompression
 - **Native DICOM parser**: Explicit & Implicit VR Little Endian, uncompressed pixel data
 - **PET/CT Fusion**: 9 colormaps (hot, pet_rainbow, jet, bone, cool_warm, fire, ice, grayscale, inverted_gray)
+- **Mini-PACS Index**: Recursive DICOM/NIfTI indexing for large local archives with paged search results
 - **Tools**: W/L, Pan, Zoom, Distance, Angle, Area measurements
 - **Orientation markers**: R/L/A/P/H/F overlays on every view
 - **W/L Presets**: Auto-switching based on modality (CT / MR / PET)
@@ -18,6 +19,7 @@ A native SwiftUI version of DICOM Viewer Pro that runs on **macOS 14+** and **iP
 Pure Swift 5.9+ using **no third-party dependencies** — everything works with Apple's frameworks:
 
 - **SwiftUI** — UI
+- **SwiftData** — local Mini-PACS metadata index
 - **CoreGraphics** — pixel rendering
 - **Compression** — gzip for `.nii.gz`
 - **ImageIO** — image handling
@@ -36,7 +38,8 @@ Sources/
 │   │   └── FusionPair.swift             # Fusion + colormaps
 │   ├── IO/
 │   │   ├── NIfTILoader.swift            # Native .nii/.nii.gz parser
-│   │   └── DICOMLoader.swift            # Native DICOM parser
+│   │   ├── DICOMLoader.swift            # Native DICOM parser
+│   │   └── PACSDirectoryIndexer.swift   # Large-directory Mini-PACS indexer
 │   ├── Rendering/
 │   │   ├── Colormaps.swift              # LUT generation
 │   │   └── PixelRenderer.swift          # Float → CGImage
@@ -89,6 +92,10 @@ Select a tool from the toolbar, then drag on any slice view:
 | Distance | Tap two points |
 | Angle | Tap three points (arm 1 → vertex → arm 2) |
 | Area | Tap 3+ points to define polygon |
+
+### Large Library Indexing
+- Use **Index** in the Worklist to recursively catalog local DICOM/NIfTI archives.
+- The indexer reads DICOM header prefixes instead of pixel data, de-duplicates copied SOP instances, saves records in batches, and pages the worklist results for large folders.
 
 ### Touch (iPad)
 - **Pinch** to zoom

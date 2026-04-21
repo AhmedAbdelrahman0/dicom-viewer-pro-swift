@@ -80,6 +80,14 @@ public enum DICOMLoader {
         return dcm
     }
 
+    public static func parseIndexHeader(at url: URL,
+                                        maxBytes: Int = 1_048_576) throws -> DICOMFile {
+        let data = try prefixData(from: url, maxBytes: maxBytes)
+        let dcm = try parseHeader(data: data)
+        dcm.filePath = url.path
+        return dcm
+    }
+
     public static func parseHeader(data: Data) throws -> DICOMFile {
         guard data.count > 132 else {
             throw DICOMError.invalidFile("File too small")
@@ -434,6 +442,12 @@ public enum DICOMLoader {
             return Int(value.bytes.withUnsafeBytes { $0.load(as: UInt16.self) })
         }
         return value.asInt()
+    }
+
+    private static func prefixData(from url: URL, maxBytes: Int) throws -> Data {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        return try handle.read(upToCount: max(132, maxBytes)) ?? Data()
     }
 
     // MARK: - Scan a directory for DICOM files

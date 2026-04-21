@@ -119,9 +119,61 @@ final class GeometryAndIOTests: XCTestCase {
 
         XCTAssertEqual(record.id, "dicom:1.2.3")
         XCTAssertEqual(record.kind, .dicom)
-        XCTAssertTrue(record.searchableText.contains("Chest CT"))
+        XCTAssertTrue(record.searchableText.contains("chest ct"))
         XCTAssertEqual(snapshot.filePaths, ["/tmp/series/image001.dcm"])
         XCTAssertEqual(snapshot.displayName, "CT - Chest CT")
+    }
+
+    func testPACSDirectoryIndexerDeduplicatesLargeStudyFolders() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pacs-index-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        try makeMinimalDICOM(
+            patientName: "Alpha^Patient",
+            patientID: "MRN-A",
+            studyUID: "study-a",
+            studyDate: "20260421",
+            seriesUID: "series-a",
+            seriesDescription: "PET WB",
+            modality: "PT",
+            sopUID: "sop-a-1"
+        ).write(to: root.appendingPathComponent("a1.dcm"))
+        try makeMinimalDICOM(
+            patientName: "Alpha^Patient",
+            patientID: "MRN-A",
+            studyUID: "study-a",
+            studyDate: "20260421",
+            seriesUID: "series-a",
+            seriesDescription: "PET WB",
+            modality: "PT",
+            sopUID: "sop-a-1"
+        ).write(to: root.appendingPathComponent("a1-copy.dcm"))
+        try makeMinimalDICOM(
+            patientName: "Beta^Patient",
+            patientID: "MRN-B",
+            studyUID: "study-b",
+            studyDate: "20260420",
+            seriesUID: "series-b",
+            seriesDescription: "CT AC",
+            modality: "CT",
+            sopUID: "sop-b-1"
+        ).write(to: root.appendingPathComponent("b1.dcm"))
+
+        let result = PACSDirectoryIndexer.scan(
+            url: root,
+            headerByteLimit: 4096,
+            progressStride: 1
+        )
+
+        XCTAssertEqual(result.scannedFiles, 3)
+        XCTAssertEqual(result.dicomInstances, 3)
+        XCTAssertEqual(result.records.count, 2)
+        let alpha = try XCTUnwrap(result.records.first { $0.seriesUID == "series-a" })
+        XCTAssertEqual(alpha.instanceCount, 1)
+        XCTAssertTrue(alpha.searchableText.contains("alpha"))
+        XCTAssertTrue(alpha.filePaths.first?.hasSuffix(".dcm") == true)
     }
 
     @MainActor
@@ -662,6 +714,31 @@ final class GeometryAndIOTests: XCTestCase {
     }
 }
 
+private func makeMinimalDICOM(patientName: String,
+                              patientID: String,
+                              studyUID: String,
+                              studyDate: String,
+                              seriesUID: String,
+                              seriesDescription: String,
+                              modality: String,
+                              sopUID: String) -> Data {
+    var data = Data(count: 128)
+    data.append("DICM".data(using: .ascii)!)
+    data.appendDICOMElement(group: 0x0002, element: 0x0010, vr: "UI", string: "1.2.840.10008.1.2.1")
+    data.appendDICOMElement(group: 0x0010, element: 0x0010, vr: "PN", string: patientName)
+    data.appendDICOMElement(group: 0x0010, element: 0x0020, vr: "LO", string: patientID)
+    data.appendDICOMElement(group: 0x0008, element: 0x0020, vr: "DA", string: studyDate)
+    data.appendDICOMElement(group: 0x0008, element: 0x1030, vr: "LO", string: "Indexed Study")
+    data.appendDICOMElement(group: 0x0020, element: 0x000D, vr: "UI", string: studyUID)
+    data.appendDICOMElement(group: 0x0020, element: 0x000E, vr: "UI", string: seriesUID)
+    data.appendDICOMElement(group: 0x0008, element: 0x103E, vr: "LO", string: seriesDescription)
+    data.appendDICOMElement(group: 0x0008, element: 0x0060, vr: "CS", string: modality)
+    data.appendDICOMElement(group: 0x0008, element: 0x0018, vr: "UI", string: sopUID)
+    data.appendDICOMElement(group: 0x0028, element: 0x0010, vr: "US", uint16: 1)
+    data.appendDICOMElement(group: 0x0028, element: 0x0011, vr: "US", uint16: 1)
+    return data
+}
+
 private extension Data {
     mutating func writeInt16LE(_ value: Int16, at offset: Int) {
         writeUInt16LE(UInt16(bitPattern: value), at: offset)
@@ -691,5 +768,42 @@ private extension Data {
         var bytes = Data(count: 4)
         bytes.writeFloat32LE(value, at: 0)
         append(bytes)
+    }
+
+    mutating func appendDICOMElement(group: UInt16,
+                                     element: UInt16,
+                                     vr: String,
+                                     string: String) {
+        var value = string.data(using: .ascii) ?? Data()
+        if value.count % 2 != 0 {
+            value.append(0)
+        }
+        appendDICOMElementHeader(group: group, element: element, vr: vr, length: value.count)
+        append(value)
+    }
+
+    mutating func appendDICOMElement(group: UInt16,
+                                     element: UInt16,
+                                     vr: String,
+                                     uint16: UInt16) {
+        var value = Data()
+        value.appendUInt16LE(uint16)
+        appendDICOMElementHeader(group: group, element: element, vr: vr, length: value.count)
+        append(value)
+    }
+
+    private mutating func appendDICOMElementHeader(group: UInt16,
+                                                   element: UInt16,
+                                                   vr: String,
+                                                   length: Int) {
+        appendUInt16LE(group)
+        appendUInt16LE(element)
+        append(vr.data(using: .ascii)!)
+        appendUInt16LE(UInt16(length))
+    }
+
+    mutating func appendUInt16LE(_ value: UInt16) {
+        append(UInt8(value & 0xFF))
+        append(UInt8((value >> 8) & 0xFF))
     }
 }

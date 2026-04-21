@@ -3,7 +3,6 @@ import SwiftData
 
 struct StudyBrowserView: View {
     @Environment(\.modelContext) private var modelContext
-    @Query(sort: \PACSIndexedSeries.indexedAt, order: .reverse) private var indexedSeries: [PACSIndexedSeries]
 
     @ObservedObject var vm: ViewerViewModel
     let onImportFolder: () -> Void
@@ -12,6 +11,10 @@ struct StudyBrowserView: View {
     let onImportOverlay: () -> Void
 
     @State private var searchText: String = ""
+    @State private var indexedSeries: [PACSIndexedSeriesSnapshot] = []
+    @State private var indexedTotalCount: Int = 0
+    @State private var indexFetchLimit: Int = 500
+    private let indexPageSize = 500
 
     var body: some View {
         VStack(spacing: 0) {
@@ -21,21 +24,33 @@ struct StudyBrowserView: View {
             List {
                 if !indexedSeries.isEmpty {
                     Section("Mini-PACS Index") {
-                        ForEach(filteredIndexedSeries) { entry in
+                        ForEach(indexedSeries) { entry in
                             Button {
-                                Task { await vm.openIndexedSeries(entry.snapshot) }
+                                Task { await vm.openIndexedSeries(entry) }
                             } label: {
                                 PACSIndexedSeriesRow(entry: entry)
                             }
                             .buttonStyle(.plain)
                             .contextMenu {
                                 Button(role: .destructive) {
-                                    modelContext.delete(entry)
-                                    try? modelContext.save()
+                                    deleteIndexedSeries(id: entry.id)
                                 } label: {
                                     Label("Remove from Index", systemImage: "trash")
                                 }
                             }
+                        }
+
+                        if indexedTotalCount > indexedSeries.count {
+                            Button {
+                                indexFetchLimit += indexPageSize
+                                reloadIndexResults()
+                            } label: {
+                                Label("Show more (\(indexedSeries.count)/\(indexedTotalCount))",
+                                      systemImage: "chevron.down")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
                         }
                     }
                 }
@@ -66,7 +81,7 @@ struct StudyBrowserView: View {
                     }
                 }
 
-                if indexedSeries.isEmpty && vm.loadedSeries.isEmpty && vm.loadedVolumes.isEmpty {
+                if indexedTotalCount == 0 && vm.loadedSeries.isEmpty && vm.loadedVolumes.isEmpty {
                     HStack {
                         Spacer()
                         VStack(spacing: 8) {
@@ -89,6 +104,16 @@ struct StudyBrowserView: View {
             .searchable(text: $searchText, prompt: "Search…")
         }
         .navigationTitle("Studies")
+        .task {
+            reloadIndexResults()
+        }
+        .onChange(of: searchText) { _, _ in
+            indexFetchLimit = indexPageSize
+            reloadIndexResults()
+        }
+        .onChange(of: vm.indexRevision) { _, _ in
+            reloadIndexResults()
+        }
     }
 
     private var filteredSeries: [DICOMSeries] {
@@ -100,22 +125,26 @@ struct StudyBrowserView: View {
         }
     }
 
-    private var filteredIndexedSeries: [PACSIndexedSeries] {
-        if searchText.isEmpty { return indexedSeries }
-        return indexedSeries.filter {
-            $0.searchableText.localizedCaseInsensitiveContains(searchText)
-        }
-    }
-
     private var headerButtons: some View {
         VStack(spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
                 Text("Worklist")
                     .font(.system(size: 13, weight: .semibold))
                 Spacer()
-                Text("\(indexedSeries.count) indexed · \(vm.loadedSeries.count) scanned")
+                Text("\(indexedTotalCount) indexed · \(vm.loadedSeries.count) scanned")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.secondary)
+            }
+
+            if let indexProgress = vm.indexProgress {
+                VStack(alignment: .leading, spacing: 3) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text(indexProgress.statusText)
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
             }
 
             HStack(spacing: 8) {
@@ -161,10 +190,59 @@ struct StudyBrowserView: View {
         }
         .padding(8)
     }
+
+    private func reloadIndexResults() {
+        do {
+            indexedSeries = try modelContext.fetch(indexFetchDescriptor(limit: indexFetchLimit)).map(\.snapshot)
+            indexedTotalCount = try modelContext.fetchCount(indexFetchDescriptor(limit: nil))
+        } catch {
+            indexedSeries = []
+            indexedTotalCount = 0
+            vm.statusMessage = "Index fetch error: \(error.localizedDescription)"
+        }
+    }
+
+    private func indexFetchDescriptor(limit: Int?) -> FetchDescriptor<PACSIndexedSeries> {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let sort = [
+            SortDescriptor(\PACSIndexedSeries.indexedAt, order: .reverse),
+            SortDescriptor(\PACSIndexedSeries.patientName),
+            SortDescriptor(\PACSIndexedSeries.studyDate, order: .reverse),
+        ]
+        var descriptor: FetchDescriptor<PACSIndexedSeries>
+        if query.isEmpty {
+            descriptor = FetchDescriptor(sortBy: sort)
+        } else {
+            descriptor = FetchDescriptor(
+                predicate: #Predicate { $0.searchableTextLower.contains(query) },
+                sortBy: sort
+            )
+        }
+        if let limit {
+            descriptor.fetchLimit = limit
+        }
+        return descriptor
+    }
+
+    private func deleteIndexedSeries(id: String) {
+        do {
+            var descriptor = FetchDescriptor<PACSIndexedSeries>(
+                predicate: #Predicate { $0.id == id }
+            )
+            descriptor.fetchLimit = 1
+            if let entry = try modelContext.fetch(descriptor).first {
+                modelContext.delete(entry)
+                try modelContext.save()
+                reloadIndexResults()
+            }
+        } catch {
+            vm.statusMessage = "Index delete error: \(error.localizedDescription)"
+        }
+    }
 }
 
 private struct PACSIndexedSeriesRow: View {
-    let entry: PACSIndexedSeries
+    let entry: PACSIndexedSeriesSnapshot
 
     var body: some View {
         HStack(spacing: 10) {

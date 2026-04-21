@@ -194,6 +194,7 @@ public struct ContentView: View {
                 .controlSize(.small)
             Text(vm.statusMessage)
                 .font(.system(size: 11))
+                .lineLimit(1)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)

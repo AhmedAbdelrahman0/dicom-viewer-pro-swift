@@ -33,6 +33,19 @@ public struct PACSIndexedSeriesSnapshot: Identifiable, Hashable, Sendable {
         let description = seriesDescription.isEmpty ? "Series" : seriesDescription
         return "\(Modality.normalize(modality).displayName) - \(description)"
     }
+
+    public var searchableText: String {
+        PACSIndexedSeries.makeSearchableText(
+            kind: kind,
+            modality: modality,
+            patientID: patientID,
+            patientName: patientName,
+            studyDescription: studyDescription,
+            studyDate: studyDate,
+            seriesDescription: seriesDescription,
+            sourcePath: sourcePath
+        )
+    }
 }
 
 @Model
@@ -51,6 +64,7 @@ public final class PACSIndexedSeries {
     public var filePathsBlob: String
     public var instanceCount: Int
     public var indexedAt: Date
+    public var searchableTextLower: String
 
     public init(id: String,
                 kind: PACSIndexedSeriesKind,
@@ -80,6 +94,35 @@ public final class PACSIndexedSeries {
         self.filePathsBlob = filePaths.joined(separator: "\n")
         self.instanceCount = instanceCount
         self.indexedAt = indexedAt
+        self.searchableTextLower = Self.makeSearchableText(
+            kind: kind,
+            modality: modality,
+            patientID: patientID,
+            patientName: patientName,
+            studyDescription: studyDescription,
+            studyDate: studyDate,
+            seriesDescription: seriesDescription,
+            sourcePath: sourcePath
+        )
+    }
+
+    public convenience init(snapshot: PACSIndexedSeriesSnapshot) {
+        self.init(
+            id: snapshot.id,
+            kind: snapshot.kind,
+            seriesUID: snapshot.seriesUID,
+            studyUID: snapshot.studyUID,
+            modality: snapshot.modality,
+            patientID: snapshot.patientID,
+            patientName: snapshot.patientName,
+            studyDescription: snapshot.studyDescription,
+            studyDate: snapshot.studyDate,
+            seriesDescription: snapshot.seriesDescription,
+            sourcePath: snapshot.sourcePath,
+            filePaths: snapshot.filePaths,
+            instanceCount: snapshot.instanceCount,
+            indexedAt: snapshot.indexedAt
+        )
     }
 
     public var kind: PACSIndexedSeriesKind {
@@ -98,17 +141,7 @@ public final class PACSIndexedSeries {
     }
 
     public var searchableText: String {
-        [
-            kind.displayName,
-            modality,
-            patientID,
-            patientName,
-            studyDescription,
-            studyDate,
-            seriesDescription,
-            sourcePath,
-        ]
-        .joined(separator: " ")
+        searchableTextLower
     }
 
     public var snapshot: PACSIndexedSeriesSnapshot {
@@ -144,16 +177,55 @@ public final class PACSIndexedSeries {
         filePathsBlob = other.filePathsBlob
         instanceCount = other.instanceCount
         indexedAt = other.indexedAt
+        searchableTextLower = other.searchableTextLower
+    }
+
+    public func update(from snapshot: PACSIndexedSeriesSnapshot) {
+        kindRawValue = snapshot.kind.rawValue
+        seriesUID = snapshot.seriesUID
+        studyUID = snapshot.studyUID
+        modality = snapshot.modality
+        patientID = snapshot.patientID
+        patientName = snapshot.patientName
+        studyDescription = snapshot.studyDescription
+        studyDate = snapshot.studyDate
+        seriesDescription = snapshot.seriesDescription
+        sourcePath = snapshot.sourcePath
+        filePathsBlob = snapshot.filePaths.joined(separator: "\n")
+        instanceCount = snapshot.instanceCount
+        indexedAt = snapshot.indexedAt
+        searchableTextLower = snapshot.searchableText
+    }
+
+    public static func makeSearchableText(kind: PACSIndexedSeriesKind,
+                                          modality: String,
+                                          patientID: String,
+                                          patientName: String,
+                                          studyDescription: String,
+                                          studyDate: String,
+                                          seriesDescription: String,
+                                          sourcePath: String) -> String {
+        [
+            kind.displayName,
+            modality,
+            patientID,
+            patientName,
+            studyDescription,
+            studyDate,
+            seriesDescription,
+            sourcePath,
+        ]
+        .joined(separator: " ")
+        .lowercased()
     }
 }
 
 public enum PACSIndexBuilder {
-    public static func record(for series: DICOMSeries,
-                              sourcePath: String,
-                              indexedAt: Date = Date()) -> PACSIndexedSeries {
-        let id = "dicom:\(series.uid)"
-        return PACSIndexedSeries(
-            id: id,
+    public static func snapshot(for series: DICOMSeries,
+                                sourcePath: String,
+                                indexedAt: Date = Date()) -> PACSIndexedSeriesSnapshot {
+        PACSIndexedSeriesSnapshot(
+            id: "dicom:\(series.uid)",
             kind: .dicom,
             seriesUID: series.uid,
             studyUID: series.studyUID,
@@ -170,8 +242,14 @@ public enum PACSIndexBuilder {
         )
     }
 
-    public static func recordForNIfTI(url: URL,
-                                      indexedAt: Date = Date()) -> PACSIndexedSeries {
+    public static func record(for series: DICOMSeries,
+                              sourcePath: String,
+                              indexedAt: Date = Date()) -> PACSIndexedSeries {
+        PACSIndexedSeries(snapshot: snapshot(for: series, sourcePath: sourcePath, indexedAt: indexedAt))
+    }
+
+    public static func snapshotForNIfTI(url: URL,
+                                        indexedAt: Date = Date()) -> PACSIndexedSeriesSnapshot {
         let modality = NIfTILoader.inferModality(
             filename: url.lastPathComponent,
             parentDir: url.deletingLastPathComponent().path,
@@ -179,7 +257,7 @@ public enum PACSIndexBuilder {
         )
         let sourcePath = NIfTILoader.canonicalSourcePath(for: url)
         let id = "nifti:\(sourcePath)"
-        return PACSIndexedSeries(
+        return PACSIndexedSeriesSnapshot(
             id: id,
             kind: .nifti,
             seriesUID: id,
@@ -195,6 +273,11 @@ public enum PACSIndexBuilder {
             instanceCount: 1,
             indexedAt: indexedAt
         )
+    }
+
+    public static func recordForNIfTI(url: URL,
+                                      indexedAt: Date = Date()) -> PACSIndexedSeries {
+        PACSIndexedSeries(snapshot: snapshotForNIfTI(url: url, indexedAt: indexedAt))
     }
 
     private static func stripVolumeExtension(_ name: String) -> String {

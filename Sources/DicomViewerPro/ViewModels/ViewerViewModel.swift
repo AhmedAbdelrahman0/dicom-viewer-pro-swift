@@ -120,6 +120,8 @@ public final class ViewerViewModel: ObservableObject {
     @Published public var statusMessage: String = "Ready. Open a DICOM or NIfTI file to begin."
     @Published public var isLoading: Bool = false
     @Published public var progress: Double = 0
+    @Published public var indexProgress: PACSIndexScanProgress?
+    @Published public var indexRevision: Int = 0
 
     // DICOM study browser
     @Published public var loadedSeries: [DICOMSeries] = []
@@ -228,27 +230,49 @@ public final class ViewerViewModel: ObservableObject {
 
     public func indexDirectory(url: URL, modelContext: ModelContext) async {
         isLoading = true
+        progress = 0
+        indexProgress = nil
         statusMessage = "Indexing \(url.lastPathComponent)..."
-        defer { isLoading = false }
+        defer {
+            isLoading = false
+            progress = 0
+            indexProgress = nil
+        }
+
+        let progressHandler: @Sendable (PACSIndexScanProgress) -> Void = { [weak self] update in
+            Task { @MainActor in
+                self?.indexProgress = update
+                self?.statusMessage = update.statusText
+            }
+        }
 
         let scanResult = await Task.detached(priority: .userInitiated) {
-            let dicomSeries = DICOMLoader.scanDirectory(url)
-            let niftiURLs = findNIfTIFiles(in: url)
-            return (dicomSeries, niftiURLs)
+            PACSDirectoryIndexer.scan(url: url, progress: progressHandler)
         }.value
 
-        let records = uniqueIndexRecords(scanResult.0.map {
-            PACSIndexBuilder.record(for: $0, sourcePath: url.path)
-        } + scanResult.1.map {
-            PACSIndexBuilder.recordForNIfTI(url: $0)
-        })
+        let records = uniqueIndexSnapshots(scanResult.records)
 
         do {
-            for record in records {
-                try upsertIndexedSeries(record, in: modelContext)
+            var inserted = 0
+            var updated = 0
+            var offset = 0
+            let batchSize = 250
+
+            while offset < records.count {
+                let end = min(records.count, offset + batchSize)
+                for snapshot in records[offset..<end] {
+                    switch try upsertIndexedSeries(snapshot, in: modelContext) {
+                    case .inserted: inserted += 1
+                    case .updated: updated += 1
+                    }
+                }
+                try modelContext.save()
+                offset = end
+                statusMessage = "Indexed \(offset)/\(records.count) series | inserted \(inserted), updated \(updated)"
+                await Task.yield()
             }
-            try modelContext.save()
-            statusMessage = "Indexed \(records.count) series in Mini-PACS"
+            indexRevision += 1
+            statusMessage = "Indexed \(records.count) series from \(scanResult.scannedFiles) files | inserted \(inserted), updated \(updated), skipped \(scanResult.skippedFiles)"
         } catch {
             statusMessage = "Index error: \(error.localizedDescription)"
         }
@@ -357,18 +381,25 @@ public final class ViewerViewModel: ObservableObject {
         }
     }
 
-    private func upsertIndexedSeries(_ record: PACSIndexedSeries,
-                                     in modelContext: ModelContext) throws {
-        let id = record.id
+    private enum IndexUpsertResult {
+        case inserted
+        case updated
+    }
+
+    private func upsertIndexedSeries(_ snapshot: PACSIndexedSeriesSnapshot,
+                                     in modelContext: ModelContext) throws -> IndexUpsertResult {
+        let id = snapshot.id
         var descriptor = FetchDescriptor<PACSIndexedSeries>(
             predicate: #Predicate { $0.id == id }
         )
         descriptor.fetchLimit = 1
 
         if let existing = try modelContext.fetch(descriptor).first {
-            existing.update(from: record)
+            existing.update(from: snapshot)
+            return .updated
         } else {
-            modelContext.insert(record)
+            modelContext.insert(PACSIndexedSeries(snapshot: snapshot))
+            return .inserted
         }
     }
 
@@ -448,9 +479,9 @@ public final class ViewerViewModel: ObservableObject {
         loadedSeries.first { $0.uid == series.uid }
     }
 
-    private func uniqueIndexRecords(_ records: [PACSIndexedSeries]) -> [PACSIndexedSeries] {
+    private func uniqueIndexSnapshots(_ records: [PACSIndexedSeriesSnapshot]) -> [PACSIndexedSeriesSnapshot] {
         var seen = Set<String>()
-        var unique: [PACSIndexedSeries] = []
+        var unique: [PACSIndexedSeriesSnapshot] = []
         for record in records where seen.insert(record.id).inserted {
             unique.append(record)
         }
