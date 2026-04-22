@@ -27,19 +27,28 @@ struct ControlsPanel: View {
 
             Divider()
 
-            ScrollView {
-                Group {
-                    switch tab {
-                    case .assistant:    AssistantPanel()
-                    case .wl:            WLTab()
-                    case .fusion:        FusionTab()
-                    case .labels:        LabelingPanel()
-                    case .registration:  RegistrationPanel()
-                    case .display:       DisplayTab()
-                    case .info:          InfoTab()
-                    }
+            // The Assistant tab manages its own layout (fixed composer at the
+            // bottom, scrollable transcript in the middle). Wrapping it in an
+            // outer ScrollView would push the text field below the fold on
+            // shorter windows, so we render it directly instead.
+            Group {
+                switch tab {
+                case .assistant:
+                    AssistantPanel()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                case .wl:
+                    ScrollView { WLTab().padding(16) }
+                case .fusion:
+                    ScrollView { FusionTab().padding(16) }
+                case .labels:
+                    ScrollView { LabelingPanel() }
+                case .registration:
+                    ScrollView { RegistrationPanel() }
+                case .display:
+                    ScrollView { DisplayTab().padding(16) }
+                case .info:
+                    ScrollView { InfoTab().padding(16) }
                 }
-                .padding(tab == .labels || tab == .registration || tab == .assistant ? 0 : 16)
             }
         }
         .navigationTitle("Controls")
