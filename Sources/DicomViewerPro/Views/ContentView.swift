@@ -8,10 +8,12 @@ import AppKit
 public struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     @StateObject private var vm = ViewerViewModel()
+    @StateObject private var monai = MONAILabelViewModel()
     @State private var showingFileImporter = false
     @State private var showingDirectoryPicker = false
     @State private var fileImporterMode: FileImporterMode = .volume
     @State private var directoryImporterMode: DirectoryImporterMode = .open
+    @State private var showMONAIPanel = false
 
     enum FileImporterMode { case volume, overlay }
     enum DirectoryImporterMode { case open, index }
@@ -59,6 +61,15 @@ public struct ContentView: View {
             }
         }
         .environmentObject(vm)
+        .sheet(isPresented: $showMONAIPanel) {
+            MONAILabelPanel(viewer: vm, monai: monai, labeling: vm.labeling)
+                .frame(minWidth: 420, minHeight: 560)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Close") { showMONAIPanel = false }
+                    }
+                }
+        }
         .fileImporter(
             isPresented: $showingFileImporter,
             allowedContentTypes: [.data, .item],
@@ -121,9 +132,19 @@ public struct ContentView: View {
                        + "1–99 percentile of the current volume.\n"
                        + "Shortcut: ⌘R"
             ) {
-                vm.autoWL()
+                vm.autoWLHistogram(preset: .balanced)
             }
             .keyboardShortcut("r", modifiers: [.command])
+
+            HoverIconButton(
+                systemImage: "brain.head.profile",
+                tooltip: "MONAI Label\n"
+                       + "Open the AI-assisted labeling panel.\n"
+                       + "Connect to a local MONAI Label server and run\n"
+                       + "pre-trained segmentation models on the current volume."
+            ) {
+                showMONAIPanel.toggle()
+            }
 
             Spacer()
 

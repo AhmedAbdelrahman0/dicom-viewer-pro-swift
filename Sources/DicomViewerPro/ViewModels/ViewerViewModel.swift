@@ -724,6 +724,21 @@ public final class ViewerViewModel: ObservableObject {
         level = l
     }
 
+    /// Histogram-driven W/L picker, inspired by ITK-SNAP's auto-contrast.
+    /// `preset` maps to a percentile clip range (see `HistogramAutoWindow.Preset`).
+    public func autoWLHistogram(preset: HistogramAutoWindow.Preset = .balanced) {
+        guard let v = currentVolume else { return }
+        let ignoreZeros = Modality.normalize(v.modality) == .PT
+        let result = HistogramAutoWindow.compute(v,
+                                                  preset: preset,
+                                                  ignoreZeros: ignoreZeros)
+        window = result.window
+        level = result.level
+        statusMessage = String(format: "Auto W/L: W=%.0f L=%.0f (%.0f–%.0f)",
+                               result.window, result.level,
+                               result.lowerValue, result.upperValue)
+    }
+
     public func suvValue(rawStoredValue: Double) -> Double {
         suvSettings.suv(forStoredValue: rawStoredValue)
     }

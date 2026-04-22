@@ -986,6 +986,188 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(resampled.origin.x, 2, accuracy: 1e-6)
         XCTAssertEqual(resampled.origin.y, 1, accuracy: 1e-6)
     }
+
+    // MARK: - MONAI transforms
+
+    func testMONAIScaleIntensityRangeClipsToTargetRange() {
+        let pixels: [Float] = [-100, 0, 50, 100, 250]
+        let scaled = MONAITransforms.scaleIntensityRange(
+            pixels, aMin: 0, aMax: 100, bMin: 0, bMax: 1, clip: true
+        )
+        XCTAssertEqual(scaled[0], 0, accuracy: 1e-6, "values below aMin clip to bMin")
+        XCTAssertEqual(scaled[1], 0, accuracy: 1e-6)
+        XCTAssertEqual(scaled[2], 0.5, accuracy: 1e-6)
+        XCTAssertEqual(scaled[3], 1.0, accuracy: 1e-6)
+        XCTAssertEqual(scaled[4], 1.0, accuracy: 1e-6, "values above aMax clip to bMax")
+    }
+
+    func testMONAINormalizeIntensityUsesZScore() {
+        let pixels: [Float] = [2, 4, 4, 4, 5, 5, 7, 9]
+        // mean = 5, population std = 2
+        let normalized = MONAITransforms.normalizeIntensity(pixels)
+        XCTAssertEqual(normalized[0], -1.5, accuracy: 1e-4)
+        XCTAssertEqual(normalized[2], -0.5, accuracy: 1e-4)
+        XCTAssertEqual(normalized[4], 0.0, accuracy: 1e-4)
+        XCTAssertEqual(normalized[7], 2.0, accuracy: 1e-4)
+    }
+
+    func testMONAICropForegroundProducesTightBoundsWithMargin() {
+        var pixels = [Float](repeating: 0, count: 4 * 4 * 4)
+        // A single bright voxel at (z=2, y=1, x=3).
+        pixels[2 * 16 + 1 * 4 + 3] = 10
+        let volume = ImageVolume(pixels: pixels, depth: 4, height: 4, width: 4)
+
+        guard let bounds = MONAITransforms.foregroundBounds(volume, threshold: 0, margin: 1) else {
+            return XCTFail("Expected non-nil bounds for a volume with one foreground voxel")
+        }
+        XCTAssertEqual(bounds.minX, 2)
+        XCTAssertEqual(bounds.maxX, 3, "x=3 + margin=1 is clipped at volume width-1")
+        XCTAssertEqual(bounds.minY, 0)
+        XCTAssertEqual(bounds.maxY, 2)
+        XCTAssertEqual(bounds.minZ, 1)
+        XCTAssertEqual(bounds.maxZ, 3)
+    }
+
+    func testMONAIResamplePreservesTotalExtentUnderIsotropicTarget() {
+        let volume = ImageVolume(
+            pixels: Array(0..<27).map(Float.init),
+            depth: 3, height: 3, width: 3,
+            spacing: (2, 2, 2)
+        )
+        let resampled = MONAITransforms.resample(volume, to: (1, 1, 1))
+        XCTAssertEqual(resampled.width, 6)
+        XCTAssertEqual(resampled.height, 6)
+        XCTAssertEqual(resampled.depth, 6)
+        XCTAssertEqual(resampled.spacing.x, 1, accuracy: 1e-9)
+    }
+
+    func testMONAISlidingPatchesCoverVolumeWithOverlap() {
+        let patches = MONAITransforms.slidingPatches(
+            volumeWidth: 64, volumeHeight: 64, volumeDepth: 32,
+            patchSize: (32, 32, 16),
+            overlap: 0.5
+        )
+        XCTAssertFalse(patches.isEmpty)
+        // Every patch must fit inside the volume.
+        for p in patches {
+            XCTAssertGreaterThanOrEqual(p.minX, 0)
+            XCTAssertLessThan(p.maxX, 64)
+            XCTAssertLessThan(p.maxY, 64)
+            XCTAssertLessThan(p.maxZ, 32)
+        }
+    }
+
+    // MARK: - Segmentation metrics
+
+    func testDiceAndIOUAgreeOnPerfectOverlap() {
+        let pred = LabelMap(parentSeriesUID: "p", depth: 1, height: 2, width: 2)
+        let gt   = LabelMap(parentSeriesUID: "g", depth: 1, height: 2, width: 2)
+        pred.voxels = [0, 1, 1, 0]
+        gt.voxels   = [0, 1, 1, 0]
+        XCTAssertEqual(SegmentationMetrics.dice(prediction: pred, groundTruth: gt, classID: 1) ?? 0,
+                       1.0, accuracy: 1e-9)
+        XCTAssertEqual(SegmentationMetrics.iou(prediction: pred, groundTruth: gt, classID: 1) ?? 0,
+                       1.0, accuracy: 1e-9)
+    }
+
+    func testDicePenalizesDisjointPredictions() {
+        let pred = LabelMap(parentSeriesUID: "p", depth: 1, height: 2, width: 2)
+        let gt   = LabelMap(parentSeriesUID: "g", depth: 1, height: 2, width: 2)
+        pred.voxels = [1, 0, 0, 0]
+        gt.voxels   = [0, 0, 0, 1]
+        XCTAssertEqual(SegmentationMetrics.dice(prediction: pred, groundTruth: gt, classID: 1) ?? 0,
+                       0.0, accuracy: 1e-9, "fully disjoint masks yield Dice = 0")
+    }
+
+    // MARK: - Histogram auto W/L
+
+    func testHistogramAutoWindowBracketsMostOfTheData() {
+        // Simple noisy volume: 90 % fills 0–100, 10 % outliers at 500.
+        var pixels = [Float]()
+        for i in 0..<900 { pixels.append(Float(i % 100)) }
+        for _ in 0..<100 { pixels.append(500) }
+        let volume = ImageVolume(pixels: pixels,
+                                 depth: 1, height: 1, width: pixels.count)
+        let result = HistogramAutoWindow.compute(volume, preset: .tight)
+        XCTAssertLessThan(result.upperValue, 500,
+                          "tight preset should exclude the 10 % outliers at 500")
+        XCTAssertGreaterThan(result.window, 0)
+    }
+
+    // MARK: - Level-set segmentation
+
+    func testLevelSetShrinksBubbleToDarkVoxels() {
+        // A small 5×5×5 volume with a bright 3×3×3 core in the middle.
+        let w = 5, h = 5, d = 5
+        var pixels = [Float](repeating: 0, count: w * h * d)
+        for z in 1...3 {
+            for y in 1...3 {
+                for x in 1...3 {
+                    pixels[z * h * w + y * w + x] = 1
+                }
+            }
+        }
+        let volume = ImageVolume(pixels: pixels, depth: d, height: h, width: w)
+        let label = LabelMap(parentSeriesUID: volume.seriesUID,
+                             depth: d, height: h, width: w)
+        let result = LevelSetSegmentation.evolve(
+            volume: volume,
+            label: label,
+            seeds: [LevelSetSegmentation.Seed(z: 2, y: 2, x: 2, radius: 2)],
+            speed: .regionCompetition(midpoint: 0.5, halfWidth: 0.2),
+            parameters: LevelSetSegmentation.Parameters(iterations: 30),
+            classID: 1
+        )
+        XCTAssertGreaterThan(result.insideVoxels, 0, "evolution should retain some inside voxels")
+        XCTAssertLessThanOrEqual(result.insideVoxels, w * h * d)
+    }
+
+    // MARK: - Marching cubes mesh export
+
+    func testMarchingCubesGeneratesTrianglesForBinaryCube() throws {
+        let label = LabelMap(parentSeriesUID: "cube", depth: 4, height: 4, width: 4)
+        // Fill a 2×2×2 cube of ones centered in a 4³ volume.
+        for z in 1...2 {
+            for y in 1...2 {
+                for x in 1...2 {
+                    label.voxels[z * 16 + y * 4 + x] = 1
+                }
+            }
+        }
+        let volume = ImageVolume(pixels: [Float](repeating: 0, count: 4 * 4 * 4),
+                                 depth: 4, height: 4, width: 4)
+        let outDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mc-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: outDir) }
+        try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+        let file = outDir.appendingPathComponent("cube.stl")
+
+        let mesh = try MarchingCubesMeshExporter.exportClass(
+            label: label, volume: volume, classID: 1, to: file
+        )
+        XCTAssertGreaterThan(mesh.triangleCount, 0,
+                             "a solid cube should produce a non-empty mesh")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
+    }
+
+    // MARK: - ITK-SNAP presets
+
+    func testITKSNAPPresetsExposeExpectedTaxonomies() {
+        let names = ITKSNAPPresets.all.map(\.name)
+        XCTAssertTrue(names.contains("Brain MRI (ITK-SNAP style)"))
+        XCTAssertTrue(names.contains("Cardiac Cine MRI"))
+        XCTAssertTrue(names.contains("Liver Couinaud Segments"))
+        XCTAssertEqual(ITKSNAPPresets.liverSegments.classes.count, 8,
+                       "Couinaud segments I–VIII")
+    }
+
+    func testLabelPresetsIncludeITKSNAPExtensions() {
+        let registered = LabelPresets.all.map(\.name)
+        XCTAssertTrue(registered.contains("Brain MRI (ITK-SNAP style)"))
+        XCTAssertTrue(registered.contains("TotalSegmentator"),
+                      "ITK-SNAP registration must not remove existing presets")
+    }
+
 }
 
 /// Simple thread-safe counter used by tests that interact with the indexer's

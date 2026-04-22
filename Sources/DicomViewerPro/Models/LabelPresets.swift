@@ -15,25 +15,29 @@ public enum LabelPresets {
 
     // MARK: - Preset library registry
 
-    public static let all: [LabelPresetSet] = [
-        totalSegmentator,
-        autoPET,
-        brats,
-        amos,
-        msdLiver,
-        msdLung,
-        msdPancreas,
-        msdProstate,
-        rtStructures,
-        petFocal,
-        oncologyClinical,
-        freesurferLobes,
-        head_neck_OARs,
-        thorax_OARs,
-        abdominal_OARs,
-        pelvic_OARs,
-        spineVertebrae,
-    ]
+    public static let all: [LabelPresetSet] = {
+        var presets: [LabelPresetSet] = [
+            totalSegmentator,
+            autoPET,
+            brats,
+            amos,
+            msdLiver,
+            msdLung,
+            msdPancreas,
+            msdProstate,
+            rtStructures,
+            petFocal,
+            oncologyClinical,
+            freesurferLobes,
+            head_neck_OARs,
+            thorax_OARs,
+            abdominal_OARs,
+            pelvic_OARs,
+            spineVertebrae,
+        ]
+        ITKSNAPPresets.register(into: &presets)
+        return presets
+    }()
 
     public static func byName(_ name: String) -> LabelPresetSet? {
         all.first { $0.name == name }
