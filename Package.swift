@@ -2,31 +2,31 @@
 import PackageDescription
 
 let package = Package(
-    name: "DicomViewerPro",
+    name: "Tracer",
     platforms: [
         .macOS(.v14),
         .iOS(.v17),
     ],
     products: [
-        .library(name: "DicomViewerPro", targets: ["DicomViewerPro"]),
-        .executable(name: "DicomViewerProApp", targets: ["DicomViewerProApp"]),
+        .library(name: "Tracer", targets: ["Tracer"]),
+        .executable(name: "TracerApp", targets: ["TracerApp"]),
     ],
     dependencies: [],
     targets: [
         .target(
-            name: "DicomViewerPro",
+            name: "Tracer",
             dependencies: [],
-            path: "Sources/DicomViewerPro"
+            path: "Sources/Tracer"
         ),
         .executableTarget(
-            name: "DicomViewerProApp",
-            dependencies: ["DicomViewerPro"],
-            path: "Sources/DicomViewerProApp"
+            name: "TracerApp",
+            dependencies: ["Tracer"],
+            path: "Sources/TracerApp"
         ),
         .testTarget(
-            name: "DicomViewerProTests",
-            dependencies: ["DicomViewerPro"],
-            path: "Tests/DicomViewerProTests"
+            name: "TracerTests",
+            dependencies: ["Tracer"],
+            path: "Tests/TracerTests"
         ),
     ]
 )

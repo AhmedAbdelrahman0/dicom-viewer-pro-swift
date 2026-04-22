@@ -43,7 +43,7 @@ struct StudyBrowserView: View {
     @State private var expandedStudyIDs: Set<String> = []
 
     private let indexPageSize = 5_000
-    private let statusDefaultsKey = "DicomViewerPro.WorklistStudyStatuses"
+    private let statusDefaultsKey = "Tracer.WorklistStudyStatuses"
 
     var body: some View {
         VStack(spacing: 0) {

@@ -62,7 +62,7 @@ struct ControlsPanel: View {
 extension Notification.Name {
     /// Posted when the user clicks the chatbot icon in the main toolbar —
     /// `ControlsPanel` listens and switches its segmented picker to `.assistant`.
-    public static let focusAssistantTab = Notification.Name("DicomViewerPro.focusAssistantTab")
+    public static let focusAssistantTab = Notification.Name("Tracer.focusAssistantTab")
 }
 
 // MARK: - W/L Tab

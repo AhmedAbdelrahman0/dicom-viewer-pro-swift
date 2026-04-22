@@ -247,7 +247,7 @@ public enum MarchingCubesMeshExporter {
                                   className: String) throws {
         switch format {
         case .stl:
-            try writeBinarySTL(mesh: mesh, to: url, header: "DicomViewerPro \(className)")
+            try writeBinarySTL(mesh: mesh, to: url, header: "Tracer \(className)")
         case .obj:
             try writeOBJ(mesh: mesh, to: url, objectName: className)
         }
@@ -281,7 +281,7 @@ public enum MarchingCubesMeshExporter {
 
     private static func writeOBJ(mesh: Mesh, to url: URL, objectName: String) throws {
         var out = ""
-        out += "# DicomViewerPro label-mesh export\n"
+        out += "# Tracer label-mesh export\n"
         out += "o \(sanitize(objectName))\n"
         for v in mesh.vertices {
             out += "v \(v.x) \(v.y) \(v.z)\n"

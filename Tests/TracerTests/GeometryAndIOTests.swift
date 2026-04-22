@@ -1,6 +1,6 @@
 import XCTest
 import simd
-@testable import DicomViewerPro
+@testable import Tracer
 #if canImport(MetalKit)
 import MetalKit
 #endif

@@ -207,7 +207,7 @@ public extension ViewerViewModel {
         guard currentVolume != nil else { return [] }
 
         let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("DicomViewerProAssistant", isDirectory: true)
+            .appendingPathComponent("TracerAssistant", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
 
         do {

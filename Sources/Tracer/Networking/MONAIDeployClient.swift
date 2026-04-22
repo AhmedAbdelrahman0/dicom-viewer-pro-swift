@@ -179,7 +179,7 @@ public final class MONAIDeployClient: @unchecked Sendable {
         if let token = configuration.authToken, !token.isEmpty {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
-        request.setValue("DicomViewerProSwift/1.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("Tracer/1.0", forHTTPHeaderField: "User-Agent")
         return request
     }
 

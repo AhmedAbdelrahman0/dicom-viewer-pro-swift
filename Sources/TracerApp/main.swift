@@ -1,4 +1,4 @@
 import SwiftUI
-import DicomViewerPro
+import Tracer
 
 DicomViewerApp.main()

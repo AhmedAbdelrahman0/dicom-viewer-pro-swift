@@ -10,7 +10,7 @@ import Foundation
 /// This is the public-domain algorithm that underpins ITK-SNAP's snake mode.
 /// This implementation is an independent Swift port of the math — it does
 /// **not** link to or copy any ITK-SNAP source (which is GPL-3.0). License
-/// here is the same as the rest of DicomViewerPro.
+/// here is the same as the rest of Tracer.
 ///
 /// ### Pipeline
 ///

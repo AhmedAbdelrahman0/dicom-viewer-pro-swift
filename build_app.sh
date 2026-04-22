@@ -9,10 +9,10 @@ set -e
 cd "$(dirname "$0")"
 
 # Configuration
-APP_NAME="DICOM Viewer Pro"
-BUNDLE_ID="com.dicomviewerpro.swift"
+APP_NAME="Tracer"
+BUNDLE_ID="com.tracer.workstation"
 VERSION="1.0.0"
-EXEC_NAME="DicomViewerProApp"
+EXEC_NAME="TracerApp"
 ICON_SRC="Resources/AppIcon.icns"  # self-contained icon inside the Swift project
 
 # 1. Build the release executable
