@@ -40,6 +40,22 @@ public struct DicomViewerApp: App {
                     }
                     .keyboardShortcut("N", modifiers: [.command])
                 }
+
+                // Replace the default "About App" menu item with our own —
+                // the standard panel can't carry a changelog or brand hero.
+                CommandGroup(replacing: .appInfo) {
+                    Button("About Tracer") {
+                        NotificationCenter.default.post(name: .showAboutWindow, object: nil)
+                    }
+                }
+
+                // Help menu shortcut to the onboarding walkthrough — handy
+                // for users who dismissed it once and want to revisit.
+                CommandGroup(after: .help) {
+                    Button("Show Welcome Walkthrough") {
+                        NotificationCenter.default.post(name: .showOnboarding, object: nil)
+                    }
+                }
             }
         #else
         return scene
@@ -50,4 +66,6 @@ public struct DicomViewerApp: App {
 extension Notification.Name {
     static let openDICOMDirectory = Notification.Name("openDICOMDirectory")
     static let openNIfTIFile = Notification.Name("openNIfTIFile")
+    static let showAboutWindow = Notification.Name("Tracer.showAboutWindow")
+    static let showOnboarding = Notification.Name("Tracer.showOnboarding")
 }

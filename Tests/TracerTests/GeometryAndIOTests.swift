@@ -1888,6 +1888,64 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertTrue(vm.statusMessage.contains("No NotARealPreset"))
     }
 
+    @MainActor
+    func testApplyPresetNamedNormalizesCaseAndWhitespace() {
+        let vm = ViewerViewModel()
+        let ct = ImageVolume(pixels: [0], depth: 1, height: 1, width: 1, modality: "CT")
+        _ = vm.addLoadedVolumeIfNeeded(ct)
+        vm.currentVolume = ct
+
+        // Lowercase → same match as "Lung".
+        vm.applyPresetNamed("lung")
+        XCTAssertEqual(vm.window, 1500, accuracy: 1)
+        XCTAssertEqual(vm.level, -600, accuracy: 1)
+
+        // Mixed-case + whitespace → still resolves.
+        vm.applyPresetNamed("   BoNe  ")
+        XCTAssertEqual(vm.window, 2500, accuracy: 1)
+        XCTAssertEqual(vm.level, 480, accuracy: 1)
+    }
+
+    @MainActor
+    func testApplyPresetNamedRejectsEmptyOrWhitespaceInput() {
+        let vm = ViewerViewModel()
+        let ct = ImageVolume(pixels: [0], depth: 1, height: 1, width: 1, modality: "CT")
+        _ = vm.addLoadedVolumeIfNeeded(ct)
+        vm.currentVolume = ct
+
+        // Set a known starting W/L so we can prove it didn't change.
+        vm.applyPresetNamed("Lung")
+        let wBefore = vm.window
+        let lBefore = vm.level
+
+        // Empty string and whitespace-only inputs must not silently match
+        // anything — the function should short-circuit and leave W/L alone.
+        for garbage in ["", "   ", "\n\t"] {
+            vm.applyPresetNamed(garbage)
+            XCTAssertEqual(vm.window, wBefore, accuracy: 1e-9,
+                           "Empty input should not change window: got status \(vm.statusMessage)")
+            XCTAssertEqual(vm.level, lBefore, accuracy: 1e-9)
+            XCTAssertTrue(vm.statusMessage.contains("empty"),
+                          "Status should cite empty input; got: \(vm.statusMessage)")
+        }
+    }
+
+    @MainActor
+    func testApplyPresetNamedFallsBackToUnionWhenModalityListDoesNotMatch() {
+        let vm = ViewerViewModel()
+        let ct = ImageVolume(pixels: [0], depth: 1, height: 1, width: 1, modality: "CT")
+        _ = vm.addLoadedVolumeIfNeeded(ct)
+        vm.currentVolume = ct
+
+        // "FLAIR" only exists in the MR preset list — with CT loaded the
+        // modality list has no match, so the union fallback should apply
+        // the MR FLAIR values and log a cross-modality message.
+        vm.applyPresetNamed("FLAIR")
+        XCTAssertEqual(vm.window, 1500, accuracy: 1,
+                       "Union fallback should apply MR FLAIR preset")
+        XCTAssertEqual(vm.level, 750, accuracy: 1)
+    }
+
 }
 
 /// Simple thread-safe counter used by tests that interact with the indexer's

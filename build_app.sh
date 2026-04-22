@@ -15,7 +15,15 @@ VERSION="1.0.0"
 EXEC_NAME="TracerApp"
 ICON_SRC="Resources/AppIcon.icns"  # self-contained icon inside the Swift project
 
-# 1. Build the release executable
+# 1. Regenerate the app icon if it's missing (`.icns` is binary; safe to
+#    keep checked in, but the programmatic generator means we never have
+#    to chase a missing icon). Skip if the generator isn't present.
+if [ ! -f "$ICON_SRC" ] && [ -f "scripts/generate_app_icon.swift" ]; then
+    echo "→ Icon missing — rendering fresh copy via scripts/generate_app_icon.swift…"
+    swift scripts/generate_app_icon.swift "$ICON_SRC"
+fi
+
+# 2. Build the release executable
 echo "→ Building release executable…"
 swift build -c release
 

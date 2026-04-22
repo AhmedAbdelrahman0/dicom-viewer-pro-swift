@@ -772,12 +772,23 @@ public final class ViewerViewModel: ObservableObject {
     /// falling back to the union of CT + MR + PT presets. Useful for global
     /// keyboard shortcuts that should "just work" regardless of the loaded
     /// modality. Returns a status message describing what happened.
+    ///
+    /// Normalizes the input so callers don't have to: whitespace is trimmed
+    /// and matches are case-insensitive (`"  lung  "` == `"Lung"`). An empty
+    /// or whitespace-only name is rejected with a clear status message
+    /// rather than silently matching the first preset.
     @discardableResult
     public func applyPresetNamed(_ name: String) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            statusMessage = "W/L preset name was empty."
+            return statusMessage
+        }
+
         let modality = currentVolume.map { Modality.normalize($0.modality) } ?? .CT
         let modalityPresets = WLPresets.presets(for: modality)
         if let match = modalityPresets.first(where: {
-            $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame
+            $0.name.localizedCaseInsensitiveCompare(trimmed) == .orderedSame
         }) {
             applyPreset(match)
             statusMessage = "Applied \(match.name) W/L (\(modality.displayName))"
@@ -785,13 +796,13 @@ public final class ViewerViewModel: ObservableObject {
         }
         let union = WLPresets.CT + WLPresets.MR + WLPresets.PT
         if let match = union.first(where: {
-            $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame
+            $0.name.localizedCaseInsensitiveCompare(trimmed) == .orderedSame
         }) {
             applyPreset(match)
             statusMessage = "Applied \(match.name) W/L"
             return statusMessage
         }
-        statusMessage = "No \(name) preset available for this modality."
+        statusMessage = "No \(trimmed) preset available for this modality."
         return statusMessage
     }
 

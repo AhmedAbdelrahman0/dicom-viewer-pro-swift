@@ -130,6 +130,37 @@ Then select the **TracerApp** scheme → pick *My Mac* or an iPad simulator → 
 
 ---
 
+## Migrating the on-disk folder
+
+The GitHub repo is now `tracer` but the local checkout still lives in a
+folder named `DicomViewerProSwift/` from when the project was first cloned.
+Nothing in the code depends on that folder name — rename it whenever you
+like:
+
+```bash
+# Ensure no Claude Code / Xcode / swift build is holding the path open, then:
+mv ~/Desktop/AI/Medical\ AI/DicomViewerProSwift ~/Desktop/AI/Medical\ AI/Tracer
+
+# If you've cloned fresh, skip the rename and just clone under the new name:
+git clone https://github.com/AhmedAbdelrahman0/tracer.git
+```
+
+Old GitHub URLs (`github.com/AhmedAbdelrahman0/dicom-viewer-pro-swift`) keep
+redirecting for at least a year, so existing clones and PR links won't break.
+
+## App icon regeneration
+
+The shipped `Resources/AppIcon.icns` is rendered programmatically from
+`scripts/generate_app_icon.swift`. Regenerate any time the brand changes:
+
+```bash
+swift scripts/generate_app_icon.swift           # writes Resources/AppIcon.icns
+swift scripts/generate_app_icon.swift path.icns # write to a custom path
+```
+
+`build_app.sh` auto-invokes the generator when the icon is missing, so the
+`.app` bundle always ends up with one even on a clean checkout.
+
 ## License & attribution
 
 Research/educational use.

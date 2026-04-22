@@ -21,6 +21,12 @@ public struct ContentView: View {
     @State private var showMONAIPanel = false
     @State private var showNNUnetPanel = false
     @State private var showPETEnginePanel = false
+    @State private var showAboutWindow = false
+    @State private var showOnboarding = false
+    /// First-launch onboarding gate — once dismissed the welcome card
+    /// sheet stays closed across relaunches. Users can re-open it from
+    /// Help → Show Welcome Walkthrough.
+    @AppStorage("Tracer.HasSeenOnboarding") private var hasSeenOnboarding: Bool = false
     /// Focus mode — hides the study browser and controls panel so the MPR
     /// viewport fills the window. Toggled via ⌘E or the toolbar button.
     /// Persists across launches via `@AppStorage`.
@@ -146,9 +152,31 @@ public struct ContentView: View {
             fileImporterMode = .volume
             showingFileImporter = true
         }
+        .onReceive(NotificationCenter.default.publisher(for: .showAboutWindow)) { _ in
+            showAboutWindow = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .showOnboarding)) { _ in
+            showOnboarding = true
+        }
+        #if os(macOS)
+        .sheet(isPresented: $showAboutWindow) {
+            TracerAboutView()
+        }
+        .sheet(isPresented: $showOnboarding) {
+            TracerOnboardingView(isPresented: $showOnboarding) {
+                hasSeenOnboarding = true
+            }
+        }
+        #endif
         .onAppear {
             // Honour the persisted focus preference on launch.
             browserVisibility = focusModeEnabled ? .detailOnly : .all
+            // Show the onboarding card set once per install, before the
+            // user loads any data.
+            if !hasSeenOnboarding {
+                // Defer by a runloop so the view hierarchy finishes mounting.
+                DispatchQueue.main.async { showOnboarding = true }
+            }
         }
         .tooltipHost()  // must wrap the whole window so tooltips escape any clipping
     }
