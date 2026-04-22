@@ -1237,6 +1237,85 @@ final class GeometryAndIOTests: XCTestCase {
                       "ITK-SNAP registration must not remove existing presets")
     }
 
+    // MARK: - nnU-Net integration
+
+    func testNNUnetCatalogListsExpectedDatasets() {
+        let datasets = NNUnetCatalog.all.map(\.datasetID)
+        XCTAssertTrue(datasets.contains("Dataset003_Liver"))
+        XCTAssertTrue(datasets.contains("Dataset220_KiTS2023"))
+        XCTAssertTrue(datasets.contains("Dataset218_Amos2022_task1"))
+        XCTAssertTrue(datasets.contains("Dataset137_BraTS2021"))
+        XCTAssertNotNil(NNUnetCatalog.byID("MSD-Liver"))
+        XCTAssertNotNil(NNUnetCatalog.byID("Dataset003_Liver"),
+                        "byID should also resolve the underlying dataset id")
+    }
+
+    func testNNUnetCatalogCTEntriesDeclareClipAndZScorePreprocessing() {
+        for entry in NNUnetCatalog.all where entry.modality == .CT {
+            switch entry.preprocessing {
+            case .ctClipAndZScore:
+                break // expected
+            default:
+                XCTFail("CT dataset \(entry.datasetID) must declare ctClipAndZScore preprocessing, got \(entry.preprocessing)")
+            }
+        }
+    }
+
+    func testNNUnetCoreMLSpecInheritsCatalogPatchAndPreprocessing() {
+        let entry = NNUnetCatalog.msdLiver
+        let url = URL(fileURLWithPath: "/tmp/fake.mlpackage")
+        let spec = NNUnetCoreMLRunner.ModelSpec.fromCatalog(entry, modelURL: url)
+
+        XCTAssertEqual(spec.patchSize.d, entry.coreML.patchSize.d)
+        XCTAssertEqual(spec.patchSize.h, entry.coreML.patchSize.h)
+        XCTAssertEqual(spec.patchSize.w, entry.coreML.patchSize.w)
+        XCTAssertEqual(spec.numClasses, entry.coreML.numClasses)
+        XCTAssertEqual(spec.inputName, entry.coreML.inputName)
+        XCTAssertEqual(spec.outputName, entry.coreML.outputName)
+        XCTAssertEqual(spec.preprocessing, entry.preprocessing)
+    }
+
+    func testNNUnetCTPreprocessingClipsAndNormalizes() {
+        // Values at -2000, -17, 99.4, 201, 800 should behave as follows
+        // for MSD-Liver preprocessing: clip to [-17, 201], then (v - 99.4) / 39.4.
+        let raw: [Float] = [-2000, -17, 99.4, 201, 800]
+        let out = NNUnetCoreMLRunner.applyPreprocessing(
+            pixels: raw,
+            suvScaleFactor: nil,
+            preprocessing: .ctClipAndZScore(lower: -17, upper: 201, mean: 99.4, std: 39.4)
+        )
+        XCTAssertEqual(out[0], (-17 - 99.4) / 39.4, accuracy: 1e-4,
+                       "below-lower value should clip to lower before z-score")
+        XCTAssertEqual(out[1], (-17 - 99.4) / 39.4, accuracy: 1e-4)
+        XCTAssertEqual(out[2], 0.0, accuracy: 1e-4)
+        XCTAssertEqual(out[3], (201 - 99.4) / 39.4, accuracy: 1e-4)
+        XCTAssertEqual(out[4], (201 - 99.4) / 39.4, accuracy: 1e-4,
+                       "above-upper value should clip to upper before z-score")
+    }
+
+    func testNNUnetZScoreNonzeroSkipsZeroVoxels() {
+        let pixels: [Float] = [0, 0, 2, 4, 6]
+        let out = NNUnetCoreMLRunner.applyPreprocessing(
+            pixels: pixels,
+            suvScaleFactor: nil,
+            preprocessing: .zScoreNonzero
+        )
+        // Zero voxels stay zero.
+        XCTAssertEqual(out[0], 0)
+        XCTAssertEqual(out[1], 0)
+        // Non-zero voxels recentered around their own mean (4).
+        let mean = out[2] + out[3] + out[4]
+        XCTAssertEqual(mean, 0, accuracy: 1e-4)
+    }
+
+    func testNNUnetRunnerReportsAvailabilityFromPATH() {
+        // We don't assume nnUNetv2_predict is installed in CI — just prove
+        // the detector runs without crashing and returns a reasonable value.
+        let located = NNUnetRunner.locatePredictBinary(override: "/bin/does-not-exist")
+        XCTAssertNil(located,
+                     "Explicit bad path override must not be resolved as valid")
+    }
+
 }
 
 /// Simple thread-safe counter used by tests that interact with the indexer's

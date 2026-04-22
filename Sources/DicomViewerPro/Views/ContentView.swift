@@ -9,11 +9,13 @@ public struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     @StateObject private var vm = ViewerViewModel()
     @StateObject private var monai = MONAILabelViewModel()
+    @StateObject private var nnunet = NNUnetViewModel()
     @State private var showingFileImporter = false
     @State private var showingDirectoryPicker = false
     @State private var fileImporterMode: FileImporterMode = .volume
     @State private var directoryImporterMode: DirectoryImporterMode = .open
     @State private var showMONAIPanel = false
+    @State private var showNNUnetPanel = false
 
     enum FileImporterMode { case volume, overlay }
     enum DirectoryImporterMode { case open, index }
@@ -68,6 +70,15 @@ public struct ContentView: View {
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
                         Button("Close") { showMONAIPanel = false }
+                    }
+                }
+        }
+        .sheet(isPresented: $showNNUnetPanel) {
+            NNUnetPanel(viewer: vm, nnunet: nnunet, labeling: vm.labeling)
+                .frame(minWidth: 460, minHeight: 640)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Close") { showNNUnetPanel = false }
                     }
                 }
         }
@@ -156,6 +167,17 @@ public struct ContentView: View {
                        + "pre-trained segmentation models on the current volume."
             ) {
                 showMONAIPanel.toggle()
+            }
+
+            HoverIconButton(
+                systemImage: "square.stack.3d.up.fill",
+                tooltip: "nnU-Net\n"
+                       + "Run nnU-Net v2 segmentation on the current volume.\n"
+                       + "Uses your local Python install (nnUNetv2_predict)\n"
+                       + "or a pre-converted CoreML .mlpackage.\n"
+                       + "Models: MSD tasks, KiTS23, AMOS22, BraTS, TotalSegmentator."
+            ) {
+                showNNUnetPanel.toggle()
             }
 
             Spacer()
