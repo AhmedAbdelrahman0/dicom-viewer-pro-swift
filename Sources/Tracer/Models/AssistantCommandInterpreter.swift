@@ -25,6 +25,36 @@ public enum AssistantAction: Equatable {
     case setSUVPatientHeight(Double)
     case setSUVInjectedDose(Double)
     case setSUVResidualDose(Double)
+    /// Run the per-lesion classifier on every connected component of the
+    /// active label map. Honours the current `ClassificationViewModel`
+    /// selection (classifier entry + paths).
+    case classifyAllLesions
+    /// Write the current classification report to `~/Downloads/…` as CSV
+    /// or JSON. No-op if no classification has run yet.
+    case exportClassificationReport(ClassificationExportFormat)
+    /// Open the Cohort Batch inspector. Shortcut for "let me set up a
+    /// 2000-study run without touching the menu."
+    case openCohortPanel
+
+    public enum ClassificationExportFormat: String, Equatable, Sendable {
+        case csv
+        case json
+    }
+}
+
+public extension Notification.Name {
+    /// Fired by `ViewerAssistant` when the chat interpreter matches a
+    /// "classify lesions" intent. `ContentView` observes this and calls
+    /// `ClassificationViewModel.classifyAll(...)` on the active label map.
+    /// Decoupling via NotificationCenter keeps the `ViewerViewModel`
+    /// extension free of a direct dependency on the classification VM.
+    static let assistantDidRequestClassification = Notification.Name("Tracer.assistantDidRequestClassification")
+    /// Fired when the chat says "export report as CSV/JSON". `userInfo`
+    /// carries `"format"` with value `"csv"` or `"json"`.
+    static let assistantDidRequestClassificationExport = Notification.Name("Tracer.assistantDidRequestClassificationExport")
+    /// Fired by the chat when the user asks for the cohort panel or a
+    /// cohort run.
+    static let assistantDidRequestCohortPanel = Notification.Name("Tracer.assistantDidRequestCohortPanel")
 }
 
 public struct AssistantCommandInterpreter {
@@ -64,8 +94,76 @@ public struct AssistantCommandInterpreter {
         actions.append(contentsOf: sliceActions(in: text))
         actions.append(contentsOf: suvActions(in: text))
         actions.append(contentsOf: segmentationActions(in: text))
+        actions.append(contentsOf: classificationActions(in: text))
+        actions.append(contentsOf: cohortActions(in: text))
 
         return actions.removingAdjacentDuplicates()
+    }
+
+    /// Matches "classify (all) lesions", "run classifier", "classify
+    /// findings" — anything that clearly names the classification phase.
+    /// Also picks up "export report as csv / json".
+    private func classificationActions(in text: String) -> [AssistantAction] {
+        var actions: [AssistantAction] = []
+        let triggerPhrases = [
+            "classify lesions",
+            "classify all lesions",
+            "classify the lesions",
+            "run classifier",
+            "run classification",
+            "classify findings",
+            "classify the findings",
+            "classify every lesion"
+        ]
+        if text.containsAny(triggerPhrases) {
+            actions.append(.classifyAllLesions)
+        }
+        // "classify this lesion" or bare "classify" without "select / pick"
+        // nearby — users saying just "classify" after they've segmented.
+        if text.contains("classify"),
+           !text.containsAny(["window", "select", "pick", "dont", "don't"]),
+           !actions.contains(.classifyAllLesions) {
+            actions.append(.classifyAllLesions)
+        }
+
+        if text.containsAny(["export", "save report", "save results", "save findings",
+                             "download report", "download results"]) {
+            if text.contains("csv") {
+                actions.append(.exportClassificationReport(.csv))
+            } else if text.contains("json") {
+                actions.append(.exportClassificationReport(.json))
+            } else if text.containsAny(["report", "findings", "results"]) {
+                // No format specified — default to CSV because most users
+                // who say "export the report" want a spreadsheet.
+                actions.append(.exportClassificationReport(.csv))
+            }
+        }
+        return actions
+    }
+
+    /// Cohort-batch intents. Kept deliberately permissive because the
+    /// user's language for "do this on all 2000 studies" is highly varied.
+    private func cohortActions(in text: String) -> [AssistantAction] {
+        var actions: [AssistantAction] = []
+        let cohortTriggers = [
+            "cohort",
+            "batch run",
+            "batch process",
+            "all studies",
+            "every study",
+            "every scan",
+            "run on all",
+            "process the cohort",
+            "run the batch",
+            "open cohort",
+            "cohort panel",
+            "batch segmentation",
+            "batch classification"
+        ]
+        if text.containsAny(cohortTriggers) {
+            actions.append(.openCohortPanel)
+        }
+        return actions
     }
 
     private func windowPresetName(in text: String) -> String? {

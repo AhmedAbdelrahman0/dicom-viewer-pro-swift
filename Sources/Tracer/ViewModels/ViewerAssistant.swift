@@ -165,6 +165,37 @@ public extension ViewerViewModel {
             case .setSUVResidualDose(let dose):
                 suvSettings.residualDoseMBq = dose
                 applied.append("Residual dose set to \(String(format: "%.1f", dose)) MBq.")
+
+            case .classifyAllLesions:
+                if labeling.activeLabelMap == nil {
+                    warnings.append("Segment lesions first, then I can classify them.")
+                } else {
+                    // ContentView owns the ClassificationViewModel —
+                    // notification keeps this file free of a direct
+                    // cross-VM dependency. The observer calls
+                    // `classification.classifyAll(...)` with the current
+                    // volume + active label map.
+                    NotificationCenter.default.post(
+                        name: .assistantDidRequestClassification,
+                        object: nil
+                    )
+                    applied.append("Kicked off classification across every lesion in the active label map.")
+                }
+
+            case .exportClassificationReport(let format):
+                NotificationCenter.default.post(
+                    name: .assistantDidRequestClassificationExport,
+                    object: nil,
+                    userInfo: ["format": format.rawValue]
+                )
+                applied.append("Exporting classification report as \(format.rawValue.uppercased()).")
+
+            case .openCohortPanel:
+                NotificationCenter.default.post(
+                    name: .assistantDidRequestCohortPanel,
+                    object: nil
+                )
+                applied.append("Opened the Cohort Batch panel. Configure a run and click Run cohort.")
             }
         }
 

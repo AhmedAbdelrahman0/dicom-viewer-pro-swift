@@ -16,6 +16,7 @@ public struct ContentView: View {
     @StateObject private var pet = PETEngineViewModel()
     @StateObject private var classification = ClassificationViewModel()
     @StateObject private var modelManager = ModelManagerViewModel()
+    @StateObject private var cohort = CohortResultsStore()
     @State private var showingFileImporter = false
     @State private var showingDirectoryPicker = false
     @State private var fileImporterMode: FileImporterMode = .volume
@@ -25,6 +26,8 @@ public struct ContentView: View {
     @State private var showPETEnginePanel = false
     @State private var showClassificationPanel = false
     @State private var showModelManagerPanel = false
+    @State private var showCohortPanel = false
+    @State private var cohortStudies: [PACSWorklistStudy] = []
     @State private var showAboutWindow = false
     @State private var showOnboarding = false
     /// First-launch onboarding gate — once dismissed the welcome card
@@ -125,6 +128,16 @@ public struct ContentView: View {
                     closeInspectorButton { showModelManagerPanel = false }
                 }
         }
+        .engineInspector(
+            isCompact: useCompactEnginePresentation,
+            isPresented: $showCohortPanel,
+            inspectorWidth: (min: 600, ideal: 680, max: 820)
+        ) {
+            CohortPanel(store: cohort, availableStudies: cohortStudies)
+                .overlay(alignment: .topTrailing) {
+                    closeInspectorButton { showCohortPanel = false }
+                }
+        }
         .fileImporter(
             isPresented: $showingFileImporter,
             allowedContentTypes: [.data, .item],
@@ -155,6 +168,17 @@ public struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .recentVolumesDidChange)) { _ in
             vm.reloadRecentVolumes()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .assistantDidRequestClassification)) { _ in
+            handleAssistantClassificationRequest()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .assistantDidRequestClassificationExport)) { note in
+            let formatRaw = (note.userInfo?["format"] as? String) ?? "csv"
+            handleAssistantClassificationExport(format: formatRaw)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .assistantDidRequestCohortPanel)) { _ in
+            refreshCohortStudies()
+            showInspector(.cohort)
         }
         .onChange(of: focusModeEnabled) { _, enabled in
             if !enabled {
@@ -372,13 +396,22 @@ public struct ContentView: View {
                           systemImage: "externaldrive.fill.badge.icloud")
                 }
                 .keyboardShortcut("w", modifiers: [.command, .shift])
+
+                Button {
+                    refreshCohortStudies()
+                    showInspector(.cohort)
+                } label: {
+                    Label("Cohort Batch — run segmentation/classification on every study",
+                          systemImage: "square.3.layers.3d.down.right")
+                }
+                .keyboardShortcut("b", modifiers: [.command, .shift])
             } label: {
                 Label("AI Engines", systemImage: "cpu")
                     .font(.system(size: 12, weight: .medium))
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
-            .help("AI Engines\n• MONAI Label (⌘⇧M)\n• nnU-Net (⌘⇧N)\n• PET Engine (⌘⇧P)\n• Classify (⌘⇧C)\n• Model Manager (⌘⇧W)\nPanels open as side inspectors — ⌘. to close.")
+            .help("AI Engines\n• MONAI Label (⌘⇧M)\n• nnU-Net (⌘⇧N)\n• PET Engine (⌘⇧P)\n• Classify (⌘⇧C)\n• Model Manager (⌘⇧W)\n• Cohort Batch (⌘⇧B)\nPanels open as side inspectors — ⌘. to close.")
 
             Spacer()
 
@@ -509,6 +542,7 @@ public struct ContentView: View {
         showPETEnginePanel = false
         showClassificationPanel = false
         showModelManagerPanel = false
+        showCohortPanel = false
         // Open the requested one next tick so the close animations settle.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
             switch which {
@@ -517,11 +551,81 @@ public struct ContentView: View {
             case .pet: showPETEnginePanel = true
             case .classification: showClassificationPanel = true
             case .modelManager: showModelManagerPanel = true
+            case .cohort: showCohortPanel = true
             }
         }
     }
 
-    private enum EngineInspector { case monai, nnunet, pet, classification, modelManager }
+    private enum EngineInspector { case monai, nnunet, pet, classification, modelManager, cohort }
+
+    /// Pull the full worklist (every indexed study in the SwiftData store)
+    /// into the cohort panel. Called when the user opens the panel so the
+    /// cohort always sees the latest worklist without needing an
+    /// `@Environment(\.modelContext)` round-trip.
+    private func refreshCohortStudies() {
+        let descriptor = FetchDescriptor<PACSIndexedSeries>()
+        do {
+            let seriesSnapshots = try modelContext.fetch(descriptor).map(\.snapshot)
+            cohortStudies = PACSWorklistStudy.grouped(from: seriesSnapshots)
+        } catch {
+            vm.statusMessage = "Cohort: worklist fetch failed — \(error.localizedDescription)"
+            cohortStudies = []
+        }
+    }
+
+    /// Chatbot → classifier. Called when the assistant parses
+    /// "classify lesions". Reads the currently-active label map + volume
+    /// and hands them to `ClassificationViewModel.classifyAll`.
+    /// ClassificationPanel stays closed — the user can open it to see
+    /// results, or ask the chat to export directly.
+    private func handleAssistantClassificationRequest() {
+        guard let volume = vm.currentVolume else {
+            vm.statusMessage = "Classify: load a volume first."
+            return
+        }
+        guard let map = vm.labeling.activeLabelMap else {
+            vm.statusMessage = "Classify: segment lesions first."
+            return
+        }
+        let classID = vm.labeling.activeClassID
+        Task {
+            _ = await classification.classifyAll(
+                volume: volume,
+                labelMap: map,
+                classID: classID
+            )
+        }
+    }
+
+    private func handleAssistantClassificationExport(format: String) {
+        guard !classification.lastResults.isEmpty else {
+            vm.statusMessage = "Nothing to export — classify first."
+            return
+        }
+        #if canImport(AppKit)
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = format == "json"
+            ? "classification.json"
+            : "classification.csv"
+        panel.canCreateDirectories = true
+        if panel.runModal() == .OK, let url = panel.url {
+            do {
+                let data: Data
+                if format == "json" {
+                    data = try ClassificationReport.jsonData(for: classification.lastResults)
+                } else {
+                    data = ClassificationReport.csvData(for: classification.lastResults)
+                }
+                try data.write(to: url, options: .atomic)
+                vm.statusMessage = "Exported → \(url.lastPathComponent)"
+            } catch {
+                vm.statusMessage = "Export failed: \(error.localizedDescription)"
+            }
+        }
+        #else
+        vm.statusMessage = "Chat-driven export is macOS-only for now."
+        #endif
+    }
 
     private func handleFileImport(result: Result<[URL], Error>) {
         guard case .success(let urls) = result, let url = urls.first else { return }

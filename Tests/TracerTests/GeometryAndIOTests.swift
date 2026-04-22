@@ -2583,6 +2583,199 @@ final class GeometryAndIOTests: XCTestCase {
         )
     }
 
+    // MARK: - Cohort tests
+
+    func testCohortJobGeneratesDeterministicCheckpointPath() {
+        let root = URL(fileURLWithPath: "/tmp/cohort-test")
+        let job = CohortJob(id: "abc123", name: "run1", outputRoot: root)
+        XCTAssertEqual(job.checkpointURL.path, "/tmp/cohort-test/cohort-abc123.json")
+        let studyDir = job.outputDirectory(for: "1.2.3.4.5")
+        XCTAssertEqual(studyDir.path, "/tmp/cohort-test/1.2.3.4.5")
+    }
+
+    func testCohortJobSanitizesStudyIDsWithForwardSlashes() {
+        let root = URL(fileURLWithPath: "/tmp")
+        let job = CohortJob(id: "j", outputRoot: root)
+        // A synthetic id with a `/` (unusual but legal Swift string) should
+        // become `_` so the filesystem doesn't try to create sub-dirs.
+        let studyDir = job.outputDirectory(for: "case/with/slashes")
+        XCTAssertFalse(studyDir.path.contains("case/with/slashes"))
+        XCTAssertTrue(studyDir.path.hasSuffix("case_with_slashes"))
+    }
+
+    func testCohortCheckpointRoundTripsThroughJSON() throws {
+        let root = URL(fileURLWithPath: "/tmp/cohort-test-\(UUID().uuidString)")
+        let job = CohortJob(id: "run1", name: "cohort", outputRoot: root,
+                            nnunetEntryID: "dataset-221-autopet",
+                            segmentationMode: .dgxRemote,
+                            maxConcurrent: 4)
+        var checkpoint = CohortCheckpoint(job: job)
+
+        var row = CohortStudyResult(id: "study-1", patientName: "John Doe",
+                                    studyDate: "20260422",
+                                    status: .done)
+        row.lesionCount = 3
+        row.totalMetabolicTumorVolumeML = 12.7
+        row.maxSUV = 8.3
+        row.startedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        row.finishedAt = Date(timeIntervalSince1970: 1_700_000_100)
+        checkpoint.results["study-1"] = row
+
+        let cpURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cp-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: cpURL) }
+
+        try checkpoint.save(to: cpURL)
+        let reloaded = try CohortCheckpoint.load(from: cpURL)
+
+        XCTAssertEqual(reloaded.job.id, "run1")
+        XCTAssertEqual(reloaded.job.segmentationMode, .dgxRemote)
+        XCTAssertEqual(reloaded.results.count, 1)
+        XCTAssertEqual(reloaded.results["study-1"]?.patientName, "John Doe")
+        XCTAssertEqual(reloaded.results["study-1"]?.lesionCount, 3)
+        XCTAssertEqual(reloaded.results["study-1"]?.status, .done)
+    }
+
+    func testCohortCheckpointAggregateCountsAndMeanDuration() {
+        let job = CohortJob(outputRoot: URL(fileURLWithPath: "/tmp"))
+        var cp = CohortCheckpoint(job: job)
+
+        var done1 = CohortStudyResult(id: "a", status: .done)
+        done1.startedAt = Date(timeIntervalSince1970: 0)
+        done1.finishedAt = Date(timeIntervalSince1970: 60)
+        var done2 = CohortStudyResult(id: "b", status: .done)
+        done2.startedAt = Date(timeIntervalSince1970: 0)
+        done2.finishedAt = Date(timeIntervalSince1970: 120)
+        let failed = CohortStudyResult(id: "c", status: .failedSegmentation)
+        let pending = CohortStudyResult(id: "d", status: .pending)
+        let skipped = CohortStudyResult(id: "e", status: .skipped)
+
+        cp.results = ["a": done1, "b": done2, "c": failed, "d": pending, "e": skipped]
+
+        XCTAssertEqual(cp.doneCount, 2)
+        XCTAssertEqual(cp.failedCount, 1)
+        XCTAssertEqual(cp.pendingCount, 1)
+        XCTAssertEqual(cp.skippedCount, 1)
+        XCTAssertEqual(cp.meanStudyDuration ?? 0, 90, accuracy: 0.001,
+                       "Mean of 60s + 120s should be 90s")
+    }
+
+    func testCohortCheckpointClassificationHistogramCollapsesByLabel() {
+        let job = CohortJob(outputRoot: URL(fileURLWithPath: "/tmp"))
+        var cp = CohortCheckpoint(job: job)
+        for (i, label) in ["malignant", "malignant", "benign", "malignant", "benign"].enumerated() {
+            var row = CohortStudyResult(id: "s\(i)", status: .done)
+            row.topClassification = label
+            cp.results["s\(i)"] = row
+        }
+        let histogram = cp.classificationHistogram
+        XCTAssertEqual(histogram.count, 2)
+        XCTAssertEqual(histogram.first?.label, "malignant")
+        XCTAssertEqual(histogram.first?.count, 3)
+    }
+
+    func testCohortStudyResultStatusTerminalityMatchesExpectations() {
+        XCTAssertTrue(CohortStudyResult.Status.done.isTerminal)
+        XCTAssertTrue(CohortStudyResult.Status.failedLoad.isTerminal)
+        XCTAssertTrue(CohortStudyResult.Status.failedSegmentation.isTerminal)
+        XCTAssertTrue(CohortStudyResult.Status.failedClassification.isTerminal)
+        XCTAssertTrue(CohortStudyResult.Status.skipped.isTerminal)
+        XCTAssertFalse(CohortStudyResult.Status.pending.isTerminal)
+        XCTAssertFalse(CohortStudyResult.Status.running.isTerminal)
+
+        XCTAssertFalse(CohortStudyResult.Status.done.isFailure)
+        XCTAssertTrue(CohortStudyResult.Status.failedSegmentation.isFailure)
+        XCTAssertFalse(CohortStudyResult.Status.skipped.isFailure)
+    }
+
+    @MainActor
+    func testCohortResultsStoreExportsCSVWithEscapedFields() throws {
+        let store = CohortResultsStore()
+        let job = CohortJob(id: "t", outputRoot: URL(fileURLWithPath: "/tmp"))
+        var cp = CohortCheckpoint(job: job)
+
+        var row = CohortStudyResult(id: "s1",
+                                    patientID: "PID,001",
+                                    patientName: "Doe \"John\"",
+                                    studyDescription: "FDG PET/CT",
+                                    studyDate: "20260422",
+                                    modalities: ["CT", "PT"],
+                                    status: .done)
+        row.lesionCount = 4
+        row.totalMetabolicTumorVolumeML = 12.345
+        row.topClassification = "malignant"
+        row.topClassificationConfidence = 0.876
+        cp.results["s1"] = row
+
+        // Seed the store's checkpoint via its load() path.
+        let tmpCheckpointURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cp-\(UUID().uuidString).json")
+        try cp.save(to: tmpCheckpointURL)
+        store.load(checkpointURL: tmpCheckpointURL)
+        defer { try? FileManager.default.removeItem(at: tmpCheckpointURL) }
+
+        let csvURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cohort-\(UUID().uuidString).csv")
+        defer { try? FileManager.default.removeItem(at: csvURL) }
+        try store.exportCohortCSV(to: csvURL)
+
+        let csv = try String(contentsOf: csvURL, encoding: .utf8)
+        XCTAssertTrue(csv.hasPrefix("study_id,patient_id,patient_name"),
+                      "CSV should start with the canonical header")
+        XCTAssertTrue(csv.contains("\"PID,001\""), "Comma values must be quoted")
+        XCTAssertTrue(csv.contains("\"Doe \"\"John\"\"\""),
+                      "Embedded double-quotes must be doubled and wrapped")
+        XCTAssertTrue(csv.contains("malignant"))
+        XCTAssertTrue(csv.contains("12.345"))
+        XCTAssertTrue(csv.contains("0.8760"))
+    }
+
+    // MARK: - Assistant chatbot extensions
+
+    func testAssistantClassificationTriggersOnNaturalLanguage() {
+        let interpreter = AssistantCommandInterpreter()
+        XCTAssertTrue(interpreter.actions(for: "classify all lesions").contains(.classifyAllLesions))
+        XCTAssertTrue(interpreter.actions(for: "now run classification please").contains(.classifyAllLesions))
+        XCTAssertTrue(interpreter.actions(for: "classify the findings").contains(.classifyAllLesions))
+    }
+
+    func testAssistantClassificationDoesNotFireOnAmbiguousPhrases() {
+        let interpreter = AssistantCommandInterpreter()
+        XCTAssertFalse(interpreter.actions(for: "set the window to brain").contains(.classifyAllLesions))
+        XCTAssertFalse(interpreter.actions(for: "select a label").contains(.classifyAllLesions))
+        XCTAssertFalse(interpreter.actions(for: "don't classify this").contains(.classifyAllLesions))
+    }
+
+    func testAssistantExportActionPicksUpFormat() {
+        let interpreter = AssistantCommandInterpreter()
+        XCTAssertTrue(interpreter.actions(for: "export the report as csv")
+            .contains(.exportClassificationReport(.csv)))
+        XCTAssertTrue(interpreter.actions(for: "save results as json")
+            .contains(.exportClassificationReport(.json)))
+        // No explicit format — default to CSV (most users want a spreadsheet).
+        XCTAssertTrue(interpreter.actions(for: "export the findings report")
+            .contains(.exportClassificationReport(.csv)))
+    }
+
+    func testAssistantOpenCohortPanelIntents() {
+        let interpreter = AssistantCommandInterpreter()
+        XCTAssertTrue(interpreter.actions(for: "open cohort panel").contains(.openCohortPanel))
+        XCTAssertTrue(interpreter.actions(for: "run on all studies").contains(.openCohortPanel))
+        XCTAssertTrue(interpreter.actions(for: "process the cohort").contains(.openCohortPanel))
+        XCTAssertFalse(interpreter.actions(for: "open this study").contains(.openCohortPanel))
+    }
+
+    // MARK: - Segmentation mode round-trips
+
+    func testSegmentationModeIsCodable() throws {
+        for mode in SegmentationMode.allCases {
+            let encoded = try JSONEncoder().encode(mode)
+            let decoded = try JSONDecoder().decode(SegmentationMode.self, from: encoded)
+            XCTAssertEqual(decoded, mode)
+            XCTAssertFalse(mode.displayName.isEmpty)
+        }
+    }
+
     @MainActor
     func testNNUnetViewModelDefaultsToDGXModeWhenConfigEnabled() {
         // Save an enabled DGXSparkConfig into UserDefaults, then confirm
