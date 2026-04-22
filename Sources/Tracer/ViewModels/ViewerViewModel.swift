@@ -131,7 +131,15 @@ public final class ViewerViewModel: ObservableObject {
     // DICOM study browser
     @Published public var loadedSeries: [DICOMSeries] = []
 
-    public init() {}
+    /// Capped LRU list of the last `RecentVolumesStore.maximumEntries`
+    /// volumes the user has opened. Persisted across launches. Displayed as
+    /// a horizontal chip row at the top of the Study Browser.
+    @Published public private(set) var recentVolumes: [RecentVolume] = []
+    private let recentVolumesStore = RecentVolumesStore()
+
+    public init() {
+        self.recentVolumes = recentVolumesStore.load()
+    }
 
     public var loadedCTVolumes: [ImageVolume] {
         loadedVolumes.filter { Modality.normalize($0.modality) == .CT }
@@ -492,10 +500,53 @@ public final class ViewerViewModel: ObservableObject {
     @discardableResult
     public func addLoadedVolumeIfNeeded(_ volume: ImageVolume) -> (volume: ImageVolume, inserted: Bool) {
         if let existing = loadedVolume(matching: volume) {
+            // Even re-openings bump the recent-list timestamp so the chip
+            // stays at the head of the strip.
+            recordRecent(volume: existing)
             return (existing, false)
         }
         loadedVolumes.append(volume)
+        recordRecent(volume: volume)
         return (volume, true)
+    }
+
+    // MARK: - Recent volumes
+
+    private func recordRecent(volume: ImageVolume) {
+        guard !volume.sourceFiles.isEmpty else { return }
+        recentVolumes = recentVolumesStore.recordOpen(RecentVolume(from: volume))
+    }
+
+    /// Drop a recent entry (e.g. after the user clicks the × chip).
+    public func removeRecent(id: String) {
+        recentVolumes = recentVolumesStore.remove(id: id)
+    }
+
+    /// Re-open a volume from its `RecentVolume` bookmark. Picks the right
+    /// loader based on `kind` and the file extensions, and if the session
+    /// already holds that volume just re-displays it without re-loading.
+    public func reopenRecent(_ recent: RecentVolume) async {
+        // Already loaded in this session?
+        if let already = loadedVolumes.first(where: { $0.sessionIdentity == recent.id }) {
+            displayVolume(already)
+            statusMessage = "Already loaded: \(recent.seriesDescription)"
+            recordRecent(volume: already)
+            return
+        }
+        guard let firstPath = recent.sourceFiles.first else {
+            statusMessage = "Recent entry has no source files."
+            return
+        }
+        switch recent.kind {
+        case .nifti:
+            await loadNIfTI(url: URL(fileURLWithPath: firstPath))
+        case .dicom:
+            // Use the parent directory to trigger a fresh DICOM scan —
+            // cheapest way to rebuild the volume without caching pixel data
+            // between sessions.
+            let parent = (firstPath as NSString).deletingLastPathComponent
+            await loadDICOMDirectory(url: URL(fileURLWithPath: parent))
+        }
     }
 
     private func loadedVolume(matching volume: ImageVolume) -> ImageVolume? {
@@ -715,6 +766,33 @@ public final class ViewerViewModel: ObservableObject {
     public func applyPreset(_ preset: WindowLevel) {
         window = preset.window
         level = preset.level
+    }
+
+    /// Look up a preset by name across the current modality's list first,
+    /// falling back to the union of CT + MR + PT presets. Useful for global
+    /// keyboard shortcuts that should "just work" regardless of the loaded
+    /// modality. Returns a status message describing what happened.
+    @discardableResult
+    public func applyPresetNamed(_ name: String) -> String {
+        let modality = currentVolume.map { Modality.normalize($0.modality) } ?? .CT
+        let modalityPresets = WLPresets.presets(for: modality)
+        if let match = modalityPresets.first(where: {
+            $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame
+        }) {
+            applyPreset(match)
+            statusMessage = "Applied \(match.name) W/L (\(modality.displayName))"
+            return statusMessage
+        }
+        let union = WLPresets.CT + WLPresets.MR + WLPresets.PT
+        if let match = union.first(where: {
+            $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame
+        }) {
+            applyPreset(match)
+            statusMessage = "Applied \(match.name) W/L"
+            return statusMessage
+        }
+        statusMessage = "No \(name) preset available for this modality."
+        return statusMessage
     }
 
     public func autoWL() {

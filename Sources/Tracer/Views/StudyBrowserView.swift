@@ -50,6 +50,11 @@ struct StudyBrowserView: View {
             header
             Divider()
 
+            if !vm.recentVolumes.isEmpty {
+                recentVolumesStrip
+                Divider()
+            }
+
             Group {
                 switch browserMode {
                 case .worklist:
@@ -72,6 +77,124 @@ struct StudyBrowserView: View {
         .onChange(of: vm.indexRevision) { _, _ in
             reloadIndexResults()
         }
+    }
+
+    // MARK: - Recent volumes strip
+
+    /// Compact horizontal row of chips for the last `N` volumes the user
+    /// has opened. Click a chip to reopen; the × button removes the chip
+    /// without deleting anything on disk.
+    private var recentVolumesStrip: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Recently opened")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.secondary)
+                Spacer()
+                if vm.recentVolumes.count > 1 {
+                    Menu {
+                        ForEach(vm.recentVolumes) { recent in
+                            Button(role: .destructive) {
+                                vm.removeRecent(id: recent.id)
+                            } label: {
+                                Label("Remove \(recent.seriesDescription)",
+                                      systemImage: "minus.circle")
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 11))
+                    }
+                    .menuStyle(.borderlessButton)
+                    .frame(width: 20)
+                }
+            }
+            .padding(.horizontal, 8)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(vm.recentVolumes) { recent in
+                        recentChip(recent)
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.bottom, 6)
+            }
+        }
+        .padding(.top, 4)
+    }
+
+    private func recentChip(_ recent: RecentVolume) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: iconForRecent(recent))
+                .foregroundColor(colorForRecent(recent))
+            VStack(alignment: .leading, spacing: 1) {
+                Text(recent.seriesDescription.isEmpty ? "Series" : recent.seriesDescription)
+                    .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1)
+                Text(recentSubtitle(recent))
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
+            Button {
+                vm.removeRecent(id: recent.id)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8))
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.borderless)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.secondary.opacity(0.12))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.secondary.opacity(0.25), lineWidth: 0.5)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            Task { await vm.reopenRecent(recent) }
+        }
+        .help(recentTooltip(recent))
+    }
+
+    private func iconForRecent(_ recent: RecentVolume) -> String {
+        switch recent.kind {
+        case .nifti: return "cube.box"
+        case .dicom: return "square.stack.3d.up"
+        }
+    }
+
+    private func colorForRecent(_ recent: RecentVolume) -> Color {
+        switch Modality.normalize(recent.modality) {
+        case .CT:  return .blue
+        case .MR:  return .purple
+        case .PT:  return .orange
+        case .SEG: return .green
+        default:   return .secondary
+        }
+    }
+
+    private func recentSubtitle(_ recent: RecentVolume) -> String {
+        let modality = Modality.normalize(recent.modality).displayName
+        let patient = recent.patientName.isEmpty ? "—" : recent.patientName
+        return "\(modality) · \(patient)"
+    }
+
+    private func recentTooltip(_ recent: RecentVolume) -> String {
+        let lines: [String] = [
+            "Reopen: \(recent.seriesDescription)",
+            "Study: \(recent.studyDescription.isEmpty ? "—" : recent.studyDescription)",
+            "Patient: \(recent.patientName.isEmpty ? "—" : recent.patientName)",
+            "Modality: \(Modality.normalize(recent.modality).displayName)",
+            "Opened: \(recent.openedAt.formatted(date: .abbreviated, time: .shortened))"
+        ]
+        return lines.joined(separator: "\n")
     }
 
     private var header: some View {

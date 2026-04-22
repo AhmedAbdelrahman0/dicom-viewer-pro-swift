@@ -72,31 +72,33 @@ public struct ContentView: View {
         .environmentObject(vm)
         .environmentObject(monai)
         .environmentObject(nnunet)
-        .sheet(isPresented: $showMONAIPanel) {
+        // Engine panels open as right-side inspector drawers (macOS 14+ /
+        // iPadOS 17+) instead of modal sheets. This keeps the MPR viewport
+        // visible while a model runs so the radiologist can tweak W/L or
+        // scroll slices without closing the panel.
+        //
+        // Only one inspector is visible at a time; the `.inspector` modifier
+        // doesn't stack, so we gate each on its own `showXPanel` flag and
+        // make the toolbar buttons mutually exclusive when opening.
+        .inspector(isPresented: $showMONAIPanel) {
             MONAILabelPanel(viewer: vm, monai: monai, labeling: vm.labeling)
-                .frame(minWidth: 420, minHeight: 560)
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("Close") { showMONAIPanel = false }
-                    }
+                .inspectorColumnWidth(min: 360, ideal: 440, max: 560)
+                .overlay(alignment: .topTrailing) {
+                    closeInspectorButton { showMONAIPanel = false }
                 }
         }
-        .sheet(isPresented: $showNNUnetPanel) {
+        .inspector(isPresented: $showNNUnetPanel) {
             NNUnetPanel(viewer: vm, nnunet: nnunet, labeling: vm.labeling)
-                .frame(minWidth: 460, minHeight: 640)
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("Close") { showNNUnetPanel = false }
-                    }
+                .inspectorColumnWidth(min: 400, ideal: 480, max: 640)
+                .overlay(alignment: .topTrailing) {
+                    closeInspectorButton { showNNUnetPanel = false }
                 }
         }
-        .sheet(isPresented: $showPETEnginePanel) {
+        .inspector(isPresented: $showPETEnginePanel) {
             PETEnginePanel(viewer: vm, nnunet: nnunet, pet: pet, labeling: vm.labeling)
-                .frame(minWidth: 500, minHeight: 640)
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("Close") { showPETEnginePanel = false }
-                    }
+                .inspectorColumnWidth(min: 440, ideal: 500, max: 640)
+                .overlay(alignment: .topTrailing) {
+                    closeInspectorButton { showPETEnginePanel = false }
                 }
         }
         .fileImporter(
@@ -160,14 +162,30 @@ public struct ContentView: View {
 
             HoverIconButton(
                 systemImage: "wand.and.stars",
-                tooltip: "Auto Window / Level\n"
+                tooltip: "Auto Window / Level  (⌘R or ⌘4)\n"
                        + "Automatically compute window/level from the\n"
-                       + "1–99 percentile of the current volume.\n"
-                       + "Shortcut: ⌘R"
+                       + "1–99 percentile of the current volume."
             ) {
                 vm.autoWLHistogram(preset: .balanced)
             }
             .keyboardShortcut("r", modifiers: [.command])
+
+            // Invisible buttons that own the global W/L shortcuts. Kept off-
+            // screen so they participate in the shortcut graph without
+            // crowding the visible toolbar.
+            Group {
+                Button("Lung W/L") { vm.applyPresetNamed("Lung") }
+                    .keyboardShortcut("1", modifiers: [.command])
+                Button("Bone W/L") { vm.applyPresetNamed("Bone") }
+                    .keyboardShortcut("2", modifiers: [.command])
+                Button("Brain W/L") { vm.applyPresetNamed("Brain") }
+                    .keyboardShortcut("3", modifiers: [.command])
+                Button("Auto W/L") { vm.autoWLHistogram(preset: .balanced) }
+                    .keyboardShortcut("4", modifiers: [.command])
+            }
+            .frame(width: 0, height: 0)
+            .hidden()
+            .accessibilityHidden(true)
 
             HoverIconButton(
                 systemImage: focusModeEnabled
@@ -199,7 +217,7 @@ public struct ContentView: View {
             // users never have to touch the menu.
             Menu {
                 Button {
-                    showMONAIPanel.toggle()
+                    showInspector(.monai)
                 } label: {
                     Label("MONAI Label — interactive server models",
                           systemImage: "brain.head.profile")
@@ -207,7 +225,7 @@ public struct ContentView: View {
                 .keyboardShortcut("m", modifiers: [.command, .shift])
 
                 Button {
-                    showNNUnetPanel.toggle()
+                    showInspector(.nnunet)
                 } label: {
                     Label("nnU-Net — catalog of 15 pretrained datasets",
                           systemImage: "square.stack.3d.up.fill")
@@ -215,7 +233,7 @@ public struct ContentView: View {
                 .keyboardShortcut("n", modifiers: [.command, .shift])
 
                 Button {
-                    showPETEnginePanel.toggle()
+                    showInspector(.pet)
                 } label: {
                     Label("PET Engine — AutoPET + MedSAM2 + TMTV",
                           systemImage: "flame.fill")
@@ -227,7 +245,7 @@ public struct ContentView: View {
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
-            .help("AI Engines\n• MONAI Label (⌘⇧M)\n• nnU-Net (⌘⇧N)\n• PET Engine (⌘⇧P)")
+            .help("AI Engines\n• MONAI Label (⌘⇧M)\n• nnU-Net (⌘⇧N)\n• PET Engine (⌘⇧P)\nPanels open as side inspectors — ⌘. to close.")
 
             Spacer()
 
@@ -317,6 +335,42 @@ public struct ContentView: View {
             browserVisibility = focusModeEnabled ? .detailOnly : .all
         }
     }
+
+    /// Common "close" chip rendered inside each inspector panel. `.inspector`
+    /// doesn't provide its own toolbar, so we overlay a small button top-
+    /// right of whichever panel is showing.
+    @ViewBuilder
+    private func closeInspectorButton(action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: "xmark.circle.fill")
+                .font(.system(size: 16))
+                .foregroundColor(.secondary)
+                .padding(8)
+        }
+        .buttonStyle(.borderless)
+        .keyboardShortcut(".", modifiers: [.command])
+        .help("Close inspector (⌘.)")
+    }
+
+    /// Open one of the engine inspectors; closes any already-open inspector
+    /// so only one drawer is visible at a time. Called by the AI Engines
+    /// menu items.
+    private func showInspector(_ which: EngineInspector) {
+        // Close everything first.
+        showMONAIPanel = false
+        showNNUnetPanel = false
+        showPETEnginePanel = false
+        // Open the requested one next tick so the close animations settle.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
+            switch which {
+            case .monai: showMONAIPanel = true
+            case .nnunet: showNNUnetPanel = true
+            case .pet: showPETEnginePanel = true
+            }
+        }
+    }
+
+    private enum EngineInspector { case monai, nnunet, pet }
 
     private func handleFileImport(result: Result<[URL], Error>) {
         guard case .success(let urls) = result, let url = urls.first else { return }

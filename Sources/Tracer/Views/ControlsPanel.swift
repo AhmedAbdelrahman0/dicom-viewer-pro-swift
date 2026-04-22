@@ -2,28 +2,67 @@ import SwiftUI
 
 struct ControlsPanel: View {
     @EnvironmentObject var vm: ViewerViewModel
-    @State private var tab: Tab = .assistant
+    @State private var group: Group = .assistant
+    @State private var viewingSub: ViewingSub = .wl
+    @State private var segSub: SegSub = .labels
 
-    enum Tab: String, CaseIterable, Identifiable {
+    /// Top-level grouping. Radiologists hop between four main activities;
+    /// the controls panel now surfaces those as four tabs rather than
+    /// seven flat ones. Nested pickers expose the finer-grained sub-tabs
+    /// only when the parent group is active.
+    enum Group: String, CaseIterable, Identifiable, Hashable {
         case assistant = "AI"
+        case viewing = "Viewing"
+        case segmentation = "Segmentation"
+        case registration = "Reg"
+        case info = "Info"
+        var id: String { rawValue }
+    }
+
+    enum ViewingSub: String, CaseIterable, Identifiable, Hashable {
         case wl = "W/L"
         case fusion = "Fusion"
-        case labels = "Labels"
-        case registration = "Reg"
         case display = "Display"
-        case info = "Info"
+        var id: String { rawValue }
+    }
+
+    enum SegSub: String, CaseIterable, Identifiable, Hashable {
+        case labels = "Labels"
+        case registration = "Landmarks"
         var id: String { rawValue }
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("", selection: $tab) {
-                ForEach(Tab.allCases) { t in
-                    Text(t.rawValue).tag(t)
+            Picker("", selection: $group) {
+                ForEach(Group.allCases) { g in
+                    Text(g.rawValue).tag(g)
                 }
             }
             .pickerStyle(.segmented)
             .padding(8)
+
+            // Secondary sub-tab picker, shown only for groups that have
+            // sub-tabs (Viewing, Segmentation).
+            if group == .viewing {
+                Picker("", selection: $viewingSub) {
+                    ForEach(ViewingSub.allCases) { s in
+                        Text(s.rawValue).tag(s)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 8)
+                .padding(.bottom, 4)
+            } else if group == .segmentation {
+                Picker("", selection: $segSub) {
+                    ForEach(SegSub.allCases) { s in
+                        Text(s.rawValue).tag(s)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 8)
+                .padding(.bottom, 4)
+            }
 
             Divider()
 
@@ -31,21 +70,24 @@ struct ControlsPanel: View {
             // bottom, scrollable transcript in the middle). Wrapping it in an
             // outer ScrollView would push the text field below the fold on
             // shorter windows, so we render it directly instead.
-            Group {
-                switch tab {
+            SwiftUI.Group {
+                switch group {
                 case .assistant:
                     AssistantPanel()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                case .wl:
-                    ScrollView { WLTab().padding(16) }
-                case .fusion:
-                    ScrollView { FusionTab().padding(16) }
-                case .labels:
-                    ScrollView { LabelingPanel() }
+                case .viewing:
+                    switch viewingSub {
+                    case .wl:      ScrollView { WLTab().padding(16) }
+                    case .fusion:  ScrollView { FusionTab().padding(16) }
+                    case .display: ScrollView { DisplayTab().padding(16) }
+                    }
+                case .segmentation:
+                    switch segSub {
+                    case .labels:       ScrollView { LabelingPanel() }
+                    case .registration: ScrollView { RegistrationPanel() }
+                    }
                 case .registration:
                     ScrollView { RegistrationPanel() }
-                case .display:
-                    ScrollView { DisplayTab().padding(16) }
                 case .info:
                     ScrollView { InfoTab().padding(16) }
                 }
@@ -54,7 +96,7 @@ struct ControlsPanel: View {
         .navigationTitle("Controls")
         .environmentObject(vm)
         .onReceive(NotificationCenter.default.publisher(for: .focusAssistantTab)) { _ in
-            tab = .assistant
+            group = .assistant
         }
     }
 }

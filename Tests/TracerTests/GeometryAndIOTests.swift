@@ -1772,6 +1772,85 @@ final class GeometryAndIOTests: XCTestCase {
                      "Explicit bad path override must not be resolved as valid")
     }
 
+    // MARK: - Recent volumes store
+
+    @MainActor
+    func testRecentVolumesStoreRespectsMaximumAndDeduplicates() {
+        // Use an isolated UserDefaults so the CI run can't pollute real user
+        // preferences (or be polluted by them).
+        let defaultsName = "Tracer.Tests.Recents.\(UUID().uuidString)"
+        guard let suite = UserDefaults(suiteName: defaultsName) else {
+            return XCTFail("Could not create test UserDefaults suite")
+        }
+        defer { suite.removePersistentDomain(forName: defaultsName) }
+
+        let store = RecentVolumesStore(defaults: suite)
+        XCTAssertTrue(store.load().isEmpty)
+
+        // Push 10 distinct entries; the store caps at 8 and keeps newest first.
+        for i in 0..<10 {
+            _ = store.recordOpen(RecentVolume(
+                id: "v\(i)",
+                modality: "CT",
+                seriesDescription: "Series \(i)",
+                studyDescription: "Study",
+                patientName: "Patient",
+                sourceFiles: ["/tmp/v\(i).dcm"],
+                kind: .dicom
+            ))
+        }
+        let list = store.load()
+        XCTAssertEqual(list.count, RecentVolumesStore.maximumEntries)
+        XCTAssertEqual(list.first?.id, "v9", "newest entry must be at the head")
+        XCTAssertFalse(list.contains { $0.id == "v0" }, "v0 should have fallen off the tail")
+
+        // Re-opening an existing id should move it to the head without duplicating.
+        _ = store.recordOpen(RecentVolume(
+            id: "v5",
+            modality: "CT",
+            seriesDescription: "Re-open",
+            studyDescription: "Study",
+            patientName: "Patient",
+            sourceFiles: ["/tmp/v5.dcm"],
+            kind: .dicom
+        ))
+        let after = store.load()
+        XCTAssertEqual(after.first?.id, "v5", "re-opened entry should jump to head")
+        XCTAssertEqual(after.filter { $0.id == "v5" }.count, 1, "no duplicates")
+    }
+
+    // MARK: - Named W/L preset shortcuts
+
+    @MainActor
+    func testApplyPresetNamedFindsCTLungAndPETStandard() {
+        let vm = ViewerViewModel()
+
+        // With a CT volume loaded, "Lung" should resolve to the CT preset.
+        let ct = ImageVolume(pixels: [0], depth: 1, height: 1, width: 1, modality: "CT")
+        _ = vm.addLoadedVolumeIfNeeded(ct)
+        vm.currentVolume = ct
+        vm.applyPresetNamed("Lung")
+        XCTAssertEqual(vm.window, 1500, accuracy: 1)
+        XCTAssertEqual(vm.level, -600, accuracy: 1)
+
+        // Switch to a PET volume — "Standard" is a PET-specific preset and
+        // should resolve to window=6, level=3.
+        let pet = ImageVolume(pixels: [0], depth: 1, height: 1, width: 1, modality: "PT")
+        _ = vm.addLoadedVolumeIfNeeded(pet)
+        vm.currentVolume = pet
+        vm.applyPresetNamed("Standard")
+        XCTAssertEqual(vm.window, 6, accuracy: 1,
+                       "PET 'Standard' preset should be picked for a loaded PET volume")
+
+        // Unknown preset → status warns and W/L is unchanged.
+        let wBefore = vm.window
+        let lBefore = vm.level
+        vm.applyPresetNamed("NotARealPreset")
+        XCTAssertEqual(vm.window, wBefore, accuracy: 1e-9)
+        XCTAssertEqual(vm.level, lBefore, accuracy: 1e-9)
+        XCTAssertTrue(vm.statusMessage.contains("No NotARealPreset"))
+    }
+
 }
 
 /// Simple thread-safe counter used by tests that interact with the indexer's

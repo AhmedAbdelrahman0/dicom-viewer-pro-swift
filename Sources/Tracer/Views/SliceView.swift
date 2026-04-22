@@ -1,6 +1,11 @@
 import SwiftUI
 import CoreGraphics
 import simd
+#if os(macOS)
+import AppKit
+#elseif canImport(UIKit)
+import UIKit
+#endif
 
 /// A single 2D slice view (axial, sagittal, or coronal) with full tool support.
 public struct SliceView: View {
@@ -105,6 +110,7 @@ public struct SliceView: View {
                         hoverSample = nil
                     }
                 }
+                .contextMenu { contextMenuItems() }
                 #if os(macOS)
                 .onAppear { NSCursor.setHiddenUntilMouseMoves(false) }
                 #endif
@@ -292,6 +298,83 @@ public struct SliceView: View {
         case 1:  return (py, sliceIndex, px)
         default: return (sliceIndex, py, px)
         }
+    }
+
+    // MARK: - Context menu
+
+    /// Right-click / long-press context menu. Keeps itself terse: four
+    /// verbs tops. More granular controls live in the ControlsPanel tabs.
+    @ViewBuilder
+    private func contextMenuItems() -> some View {
+        if let sample = hoverSample {
+            Section("Cursor") {
+                Text(String(format: "Voxel (%d, %d, %d)",
+                            sample.voxelX, sample.voxelY, sample.voxelZ))
+                Text(String(format: "Raw %.2f", sample.rawIntensity))
+                if let suv = sample.suv {
+                    Text(String(format: "SUV %.2f", suv))
+                }
+                if let className = sample.className {
+                    Text("Class: \(className)")
+                }
+                Button("Copy coordinates") {
+                    copyToPasteboard(String(format: "%d, %d, %d",
+                                            sample.voxelX, sample.voxelY, sample.voxelZ))
+                }
+                Button("Copy world position (mm)") {
+                    copyToPasteboard(String(format: "%.2f, %.2f, %.2f mm",
+                                            sample.world.x, sample.world.y, sample.world.z))
+                }
+            }
+        }
+
+        Section("Tools") {
+            Button {
+                vm.activeTool = .distance
+            } label: {
+                Label("Distance measurement", systemImage: "ruler")
+            }
+            Button {
+                vm.activeTool = .angle
+            } label: {
+                Label("Angle measurement", systemImage: "angle")
+            }
+            Button {
+                vm.activeTool = .area
+            } label: {
+                Label("Area / ROI", systemImage: "skew")
+            }
+            Button {
+                vm.activeTool = .wl
+                vm.labeling.labelingTool = .brush
+            } label: {
+                Label("Brush on active label", systemImage: "paintbrush.pointed.fill")
+            }
+        }
+
+        Section("View") {
+            Button("Reset zoom + pan") { resetView() }
+            Button(vm.invertColors ? "Disable inversion" : "Invert colors") {
+                vm.invertColors.toggle()
+            }
+            Button("Center slices on cursor") {
+                if let sample = hoverSample {
+                    vm.setSlice(axis: 0, index: sample.voxelX)
+                    vm.setSlice(axis: 1, index: sample.voxelY)
+                    vm.setSlice(axis: 2, index: sample.voxelZ)
+                }
+            }
+            .disabled(hoverSample == nil)
+        }
+    }
+
+    private func copyToPasteboard(_ text: String) {
+        #if os(macOS)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        #elseif canImport(UIKit)
+        UIPasteboard.general.string = text
+        #endif
     }
 
     private func hoverBadge(_ sample: HoverSample) -> some View {
