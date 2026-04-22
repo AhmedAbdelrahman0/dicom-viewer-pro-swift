@@ -32,10 +32,10 @@ public struct NNUnetPanel: View {
             Divider()
             modelSection
             Divider()
-            if nnunet.mode == .subprocess {
-                subprocessOptions
-            } else {
-                coreMLOptions
+            switch nnunet.mode {
+            case .subprocess: subprocessOptions
+            case .coreML:     coreMLOptions
+            case .dgxRemote:  dgxOptions
             }
             Divider()
             actionRow
@@ -188,6 +188,51 @@ public struct NNUnetPanel: View {
                 .font(.system(size: 10))
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var dgxOptions: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("DGX Spark backend")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.secondary)
+
+            let cfg = nnunet.dgxConfig
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(nnunet.isDGXReady ? Color.green : Color.orange)
+                    .frame(width: 8, height: 8)
+                Text(nnunet.isDGXReady
+                     ? "Remote execution on \(cfg.sshDestination):\(cfg.port)"
+                     : (nnunet.dgxReadinessMessage ?? "DGX Spark not ready"))
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Text("Uses the settings from **Settings → DGX Spark** — host, SSH key, remote workdir, and any extra env vars. Each run uploads the NIfTI channels, executes `nnUNetv2_predict`, pulls the predicted label map back, and cleans up the remote directory.")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Toggle("Full 5-fold ensemble (≈ 5× slower)",
+                   isOn: $nnunet.useFullEnsemble)
+            Toggle("Disable test-time augmentation (≈ 8× faster)",
+                   isOn: $nnunet.disableTTA)
+
+            if !cfg.remoteNNUnetBinary.isEmpty {
+                Label("Remote binary: \(cfg.remoteNNUnetBinary)",
+                      systemImage: "terminal")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+            }
+            if !cfg.remoteEnvironment.isEmpty {
+                Label("\(cfg.environmentExports().count) env var(s) exported before run",
+                      systemImage: "slider.horizontal.3")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+            }
         }
     }
 

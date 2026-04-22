@@ -169,24 +169,51 @@ public struct ClassificationPanel: View {
 
     private var subprocessConfig: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Python script")
+            Toggle("Run on DGX Spark (remote Python)", isOn: $classifier.runOnDGX)
+                .toggleStyle(.switch)
+                .help("Upload the VOI + mask to the DGX, run the Python script there, and pull the JSON result back. Honours Settings → DGX Spark.")
+
+            Text(classifier.runOnDGX
+                 ? "Remote script path on DGX"
+                 : "Python script")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(.secondary)
             HStack {
-                TextField("path/to/classifier_cli.py", text: $classifier.customBinaryPath)
+                TextField(classifier.runOnDGX
+                          ? "~/scripts/classify_lesion.py"
+                          : "path/to/classifier_cli.py",
+                          text: $classifier.customBinaryPath)
                     .textFieldStyle(.roundedBorder)
                 #if canImport(AppKit)
-                Button("Browse…") { classifier.pickBinaryPath() }
-                    .buttonStyle(.bordered).controlSize(.small)
+                if !classifier.runOnDGX {
+                    Button("Browse…") { classifier.pickBinaryPath() }
+                        .buttonStyle(.bordered).controlSize(.small)
+                }
                 #endif
             }
-            Text("Environment overrides (KEY=VALUE, one per line)")
+            Text(classifier.runOnDGX
+                 ? "Environment / activation (first `activate=…` line is run before the script)"
+                 : "Environment overrides (KEY=VALUE, one per line)")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(.secondary)
             TextEditor(text: $classifier.customEnvironment)
                 .font(.system(size: 12, design: .monospaced))
                 .frame(height: 60)
                 .background(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.3)))
+
+            if classifier.runOnDGX {
+                let cfg = DGXSparkConfig.load()
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(cfg.isConfigured && cfg.enabled ? Color.green : Color.orange)
+                        .frame(width: 8, height: 8)
+                    Text(cfg.isConfigured && cfg.enabled
+                         ? "Connected to \(cfg.sshDestination):\(cfg.port)"
+                         : "Configure Settings → DGX Spark first")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                }
+            }
         }
     }
 

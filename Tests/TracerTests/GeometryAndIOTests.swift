@@ -2349,6 +2349,208 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(vm.level, 750, accuracy: 1)
     }
 
+    // MARK: - Model registry + DGX tests
+
+    func testTracerModelRoundTripPreservesFields() throws {
+        let model = TracerModel(
+            id: "m1",
+            displayName: "Lung nodule fold 0",
+            kind: .coreML,
+            sourceURL: URL(string: "https://huggingface.co/foo/bar/blob/main/lung.mlpackage"),
+            localPath: "/tmp/lung.mlpackage",
+            sha256: "deadbeef",
+            sizeBytes: 12345,
+            addedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            license: "Apache-2.0",
+            notes: "test",
+            boundCatalogEntryIDs: ["lung-nodule-radiomics", "pet-lesion-radiomics"]
+        )
+        let data = try JSONEncoder().encode(model)
+        let decoded = try JSONDecoder().decode(TracerModel.self, from: data)
+        XCTAssertEqual(decoded, model, "Codable round-trip should preserve every field")
+        XCTAssertEqual(decoded.boundCatalogEntryIDs.count, 2)
+        XCTAssertEqual(decoded.kind, .coreML)
+    }
+
+    func testTracerModelKindDisplayNamesAreHumanReadable() {
+        // Not empty, no underscores / camelCase leaking to the UI.
+        for kind in [TracerModel.Kind.coreML, .gguf, .treeModelJSON,
+                     .nnunetDataset, .monaiBundle, .pythonScript, .remoteArtifact] {
+            let label = kind.displayName
+            XCTAssertFalse(label.isEmpty, "\(kind) should have a display name")
+            XCTAssertFalse(label.contains("_"), "\(kind).displayName leaks underscore")
+        }
+    }
+
+    func testSHA256HexMatchesOpenSSL() throws {
+        // Hash a known-content file and compare with the same digest produced
+        // by Python's hashlib — the hex string for "hello world\n" is
+        // a948904f2f0f479b8f8197694b30184b0d2ed1c1cd2a1ec0fb85d299a192a447.
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sha256-\(UUID().uuidString).txt")
+        try "hello world\n".data(using: .utf8)!.write(to: tmp)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let hash = try SHA256Hex.hash(of: tmp)
+        XCTAssertEqual(hash,
+                       "a948904f2f0f479b8f8197694b30184b0d2ed1c1cd2a1ec0fb85d299a192a447")
+    }
+
+    func testDGXSparkConfigRoundTripsThroughUserDefaults() {
+        let domain = "tracer.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: domain)!
+        defer { defaults.removePersistentDomain(forName: domain) }
+
+        var cfg = DGXSparkConfig()
+        cfg.host = "dgx-spark.local"
+        cfg.user = "ahmed"
+        cfg.port = 2222
+        cfg.identityFile = "~/.ssh/id_ed25519"
+        cfg.remoteWorkdir = "~/tracer"
+        cfg.remoteEnvironment = "nnUNet_results=/weights\nCUDA_VISIBLE_DEVICES=0"
+        cfg.enabled = true
+
+        let data = try! JSONEncoder().encode(cfg)
+        defaults.set(data, forKey: DGXSparkConfig.storageKey)
+
+        let raw = defaults.data(forKey: DGXSparkConfig.storageKey)
+        XCTAssertNotNil(raw)
+        let decoded = try! JSONDecoder().decode(DGXSparkConfig.self, from: raw!)
+        XCTAssertEqual(decoded, cfg)
+        XCTAssertTrue(decoded.isConfigured)
+        XCTAssertEqual(decoded.sshDestination, "ahmed@dgx-spark.local")
+        XCTAssertEqual(decoded.environmentExports().count, 2)
+    }
+
+    func testRemoteExecutorShellEscapePreservesPayload() {
+        XCTAssertEqual(RemoteExecutor.shellEscape("plain"), "'plain'")
+        XCTAssertEqual(RemoteExecutor.shellEscape("with space"), "'with space'")
+        // Critical case: internal single quote has to be closed, escaped, reopened.
+        XCTAssertEqual(RemoteExecutor.shellEscape("o'reilly"), "'o'\\''reilly'")
+        // Semicolons / ampersands must stay inside quotes so they don't execute.
+        XCTAssertEqual(RemoteExecutor.shellEscape("rm -rf /; echo hi"),
+                       "'rm -rf /; echo hi'")
+    }
+
+    func testDGXSparkConfigEnvironmentExportsIgnoresBlankLines() {
+        var cfg = DGXSparkConfig()
+        cfg.remoteEnvironment = """
+
+            nnUNet_results=/weights
+
+            CUDA_VISIBLE_DEVICES=0
+            garbage_without_equals
+            """
+        let exports = cfg.environmentExports()
+        XCTAssertEqual(exports.count, 2)
+        XCTAssertTrue(exports.contains("nnUNet_results=/weights"))
+        XCTAssertTrue(exports.contains("CUDA_VISIBLE_DEVICES=0"))
+    }
+
+    @MainActor
+    func testHuggingFaceBlobURLIsRewrittenToResolveURL() {
+        let original = URL(string: "https://huggingface.co/google/medgemma-4b-it/blob/main/model.gguf")!
+        let rewritten = ModelDownloadManager.rewriteHuggingFace(original)
+        XCTAssertEqual(rewritten.absoluteString,
+                       "https://huggingface.co/google/medgemma-4b-it/resolve/main/model.gguf")
+
+        // Non-HuggingFace URLs are passed through untouched.
+        let zenodo = URL(string: "https://zenodo.org/record/6/files/weights.zip")!
+        XCTAssertEqual(ModelDownloadManager.rewriteHuggingFace(zenodo), zenodo)
+    }
+
+    @MainActor
+    func testTracerModelStoreAddRemoveAndBindPersistToDisk() throws {
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracer-store-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.removeItem(at: scratch)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+
+        do {
+            let store = TracerModelStore(rootURL: scratch)
+            XCTAssertEqual(store.models.count, 0)
+
+            let model = TracerModel(
+                id: "id-1",
+                displayName: "Lung",
+                kind: .coreML,
+                localPath: "/tmp/lung.mlpackage"
+            )
+            store.add(model)
+            store.bind(modelID: "id-1", to: "lung-nodule-coreml")
+            XCTAssertEqual(store.models.count, 1)
+            XCTAssertEqual(store.models.first?.boundCatalogEntryIDs, ["lung-nodule-coreml"])
+            XCTAssertEqual(store.models(boundTo: "lung-nodule-coreml").count, 1)
+        }
+
+        // Reopen — registry should load back from disk.
+        let reopened = TracerModelStore(rootURL: scratch)
+        XCTAssertEqual(reopened.models.count, 1)
+        XCTAssertEqual(reopened.models.first?.displayName, "Lung")
+
+        reopened.remove(id: "id-1", deleteFiles: false)
+        XCTAssertEqual(reopened.models.count, 0)
+    }
+
+    @MainActor
+    func testModelManagerViewModelInferKindRecognisesExtensions() {
+        // Loosely: extension dictates kind for the common formats.
+        XCTAssertEqual(
+            ModelManagerViewModel.inferKind(from: URL(fileURLWithPath: "/tmp/model.mlpackage")),
+            .coreML
+        )
+        XCTAssertEqual(
+            ModelManagerViewModel.inferKind(from: URL(fileURLWithPath: "/tmp/llama.gguf")),
+            .gguf
+        )
+        XCTAssertEqual(
+            ModelManagerViewModel.inferKind(from: URL(fileURLWithPath: "/tmp/tree.json")),
+            .treeModelJSON
+        )
+        XCTAssertEqual(
+            ModelManagerViewModel.inferKind(from: URL(fileURLWithPath: "/tmp/predict.py")),
+            .pythonScript
+        )
+        XCTAssertEqual(
+            ModelManagerViewModel.inferKind(from: URL(fileURLWithPath: "/tmp/Dataset221_AutoPETII")),
+            .nnunetDataset
+        )
+        XCTAssertEqual(
+            ModelManagerViewModel.inferKind(from: URL(fileURLWithPath: "/tmp/monai-liver.zip")),
+            .monaiBundle
+        )
+        // Unknown extension falls through to .coreML as the safest default.
+        XCTAssertEqual(
+            ModelManagerViewModel.inferKind(from: URL(fileURLWithPath: "/tmp/mystery.weights")),
+            .coreML
+        )
+    }
+
+    @MainActor
+    func testNNUnetViewModelDefaultsToDGXModeWhenConfigEnabled() {
+        // Save an enabled DGXSparkConfig into UserDefaults, then confirm
+        // NNUnetViewModel picks it up on init. We stash + restore whatever
+        // was there so the test doesn't pollute real prefs.
+        let defaults = UserDefaults.standard
+        let prior = defaults.data(forKey: DGXSparkConfig.storageKey)
+        defer {
+            if let prior {
+                defaults.set(prior, forKey: DGXSparkConfig.storageKey)
+            } else {
+                defaults.removeObject(forKey: DGXSparkConfig.storageKey)
+            }
+        }
+
+        var cfg = DGXSparkConfig()
+        cfg.host = "dgx.local"
+        cfg.enabled = true
+        if let data = try? JSONEncoder().encode(cfg) {
+            defaults.set(data, forKey: DGXSparkConfig.storageKey)
+        }
+
+        let vm = NNUnetViewModel()
+        XCTAssertEqual(vm.mode, .dgxRemote,
+                       "NNUnetViewModel should honour the persisted DGX toggle on init")
+    }
 }
 
 /// Simple thread-safe counter used by tests that interact with the indexer's

@@ -33,10 +33,12 @@ public struct TracerSettingsView: View {
                 .tabItem { Label("Shortcuts", systemImage: "keyboard") }
             enginesTab
                 .tabItem { Label("Engines", systemImage: "cpu") }
+            DGXSparkSettingsTab()
+                .tabItem { Label("DGX Spark", systemImage: "bolt.horizontal.fill") }
             appearanceTab
                 .tabItem { Label("Appearance", systemImage: "sparkles") }
         }
-        .frame(width: 560, height: 360)
+        .frame(width: 620, height: 460)
         .padding(18)
     }
 
@@ -147,6 +149,109 @@ public enum TracerSettings {
         let all = WLPresets.CT + WLPresets.MR + WLPresets.PT
         return Array(Set(all.map(\.name))).sorted()
     }()
+}
+
+// MARK: - DGX Spark tab
+
+/// Dedicated settings tab for the user's DGX Spark workstation. Reads and
+/// writes `DGXSparkConfig` (persisted under `Tracer.Prefs.DGXSpark`),
+/// offers a one-button "Test connection" that runs `uname -a` + probes
+/// `nvidia-smi`, and surfaces the remote workdir + optional binary paths.
+public struct DGXSparkSettingsTab: View {
+    @State private var config: DGXSparkConfig = .load()
+    @State private var probeStatus: String = ""
+    @State private var probing: Bool = false
+
+    public init() {}
+
+    public var body: some View {
+        Form {
+            Section("Connection") {
+                Toggle("Enable DGX Spark remote execution", isOn: $config.enabled)
+                TextField("Host", text: $config.host,
+                          prompt: Text("dgx-spark.local or 192.168.1.42"))
+                    .textFieldStyle(.roundedBorder)
+                    .disableAutocorrection(true)
+                HStack {
+                    TextField("User", text: $config.user).textFieldStyle(.roundedBorder)
+                    Stepper("Port: \(config.port)",
+                            value: $config.port,
+                            in: 1...65535)
+                }
+                TextField("Identity file (optional)", text: $config.identityFile,
+                          prompt: Text("~/.ssh/id_ed25519"))
+                    .textFieldStyle(.roundedBorder)
+                    .disableAutocorrection(true)
+            }
+
+            Section("Remote paths") {
+                TextField("Remote working directory",
+                          text: $config.remoteWorkdir,
+                          prompt: Text("~/tracer-remote"))
+                    .textFieldStyle(.roundedBorder)
+                    .disableAutocorrection(true)
+                TextField("nnUNetv2_predict path (optional)",
+                          text: $config.remoteNNUnetBinary,
+                          prompt: Text("(auto-detect from PATH)"))
+                    .textFieldStyle(.roundedBorder)
+                    .disableAutocorrection(true)
+                TextField("llama-cli / llama-mtmd-cli path (optional)",
+                          text: $config.remoteLlamaBinary,
+                          prompt: Text("(auto-detect from PATH)"))
+                    .textFieldStyle(.roundedBorder)
+                    .disableAutocorrection(true)
+            }
+
+            Section("Remote environment (KEY=VALUE per line)") {
+                TextEditor(text: $config.remoteEnvironment)
+                    .font(.system(size: 11, design: .monospaced))
+                    .frame(height: 80)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4)
+                            .stroke(Color.secondary.opacity(0.3))
+                    )
+                Text("Typical: `nnUNet_results=/home/ahmed/nnUNet_results`, `CUDA_VISIBLE_DEVICES=0`")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+            }
+
+            Section("Diagnostics") {
+                HStack {
+                    Button {
+                        Task { await probe() }
+                    } label: {
+                        Label("Test connection", systemImage: "bolt.heart")
+                    }
+                    .disabled(probing || config.host.isEmpty)
+                    if probing { ProgressView().controlSize(.small) }
+                    Spacer()
+                    Button("Save") { config.save() }
+                        .buttonStyle(.borderedProminent)
+                }
+                if !probeStatus.isEmpty {
+                    Text(probeStatus)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .onChange(of: config) { _, newValue in newValue.save() }
+    }
+
+    private func probe() async {
+        probing = true
+        defer { probing = false }
+        config.save()
+        let executor = RemoteExecutor(config: config)
+        do {
+            let out = try executor.probe()
+            probeStatus = "✓ " + out.trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            probeStatus = "✗ \(error.localizedDescription)"
+        }
+    }
 }
 
 #endif

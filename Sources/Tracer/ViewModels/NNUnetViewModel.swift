@@ -14,6 +14,9 @@ public final class NNUnetViewModel: ObservableObject {
         case subprocess
         /// Run a pre-converted CoreML `.mlpackage` on-device.
         case coreML
+        /// Run the full Python pipeline on the user's DGX Spark over SSH.
+        /// Requires Settings → DGX Spark to be configured + enabled.
+        case dgxRemote
 
         public var id: String { rawValue }
 
@@ -21,6 +24,7 @@ public final class NNUnetViewModel: ObservableObject {
             switch self {
             case .subprocess: return "Python (nnUNetv2)"
             case .coreML:     return "CoreML on-device"
+            case .dgxRemote:  return "DGX Spark (remote)"
             }
         }
     }
@@ -48,6 +52,7 @@ public final class NNUnetViewModel: ObservableObject {
 
     private let subprocessRunner = NNUnetRunner()
     private let coreMLRunner = NNUnetCoreMLRunner()
+    private var remoteRunner: RemoteNNUnetRunner?
 
     public init() {
         // Adopt Settings defaults for the binary path and the $nnUNet_results
@@ -61,6 +66,25 @@ public final class NNUnetViewModel: ObservableObject {
            !results.isEmpty {
             self.resultsDirPath = results
         }
+        // If the user has DGX Spark enabled from the Settings tab, pre-select
+        // the remote runner so they don't have to flip the mode manually.
+        if DGXSparkConfig.load().enabled {
+            self.mode = .dgxRemote
+        }
+    }
+
+    public var dgxConfig: DGXSparkConfig { DGXSparkConfig.load() }
+
+    public var isDGXReady: Bool {
+        let cfg = dgxConfig
+        return cfg.enabled && cfg.isConfigured
+    }
+
+    public var dgxReadinessMessage: String? {
+        let cfg = dgxConfig
+        if !cfg.enabled { return "Enable DGX Spark in Settings → DGX Spark first." }
+        if !cfg.isConfigured { return "Set a host in Settings → DGX Spark." }
+        return nil
     }
 
     public var selectedEntry: NNUnetCatalog.Entry? {
@@ -98,6 +122,7 @@ public final class NNUnetViewModel: ObservableObject {
 
     public func cancel() {
         subprocessRunner.cancel()
+        remoteRunner?.cancel()
     }
 
     @discardableResult
@@ -154,6 +179,72 @@ public final class NNUnetViewModel: ObservableObject {
                 return nil
             }
             return await runCoreML(entry: entry, volume: volume, labeling: labeling, start: start)
+        case .dgxRemote:
+            return await runDGXRemote(entry: entry,
+                                      volume: volume,
+                                      auxiliaryChannels: auxiliaryChannels,
+                                      labeling: labeling,
+                                      start: start)
+        }
+    }
+
+    // MARK: - DGX remote run
+
+    /// Stage channels as NIfTI locally → scp to DGX → run `nnUNetv2_predict`
+    /// over SSH → pull the predicted mask back → load it as a `LabelMap`.
+    private func runDGXRemote(entry: NNUnetCatalog.Entry,
+                              volume: ImageVolume,
+                              auxiliaryChannels: [ImageVolume],
+                              labeling: LabelingViewModel,
+                              start: Date) async -> LabelMap? {
+        if let msg = dgxReadinessMessage {
+            statusMessage = msg
+            return nil
+        }
+        let cfg = dgxConfig
+        let runnerConfig = RemoteNNUnetRunner.Configuration(
+            dgx: cfg,
+            datasetID: entry.datasetID,
+            configuration: entry.configuration,
+            folds: useFullEnsemble
+                ? ["0", "1", "2", "3", "4"]
+                : entry.folds,
+            disableTestTimeAugmentation: disableTTA,
+            quiet: true
+        )
+        let runner = RemoteNNUnetRunner(configuration: runnerConfig)
+        remoteRunner = runner
+
+        statusMessage = "Uploading to \(cfg.sshDestination) — \(entry.datasetID)…"
+        do {
+            let channels = [volume] + auxiliaryChannels
+            let result = try await Task.detached(priority: .userInitiated) {
+                try await runner.runInference(
+                    channels: channels,
+                    referenceVolume: volume,
+                    logSink: { line in
+                        Task { @MainActor [weak self] in
+                            self?.log.append(line)
+                            self?.log.append("\n")
+                        }
+                    }
+                )
+            }.value
+            applyClassNames(from: entry, to: result.labelMap)
+            labeling.labelMaps.append(result.labelMap)
+            labeling.activeLabelMap = result.labelMap
+            if let first = result.labelMap.classes.first {
+                labeling.activeClassID = first.labelID
+            }
+            let elapsed = String(format: "%.1f", result.durationSeconds)
+            statusMessage = "✓ \(entry.displayName) · DGX · \(elapsed)s · \(result.labelMap.classes.count) classes"
+            return result.labelMap
+        } catch let err as RemoteNNUnetRunner.Error {
+            statusMessage = err.errorDescription ?? "DGX run failed"
+            return nil
+        } catch {
+            statusMessage = "DGX run failed: \(error.localizedDescription)"
+            return nil
         }
     }
 
