@@ -77,10 +77,18 @@ public enum NNUnetCatalog {
         public let configuration: String
         public let folds: [String]
         public let classes: [UInt16: String]
-        /// True = expects two input channels (e.g. PET + CT, or multi-sequence MRI).
-        /// Current Swift wrapper only handles single-channel cases; multi-channel
-        /// models are listed for discoverability and flagged as unsupported.
+        /// True = expects multiple input channels (e.g. PET + CT, or multi-
+        /// sequence MRI). The subprocess runner handles multi-channel input
+        /// when the caller supplies `auxiliaryChannels`; the CoreML runner is
+        /// single-channel only.
         public let multiChannel: Bool
+        /// Total number of input channels the model expects (including
+        /// channel 0). Ignored when `multiChannel` is false.
+        public let requiredChannels: Int
+        /// Human-readable hint per channel index — e.g.
+        /// `["CT", "PET SUV"]` for AutoPET II. Displayed in the channel
+        /// picker so users know which series to route where.
+        public let channelDescriptions: [String]
         /// Notes shown in the UI — modality expectations, checkpoint cost, etc.
         public let notes: String
         /// Intensity normalization that matches nnU-Net's published preprocessing
@@ -98,7 +106,9 @@ public enum NNUnetCatalog {
                     configuration: String, folds: [String],
                     classes: [UInt16: String], multiChannel: Bool, notes: String,
                     preprocessing: IntensityPreprocessing = .zScoreNonzero,
-                    coreML: CoreMLPreset? = nil) {
+                    coreML: CoreMLPreset? = nil,
+                    requiredChannels: Int = 1,
+                    channelDescriptions: [String] = []) {
             self.id = id
             self.datasetID = datasetID
             self.displayName = displayName
@@ -116,6 +126,8 @@ public enum NNUnetCatalog {
                 patchSize: (d: 96, h: 160, w: 160),
                 numClasses: max(2, coreMLClasses)
             )
+            self.requiredChannels = max(1, multiChannel ? requiredChannels : 1)
+            self.channelDescriptions = channelDescriptions
         }
     }
 
@@ -132,6 +144,9 @@ public enum NNUnetCatalog {
         amos22Abdomen,
         totalSegmentatorCT,
         bratsGlioma,
+        autoPETII,
+        lesionTracer,
+        lesionLocator,
     ]
 
     public static func byID(_ id: String) -> Entry? {
@@ -333,6 +348,84 @@ public enum NNUnetCatalog {
     )
 
     // MARK: - BraTS
+
+    // MARK: - PET / PET-CT (autoPET family)
+
+    /// **AutoPET II (2023) — Isensee et al.** Apache-2.0.
+    /// Baseline nnU-Net v2 checkpoint for whole-body FDG-PET/CT lesion
+    /// segmentation. Two channels: CT (channel 0, HU) and PET (channel 1,
+    /// SUV-scaled). Weights on Zenodo 8362371.
+    ///
+    /// Source: https://github.com/MIC-DKFZ/nnUNet/blob/master/documentation/competitions/AutoPETII.md
+    public static let autoPETII = Entry(
+        id: "AutoPET-II-2023",
+        datasetID: "Dataset221_AutoPETII_2023",
+        displayName: "AutoPET II FDG Lesions (2-ch CT+PET)",
+        modality: .PT,
+        bodyRegion: "Whole Body",
+        description: "Binary FDG-avid lesion segmentation on whole-body PET/CT; nnU-Net v2 ResEnc, Apache-2.0.",
+        configuration: "3d_fullres",
+        folds: ["0"],
+        classes: [1: "fdg_avid_lesion"],
+        multiChannel: true,
+        notes: "Channel 0 = CT (HU). Channel 1 = PET (SUV-scaled). Both volumes must share a common grid — resample before running.",
+        preprocessing: .petSUV(cap: 25),
+        coreML: CoreMLPreset(patchSize: (d: 112, h: 160, w: 128), numClasses: 2),
+        requiredChannels: 2,
+        channelDescriptions: ["CT (HU)", "PET (SUV)"]
+    )
+
+    /// **LesionTracer — AutoPET III 2024 winner (MIC-DKFZ).**
+    /// Multi-tracer (FDG + PSMA) whole-body lesion segmentation. Dice 0.6840
+    /// on the AutoPET III leaderboard vs. 0.5761 baseline. Code Apache-2.0,
+    /// weights CC-BY-4.0 (commercial OK with attribution). 26.7 GB.
+    ///
+    /// Paper: https://arxiv.org/abs/2409.09478
+    /// Repo:  https://github.com/MIC-DKFZ/autopet-3-submission
+    /// Weights: https://zenodo.org/records/13786235 + 14007247
+    public static let lesionTracer = Entry(
+        id: "LesionTracer-AutoPETIII",
+        datasetID: "Dataset200_autoPET3_lesions",
+        displayName: "LesionTracer — AutoPET III Winner (FDG + PSMA)",
+        modality: .PT,
+        bodyRegion: "Whole Body",
+        description: "Multi-tracer whole-body PET/CT lesion segmentation — AutoPET III 2024 winner; nnU-Net ResEncL with MultiTalent pretraining.",
+        configuration: "3d_fullres",
+        folds: ["0"],
+        classes: [1: "pet_lesion"],
+        multiChannel: true,
+        notes: "Handles both FDG and PSMA tracers. Large checkpoint (~26.7 GB). Weights CC-BY-4.0 — cite Isensee et al. 2024 when publishing results.",
+        preprocessing: .petSUV(cap: 30),
+        coreML: CoreMLPreset(patchSize: (d: 192, h: 192, w: 192), numClasses: 2),
+        requiredChannels: 2,
+        channelDescriptions: ["CT (HU)", "PET (SUV)"]
+    )
+
+    /// **LesionLocator — AutoPET IV 2025 (interactive).** Apache-2.0.
+    /// Click-prompted refinement of LesionTracer: user provides foreground
+    /// and background clicks; the model updates the lesion mask. Wired as a
+    /// catalog entry for discovery; Swift-side click prompting is stubbed
+    /// via the panel's "interactive" mode and will route the subprocess
+    /// through the autopet-interactive CLI once weights are public.
+    ///
+    /// Repo: https://github.com/MIC-DKFZ/autoPET-interactive
+    public static let lesionLocator = Entry(
+        id: "LesionLocator-AutoPETIV",
+        datasetID: "Dataset210_autoPET4_interactive",
+        displayName: "LesionLocator — AutoPET IV Interactive (experimental)",
+        modality: .PT,
+        bodyRegion: "Whole Body",
+        description: "Interactive click-prompt refinement of PET/CT lesion masks. Still early; route through the nnU-Net subprocess runner with click tensors when weights ship.",
+        configuration: "3d_fullres",
+        folds: ["0"],
+        classes: [1: "pet_lesion"],
+        multiChannel: true,
+        notes: "Experimental: AutoPET IV interactive track. Needs the user to mark foreground / background points on a slice; integration via the PET Engine panel's interactive mode.",
+        preprocessing: .petSUV(cap: 30),
+        coreML: CoreMLPreset(patchSize: (d: 192, h: 192, w: 192), numClasses: 2),
+        requiredChannels: 2,
+        channelDescriptions: ["CT (HU)", "PET (SUV)"]
+    )
 
     public static let bratsGlioma = Entry(
         id: "BraTS-GLI",

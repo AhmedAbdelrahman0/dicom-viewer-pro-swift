@@ -198,7 +198,43 @@ public final class NNUnetRunner: @unchecked Sendable {
     public func runInference(volume: ImageVolume,
                              datasetID: String,
                              logSink: @escaping @Sendable (String) -> Void = { _ in }) async throws -> InferenceResult {
+        try await runInference(
+            channels: [volume],
+            referenceVolume: volume,
+            datasetID: datasetID,
+            logSink: logSink
+        )
+    }
+
+    /// Multi-channel variant: writes each `channels[i]` to disk as
+    /// `<caseID>_000i.nii`, matching nnU-Net's channel-file convention.
+    ///
+    /// Use this for models like `Dataset221_AutoPETII_2023` and LesionTracer
+    /// where channel 0 is CT (HU) and channel 1 is PET (SUV-scaled). All
+    /// channels must share the same voxel grid; the returned `LabelMap` is
+    /// bound to `referenceVolume`'s geometry.
+    public func runInference(channels: [ImageVolume],
+                             referenceVolume: ImageVolume,
+                             datasetID: String,
+                             logSink: @escaping @Sendable (String) -> Void = { _ in }) async throws -> InferenceResult {
         setCancelled(false)
+        guard !channels.isEmpty else {
+            throw RunError.geometryMismatch("at least one channel volume is required")
+        }
+
+        // Validate geometry *before* hitting the filesystem / subprocess —
+        // no need to require nnunetv2 just to reject malformed inputs, and
+        // this makes the contract easier to unit-test.
+        for (idx, channel) in channels.enumerated() where idx > 0 {
+            guard channel.width == referenceVolume.width,
+                  channel.height == referenceVolume.height,
+                  channel.depth == referenceVolume.depth else {
+                throw RunError.geometryMismatch(
+                    "channel \(idx) is \(channel.width)x\(channel.height)x\(channel.depth), reference is \(referenceVolume.width)x\(referenceVolume.height)x\(referenceVolume.depth) — resample before calling"
+                )
+            }
+        }
+
         guard let binary = Self.locatePredictBinary(
             override: configuration.predictBinaryPath
         ) else {
@@ -215,8 +251,12 @@ public final class NNUnetRunner: @unchecked Sendable {
         defer { try? FileManager.default.removeItem(at: workRoot) }
 
         let caseID = "case000"
-        let inputFile = inDir.appendingPathComponent("\(caseID)_0000.nii")
-        try NIfTIWriter.write(volume, to: inputFile)
+        for (idx, channel) in channels.enumerated() {
+            // `_0000`, `_0001`, ... — nnU-Net's per-channel naming convention.
+            let channelTag = String(format: "_%04d", idx)
+            let inputFile = inDir.appendingPathComponent("\(caseID)\(channelTag).nii")
+            try NIfTIWriter.write(channel, to: inputFile)
+        }
 
         // Build the command.
         var args: [String] = [
@@ -253,7 +293,7 @@ public final class NNUnetRunner: @unchecked Sendable {
             throw RunError.missingOutput(labelURL.path)
         }
 
-        let labelMap = try LabelIO.loadNIfTILabelmap(from: labelURL, parentVolume: volume)
+        let labelMap = try LabelIO.loadNIfTILabelmap(from: labelURL, parentVolume: referenceVolume)
         labelMap.name = "nnU-Net · \(datasetID)"
 
         // If a `dataset.json` sits next to the model, pull its label names.

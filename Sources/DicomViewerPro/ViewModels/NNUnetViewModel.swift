@@ -25,6 +25,12 @@ public final class NNUnetViewModel: ObservableObject {
         }
     }
 
+    /// Per-dataset auxiliary-channel pick. Users set this when a model needs
+    /// multiple input channels (e.g. AutoPET wants CT as channel 0 and PET
+    /// as channel 1). Stored as the `ImageVolume.sessionIdentity` so it
+    /// survives re-loads in the session.
+    @Published public var channelAssignments: [String: String] = [:]
+
     // MARK: - Published state
 
     @Published public var mode: Mode = .subprocess
@@ -96,8 +102,12 @@ public final class NNUnetViewModel: ObservableObject {
     // MARK: - Run
 
     /// Run inference on `volume` and install the result into `labeling`.
+    /// When the entry is `multiChannel`, provide the auxiliary channels in
+    /// `auxiliaryChannels` (ordered so `auxiliaryChannels[i]` becomes
+    /// nnU-Net channel `i + 1`; `volume` is always channel 0).
     @discardableResult
     public func run(on volume: ImageVolume,
+                    auxiliaryChannels: [ImageVolume] = [],
                     labeling: LabelingViewModel) async -> LabelMap? {
         guard let entry = selectedEntry else {
             statusMessage = "Pick a model first."
@@ -109,8 +119,8 @@ public final class NNUnetViewModel: ObservableObject {
         if vmModality != entry.modality, vmModality != .OT {
             statusMessage = "Warning: model expects \(entry.modality.displayName), volume is \(vmModality.displayName). Running anyway."
         }
-        if entry.multiChannel {
-            statusMessage = "Model \(entry.datasetID) expects multiple input channels. Multi-series channel selection is not wired yet."
+        if entry.multiChannel, auxiliaryChannels.isEmpty {
+            statusMessage = "Model \(entry.datasetID) needs \(entry.requiredChannels) channels. Pick the auxiliary volume(s) in the panel before running."
             return nil
         }
 
@@ -121,14 +131,23 @@ public final class NNUnetViewModel: ObservableObject {
         let start = Date()
         switch mode {
         case .subprocess:
-            return await runSubprocess(entry: entry, volume: volume, labeling: labeling, start: start)
+            return await runSubprocess(entry: entry,
+                                       volume: volume,
+                                       auxiliaryChannels: auxiliaryChannels,
+                                       labeling: labeling,
+                                       start: start)
         case .coreML:
+            if !auxiliaryChannels.isEmpty {
+                statusMessage = "CoreML path is single-channel only; use the subprocess runner for multi-channel models."
+                return nil
+            }
             return await runCoreML(entry: entry, volume: volume, labeling: labeling, start: start)
         }
     }
 
     private func runSubprocess(entry: NNUnetCatalog.Entry,
                                volume: ImageVolume,
+                               auxiliaryChannels: [ImageVolume],
                                labeling: LabelingViewModel,
                                start: Date) async -> LabelMap? {
         let cfg = NNUnetRunner.Configuration(
@@ -149,10 +168,15 @@ public final class NNUnetViewModel: ObservableObject {
             return nil
         }
 
-        statusMessage = "Running \(entry.datasetID)…"
+        statusMessage = auxiliaryChannels.isEmpty
+            ? "Running \(entry.datasetID)…"
+            : "Running \(entry.datasetID) with \(auxiliaryChannels.count + 1) channels…"
         do {
+            // Primary volume becomes channel 0; auxiliaries fill 1..n in order.
+            let channels = [volume] + auxiliaryChannels
             let result = try await subprocessRunner.runInference(
-                volume: volume,
+                channels: channels,
+                referenceVolume: volume,
                 datasetID: entry.datasetID
             ) { [weak self] line in
                 Task { @MainActor in

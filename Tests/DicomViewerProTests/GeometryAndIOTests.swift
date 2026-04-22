@@ -1471,6 +1471,119 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(mean, 0, accuracy: 1e-4)
     }
 
+    // MARK: - PET catalog / quantification / prefilter
+
+    func testNNUnetCatalogIncludesAutoPETFamily() {
+        let ids = NNUnetCatalog.all.map(\.id)
+        XCTAssertTrue(ids.contains("AutoPET-II-2023"))
+        XCTAssertTrue(ids.contains("LesionTracer-AutoPETIII"))
+        XCTAssertTrue(ids.contains("LesionLocator-AutoPETIV"))
+
+        let autoPETII = try? XCTUnwrap(NNUnetCatalog.byID("AutoPET-II-2023"))
+        XCTAssertEqual(autoPETII?.datasetID, "Dataset221_AutoPETII_2023")
+        XCTAssertTrue(autoPETII?.multiChannel ?? false)
+        XCTAssertEqual(autoPETII?.requiredChannels, 2)
+        XCTAssertEqual(autoPETII?.channelDescriptions.count, 2)
+    }
+
+    func testPETQuantificationReportsTMTVAndPerLesion() {
+        // 3x3x1 PET with two lesions separated by background.
+        let pet = ImageVolume(
+            pixels: [
+                5, 0, 8,
+                5, 0, 8,
+                0, 0, 0
+            ],
+            depth: 1, height: 3, width: 3,
+            spacing: (1, 1, 1),
+            modality: "PT"
+        )
+        let map = LabelMap(parentSeriesUID: pet.seriesUID,
+                            depth: 1, height: 3, width: 3)
+        map.classes = [LabelClass(labelID: 1, name: "lesion",
+                                  category: .tumor, color: .red)]
+        map.voxels = [
+            1, 0, 1,
+            1, 0, 1,
+            0, 0, 0
+        ]
+
+        let report = PETQuantification.compute(
+            petVolume: pet,
+            labelMap: map,
+            classes: [1],
+            suvTransform: { $0 },
+            connectedComponents: true
+        )
+        XCTAssertEqual(report.lesionCount, 2,
+                       "disjoint 2-voxel groups must surface as separate lesions")
+        // Each lesion has 2 voxels @ 1mm³ = 0.002 mL.
+        for lesion in report.lesions {
+            XCTAssertEqual(lesion.voxelCount, 2)
+            XCTAssertEqual(lesion.volumeML, 0.002, accuracy: 1e-9)
+        }
+        // SUVmax across the two lesions = 8.
+        XCTAssertEqual(report.maxSUV, 8, accuracy: 1e-9)
+        // Total voxels = 4 → TMTV 0.004 mL.
+        XCTAssertEqual(report.totalMetabolicTumorVolumeML, 0.004, accuracy: 1e-9)
+    }
+
+    func testPhysiologicalUptakeFilterSubtractsBrainVoxels() {
+        let pet = LabelMap(parentSeriesUID: "pet",
+                           depth: 1, height: 2, width: 3)
+        pet.classes = [LabelClass(labelID: 1, name: "lesion",
+                                   category: .tumor, color: .red)]
+        pet.voxels = [1, 1, 1, 1, 1, 1]
+
+        let anatomy = LabelMap(parentSeriesUID: "ct",
+                               depth: 1, height: 2, width: 3)
+        anatomy.classes = [
+            LabelClass(labelID: 1, name: "liver",
+                       category: .organ, color: .red),
+            LabelClass(labelID: 2, name: "brain",
+                       category: .brain, color: .blue),
+        ]
+        // Mark the last column as brain.
+        anatomy.voxels = [
+            0, 0, 2,
+            0, 0, 2
+        ]
+
+        let result = PhysiologicalUptakeFilter.subtract(
+            petLesionMask: pet,
+            anatomyMask: anatomy,
+            suppressedOrganNames: ["brain"],
+            dilationIterations: 0
+        )
+        XCTAssertEqual(result.voxelsSuppressed, 2)
+        XCTAssertTrue(result.classesSuppressed.contains("brain"))
+        XCTAssertEqual(pet.voxels, [1, 1, 0, 1, 1, 0])
+    }
+
+    @MainActor
+    func testNNUnetRunnerRejectsMismatchedChannelGrids() async {
+        let primary = ImageVolume(pixels: [0],
+                                  depth: 1, height: 1, width: 1,
+                                  modality: "CT")
+        let mismatch = ImageVolume(pixels: [0, 0],
+                                   depth: 1, height: 1, width: 2,
+                                   modality: "PT")
+        let runner = NNUnetRunner()
+        do {
+            _ = try await runner.runInference(
+                channels: [primary, mismatch],
+                referenceVolume: primary,
+                datasetID: "Dataset221_AutoPETII_2023"
+            )
+            XCTFail("Expected geometry mismatch to throw")
+        } catch let err as NNUnetRunner.RunError {
+            if case .geometryMismatch = err { return }
+            XCTFail("Expected .geometryMismatch, got \(err)")
+        } catch {
+            XCTFail("Unexpected error type: \(error)")
+        }
+    }
+
     func testNNUnetRunnerReportsAvailabilityFromPATH() {
         // We don't assume nnUNetv2_predict is installed in CI — just prove
         // the detector runs without crashing and returns a reasonable value.

@@ -10,12 +10,14 @@ public struct ContentView: View {
     @StateObject private var vm = ViewerViewModel()
     @StateObject private var monai = MONAILabelViewModel()
     @StateObject private var nnunet = NNUnetViewModel()
+    @StateObject private var pet = PETEngineViewModel()
     @State private var showingFileImporter = false
     @State private var showingDirectoryPicker = false
     @State private var fileImporterMode: FileImporterMode = .volume
     @State private var directoryImporterMode: DirectoryImporterMode = .open
     @State private var showMONAIPanel = false
     @State private var showNNUnetPanel = false
+    @State private var showPETEnginePanel = false
 
     enum FileImporterMode { case volume, overlay }
     enum DirectoryImporterMode { case open, index }
@@ -80,6 +82,15 @@ public struct ContentView: View {
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
                         Button("Close") { showNNUnetPanel = false }
+                    }
+                }
+        }
+        .sheet(isPresented: $showPETEnginePanel) {
+            PETEnginePanel(viewer: vm, nnunet: nnunet, pet: pet, labeling: vm.labeling)
+                .frame(minWidth: 500, minHeight: 640)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Close") { showPETEnginePanel = false }
                     }
                 }
         }
@@ -179,6 +190,20 @@ public struct ContentView: View {
                        + "Models: MSD tasks, KiTS23, AMOS22, BraTS, TotalSegmentator."
             ) {
                 showNNUnetPanel.toggle()
+            }
+
+            HoverIconButton(
+                systemImage: "flame.fill",
+                tooltip: "PET Engine\n"
+                       + "Unified panel for PET-specific AI paths:\n"
+                       + "• AutoPET II (FDG baseline, 2-channel CT+PET)\n"
+                       + "• LesionTracer (AutoPET III winner — FDG + PSMA)\n"
+                       + "• LesionLocator (AutoPET IV interactive, experimental)\n"
+                       + "• MedSAM2 box-prompt refinement\n"
+                       + "• TMTV / TLG quantification\n"
+                       + "• Physiological uptake filter via TotalSegmentator"
+            ) {
+                showPETEnginePanel.toggle()
             }
 
             Spacer()
