@@ -154,25 +154,47 @@ struct AssistantPanel: View {
         )
         let report = vm.performAssistantCommand(request)
         var summary = report.summary
+
+        // MONAI Label routing — choose a model name on the connected server.
+        var kickOffMONAI = false
         if let plan, monai.isConnected {
             if let selectedModel = monai.selectBestModel(for: plan) {
                 summary += "\nSelected MONAI Label model \(selectedModel)."
+                kickOffMONAI = (plan.preferredEngine != .nnUNet)
             } else if !availableMONAIModels.isEmpty {
                 summary += "\nNo connected MONAI model name matched this route; local labels/tool were prepared."
             }
         }
-        if let plan, let entry = nnunet.selectBestEntry(for: plan) {
-            summary += "\nSelected nnU-Net model \(entry.displayName) (\(entry.datasetID))."
-            if entry.multiChannel {
-                summary += "\nThis nnU-Net model needs multiple input channels, so it is selected but blocked from one-click inference until channel pairing is configured."
-            } else if nnunet.isSubprocessAvailable {
-                summary += "\nLocal nnU-Net runner is available; open the nnU-Net panel to run or review settings."
-            } else {
-                summary += "\nInstall nnunetv2 or point the nnU-Net panel at a CoreML package before running inference."
+
+        // nnU-Net routing — resolve the catalog entry and (if possible) run it.
+        var kickOffNNUnet = false
+        if let plan, plan.preferredEngine == .nnUNet {
+            if let entry = nnunet.selectBestEntry(for: plan) {
+                summary += "\nSelected nnU-Net model \(entry.displayName) (\(entry.datasetID))."
+                if entry.multiChannel {
+                    summary += "\nThis model needs multiple input channels; one-click inference is blocked until channel pairing is wired."
+                } else if nnunet.mode == .subprocess, !nnunet.isSubprocessAvailable {
+                    summary += "\nInstall nnunetv2 or point the nnU-Net panel at a CoreML package before running inference."
+                } else {
+                    kickOffNNUnet = true
+                }
+            } else if let entryID = plan.nnunetEntryID {
+                // The planner cited an entry id but the catalog couldn't resolve it.
+                summary += "\nRouted to nnU-Net \(entryID), but that entry is not in the local catalog — open the nnU-Net panel to pick a model manually."
             }
         }
+
         if report.didApplyActions || !report.warnings.isEmpty || provider == .local {
             messages.append(AssistantChatMessage(role: .assistant, text: summary))
+        }
+
+        // End-to-end execution: kick off the selected engine asynchronously.
+        // Skips if both are eligible to avoid running two models against the
+        // same volume in parallel; nnU-Net wins when it was explicitly routed.
+        if kickOffNNUnet {
+            runNNUnetFromAssistant()
+        } else if kickOffMONAI {
+            runMONAIFromAssistant()
         }
 
         guard provider != .local else { return }
@@ -206,6 +228,67 @@ struct AssistantPanel: View {
                     messages.append(AssistantChatMessage(role: .assistant, text: "CLI unavailable: \(error.localizedDescription)"))
                     isRunning = false
                 }
+            }
+        }
+    }
+
+    /// Kick off the nnU-Net runner selected by the RAG planner on the current
+    /// volume. Reports success / failure / unavailability back into the chat
+    /// transcript so the user has closure on what happened.
+    private func runNNUnetFromAssistant() {
+        guard let volume = vm.currentVolume else {
+            messages.append(AssistantChatMessage(
+                role: .assistant,
+                text: "No volume is loaded; cannot run nnU-Net."
+            ))
+            return
+        }
+        let entryName = nnunet.selectedEntry?.displayName ?? "nnU-Net model"
+        messages.append(AssistantChatMessage(
+            role: .assistant,
+            text: "Running \(entryName) on the current volume…"
+        ))
+        Task { @MainActor in
+            if let labelMap = await nnunet.run(on: volume, labeling: vm.labeling) {
+                messages.append(AssistantChatMessage(
+                    role: .assistant,
+                    text: "✓ \(entryName): \(labelMap.classes.count) classes produced. Open the Labels tab to edit."
+                ))
+            } else {
+                messages.append(AssistantChatMessage(
+                    role: .assistant,
+                    text: "nnU-Net didn't produce a label: \(nnunet.statusMessage)"
+                ))
+            }
+        }
+    }
+
+    /// Kick off the MONAI Label runner on the current volume. Mirrors
+    /// `runNNUnetFromAssistant` so both engines report outcomes the same way.
+    private func runMONAIFromAssistant() {
+        guard let volume = vm.currentVolume else {
+            messages.append(AssistantChatMessage(
+                role: .assistant,
+                text: "No volume is loaded; cannot run MONAI Label."
+            ))
+            return
+        }
+        let modelName = monai.selectedModel.isEmpty ? "MONAI Label model" : monai.selectedModel
+        messages.append(AssistantChatMessage(
+            role: .assistant,
+            text: "Running MONAI Label \(modelName) on the current volume…"
+        ))
+        Task { @MainActor in
+            if let labelMap = await monai.runInference(on: volume, in: vm.labeling) {
+                messages.append(AssistantChatMessage(
+                    role: .assistant,
+                    text: "✓ MONAI Label \(modelName): \(labelMap.classes.count) classes produced."
+                ))
+            } else {
+                messages.append(AssistantChatMessage(
+                    role: .assistant,
+                    text: "MONAI Label inference didn't return a mask: \(monai.statusMessage)"
+                ))
             }
         }
     }

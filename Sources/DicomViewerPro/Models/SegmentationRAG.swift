@@ -432,12 +432,33 @@ public enum SegmentationRAG {
                 if card.nnunetEntryID != nil, !card.labels.isEmpty {
                     score += 1
                 }
+                // Multi-channel models can be *routed to* but not executed
+                // (channel pairing isn't wired). Heavily down-weight them so
+                // they only win when the user types the dataset name outright.
+                let entryIsMulti = card.nnunetEntryID
+                    .flatMap(NNUnetCatalog.byID)?
+                    .multiChannel ?? false
+                if entryIsMulti {
+                    score -= 15
+                }
             } else if modelIntent {
                 score -= 2
             }
 
             if score > (best?.score ?? Int.min) {
                 best = (card, bestLabel, score, Array(NSOrderedSet(array: evidence)) as? [String] ?? evidence)
+            } else if let prev = best, score == prev.score {
+                // Tiebreaker: prefer the candidate with tighter modality /
+                // body-region affinity to the loaded volume and prompt text.
+                let candidateAffinity = tiebreakAffinity(
+                    card: card, currentModality: currentModality, text: text
+                )
+                let previousAffinity = tiebreakAffinity(
+                    card: prev.card, currentModality: currentModality, text: text
+                )
+                if candidateAffinity > previousAffinity {
+                    best = (card, bestLabel, score, Array(NSOrderedSet(array: evidence)) as? [String] ?? evidence)
+                }
             }
         }
 
@@ -663,6 +684,37 @@ public enum SegmentationRAG {
             && text.containsAny(["segment", "contour", "model", "label"])
 
         return strongIntent || diseaseIntent || organIntent
+    }
+
+    /// Small non-accumulating score used only to break ties between two
+    /// equal-scoring cards in `plan(...)`. Higher = better.
+    ///
+    /// - Modality match to the currently-loaded volume (e.g. CT → CT): +4
+    /// - nnU-Net entry's body-region keyword appears in the prompt (e.g.
+    ///   "abdomen"): +3
+    /// - Multi-channel nnU-Net entry (can't actually execute): -5
+    ///
+    /// Deliberately does **not** down-weight by label count — a generic
+    /// "segment the liver" prompt should still resolve to the whole-body
+    /// anatomy model, not a narrow tumor dataset, when the scores tie.
+    private static func tiebreakAffinity(card: SegmentationModelCard,
+                                         currentModality: Modality?,
+                                         text: String) -> Int {
+        var score = 0
+        if let currentModality, currentModality != .OT,
+           card.modalities.contains(currentModality) {
+            score += 4
+        }
+        if let entry = card.nnunetEntryID.flatMap(NNUnetCatalog.byID) {
+            let region = entry.bodyRegion.lowercased()
+            if !region.isEmpty, text.contains(region) {
+                score += 3
+            }
+            if entry.multiChannel {
+                score -= 5
+            }
+        }
+        return score
     }
 
     private static func modalityTextScore(text: String,

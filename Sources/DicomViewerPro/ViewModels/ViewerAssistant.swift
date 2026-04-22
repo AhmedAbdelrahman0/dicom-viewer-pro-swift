@@ -266,7 +266,8 @@ public extension ViewerViewModel {
                                       warnings: inout [String],
                                       defaultPreset presetName: String? = nil,
                                       centerOnExistingMask: Bool = true,
-                                      createIfMissing: Bool = false) {
+                                      createIfMissing: Bool = false,
+                                      categoryHint: LabelCategory? = nil) {
         let presetName = presetName ?? defaultPresetForCurrentVolume(labelName: labelName)
         guard let map = ensureLabelMapForAssistant(defaultPreset: presetName,
                                                    warnings: &warnings) else {
@@ -282,17 +283,24 @@ public extension ViewerViewModel {
         guard let cls = map.classes.first(where: { classMatches($0.name, labelName) }) else {
             if createIfMissing {
                 let labelID = nextAssistantLabelID(in: map)
+                // Prefer the category the planner/preset knows, then fall back
+                // to a heuristic on the label name. This keeps synthetic
+                // classes (e.g. "liver_tumor") filed under .tumor instead of
+                // drifting into .custom the way the heuristic alone would.
+                let category = categoryHint
+                    ?? preferredCategory(for: labelName, presetName: presetName)
+                    ?? inferredCategory(for: labelName)
                 let cls = LabelClass(
                     labelID: labelID,
                     name: labelName,
-                    category: inferredCategory(for: labelName),
+                    category: category,
                     color: assistantLabelColor(index: Int(labelID))
                 )
                 map.classes.append(cls)
                 labeling.activeClassID = cls.labelID
                 map.visible = true
                 map.objectWillChange.send()
-                applied.append("Added and selected label class \(cls.name).")
+                applied.append("Added and selected label class \(cls.name) (\(category.rawValue)).")
                 return
             }
             warnings.append("No label class matched \(labelName).")
@@ -327,13 +335,22 @@ public extension ViewerViewModel {
         }
 
         if ensureLabelMapForAssistant(defaultPreset: plan.presetName, warnings: &warnings) != nil {
+            // Pull the intended category directly from the preset the planner
+            // selected — this avoids the heuristic fallback creating
+            // e.g. `.custom` for "pancreatic lesion" when the preset knows it's
+            // a `.lesion` / `.tumor`.
+            let categoryHint = LabelPresets.byName(plan.presetName)?
+                .classes
+                .first(where: { classMatches($0.name, plan.labelName) })?
+                .category
             selectAssistantLabel(
                 plan.labelName,
                 applied: &applied,
                 warnings: &warnings,
                 defaultPreset: plan.presetName,
                 centerOnExistingMask: false,
-                createIfMissing: true
+                createIfMissing: true,
+                categoryHint: categoryHint
             )
             activeTool = .wl
             labeling.labelingTool = plan.tool
@@ -343,6 +360,16 @@ public extension ViewerViewModel {
                 warnings.append("Segmentation RAG confidence is modest; verify the label/model before batch work.")
             }
         }
+    }
+
+    /// Best-effort category lookup: ask the named preset whether any of its
+    /// classes matches `labelName`; if so, return that class's category.
+    /// Returns `nil` when the preset doesn't recognise the label so the
+    /// caller can fall through to the heuristic.
+    private func preferredCategory(for labelName: String,
+                                   presetName: String) -> LabelCategory? {
+        guard let preset = LabelPresets.byName(presetName) else { return nil }
+        return preset.classes.first(where: { classMatches($0.name, labelName) })?.category
     }
 
     private func classMatches(_ className: String, _ query: String) -> Bool {
@@ -361,7 +388,15 @@ public extension ViewerViewModel {
     }
 
     private func nextAssistantLabelID(in map: LabelMap) -> UInt16 {
+        // Optimistic O(n): the next id is almost always max-used + 1 when the
+        // label set grows monotonically. Fall back to a linear scan only when
+        // the dense range is saturated (extremely rare — >65k classes).
         let used = Set(map.classes.map(\.labelID))
+        let maxUsed = used.max() ?? 0
+        if maxUsed < UInt16.max {
+            let candidate = maxUsed &+ 1
+            if !used.contains(candidate) { return candidate }
+        }
         for id in UInt16(1)..<UInt16.max where !used.contains(id) {
             return id
         }

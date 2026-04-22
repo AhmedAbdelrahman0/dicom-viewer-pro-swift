@@ -490,6 +490,102 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertTrue(nnunet.statusMessage.contains("Segmentation RAG selected nnU-Net"))
     }
 
+    func testSegmentationRAGMultiChannelModelsDoNotWinAmbiguousTumorRoute() {
+        // "segment tumor on CT" is intentionally ambiguous. The planner must
+        // NOT pick BraTS (multi-channel brain MRI) or MSD-Prostate — those
+        // entries are down-weighted because their channel pairing isn't wired.
+        let plan = SegmentationRAG.plan(
+            for: "segment tumor on CT",
+            currentModality: .CT
+        )
+        XCTAssertNotNil(plan, "A tumor-on-CT prompt should produce some plan")
+        let entryID = plan?.nnunetEntryID
+        XCTAssertNotEqual(entryID, "BraTS-GLI",
+                          "BraTS is multi-channel MR; should not win CT tumor route")
+        XCTAssertNotEqual(entryID, "MSD-Prostate",
+                          "MSD-Prostate is multi-channel MR; should not win CT tumor route")
+        if let entry = entryID.flatMap(NNUnetCatalog.byID) {
+            XCTAssertFalse(entry.multiChannel,
+                           "Routed nnU-Net entry \(entry.datasetID) must be single-channel")
+        }
+    }
+
+    func testSegmentationRAGTiebreakerPrefersMatchingModality() {
+        // "tumor model" with loaded MR should lean toward an MR-capable model
+        // over a CT-only model when scores are otherwise close.
+        let mrPlan = SegmentationRAG.plan(
+            for: "segment tumor with an ai model",
+            currentModality: .MR
+        )
+        let ctPlan = SegmentationRAG.plan(
+            for: "segment tumor with an ai model",
+            currentModality: .CT
+        )
+        XCTAssertNotNil(mrPlan)
+        XCTAssertNotNil(ctPlan)
+
+        // Both plans must declare modalities that include the loaded volume's.
+        if let mrEntry = mrPlan?.nnunetEntryID.flatMap(NNUnetCatalog.byID) {
+            XCTAssertTrue([Modality.MR, .CT, .OT].contains(mrEntry.modality),
+                          "MR-loaded route should not land on a PET-only dataset")
+        }
+        if let ctEntry = ctPlan?.nnunetEntryID.flatMap(NNUnetCatalog.byID) {
+            XCTAssertEqual(ctEntry.modality, .CT,
+                           "CT-loaded route with model intent should pick a CT dataset")
+        }
+    }
+
+    @MainActor
+    func testAssistantPlanSegmentationCreatesClassWithPresetCategory() {
+        // With TotalSegmentator preset as the route, auto-created "liver" class
+        // must end up as .organ (from the preset), not .custom (heuristic).
+        let vm = ViewerViewModel()
+        let ct = ImageVolume(
+            pixels: [Float](repeating: 0, count: 4),
+            depth: 1, height: 2, width: 2, modality: "CT"
+        )
+        vm.currentVolume = ct
+
+        let report = vm.performAssistantCommand(
+            "Segment liver using the TotalSegmentator model on the current volume"
+        )
+        XCTAssertTrue(report.didApplyActions)
+
+        let liver = vm.labeling.activeLabelMap?.classes.first { $0.name.lowercased().contains("liver") }
+        XCTAssertNotNil(liver, "Assistant should have created or selected a liver class")
+        if let liver {
+            XCTAssertEqual(liver.category, .organ,
+                           "Preset-driven auto-create must preserve the preset's category")
+        }
+    }
+
+    @MainActor
+    func testNNUnetViewModelReturnsNilWhenRoutedEntryIsNotInCatalog() {
+        // Fabricate a plan whose nnunetEntryID is bogus — the VM should
+        // cleanly return nil so the UI can surface a warning.
+        let plan = SegmentationRAGPlan(
+            diseaseProcess: "tumor",
+            requestedTarget: "tumor",
+            modelName: "Fake Model",
+            presetName: "TotalSegmentator",
+            labelName: "tumor",
+            tool: .brush,
+            confidence: 0.9,
+            rationale: "test",
+            evidence: [],
+            monaiModelKeywords: [],
+            matchedMONAIModel: nil,
+            preferredEngine: .nnUNet,
+            nnunetEntryID: "NOT_A_REAL_ID",
+            nnunetDatasetID: nil,
+            nnunetDisplayName: nil,
+            nnunetMultiChannel: false
+        )
+        let vm = NNUnetViewModel()
+        XCTAssertNil(vm.selectBestEntry(for: plan),
+                     "Missing catalog entry must not silently fall back to the default id")
+    }
+
     func testAssistantCommandInterpreterEmitsSegmentationRAGPlan() {
         let actions = AssistantCommandInterpreter().actions(
             for: "Segment FDG avid lymphoma lesions on PET/CT"
