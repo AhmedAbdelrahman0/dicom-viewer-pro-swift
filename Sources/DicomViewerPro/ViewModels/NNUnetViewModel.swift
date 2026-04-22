@@ -59,6 +59,17 @@ public final class NNUnetViewModel: ObservableObject {
         subprocessRunner.cancel()
     }
 
+    @discardableResult
+    public func selectBestEntry(for plan: SegmentationRAGPlan) -> NNUnetCatalog.Entry? {
+        guard let entryID = plan.nnunetEntryID,
+              let entry = NNUnetCatalog.byID(entryID) else {
+            return nil
+        }
+        selectedEntryID = entry.id
+        statusMessage = "Segmentation RAG selected nnU-Net \(entry.displayName)."
+        return entry
+    }
+
     // MARK: - Run
 
     /// Run inference on `volume` and install the result into `labeling`.
@@ -76,7 +87,8 @@ public final class NNUnetViewModel: ObservableObject {
             statusMessage = "Warning: model expects \(entry.modality.displayName), volume is \(vmModality.displayName). Running anyway."
         }
         if entry.multiChannel {
-            statusMessage = "Model \(entry.datasetID) expects multiple input channels; single-channel upload may fail."
+            statusMessage = "Model \(entry.datasetID) expects multiple input channels. Multi-series channel selection is not wired yet."
+            return nil
         }
 
         isRunning = true

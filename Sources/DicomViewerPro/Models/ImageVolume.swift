@@ -187,7 +187,7 @@ public final class ImageVolume: Identifiable, ObservableObject {
     }
 }
 
-public enum Modality: String, CaseIterable {
+public enum Modality: String, CaseIterable, Sendable {
     case CT, MR, PT, SEG, NM, US, CR, OT
 
     public var displayName: String {

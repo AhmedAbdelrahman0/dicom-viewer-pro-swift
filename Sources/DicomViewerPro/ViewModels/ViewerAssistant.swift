@@ -1,5 +1,6 @@
 import Foundation
 import ImageIO
+import SwiftUI
 import UniformTypeIdentifiers
 
 public struct AssistantCommandReport: Equatable {
@@ -264,7 +265,8 @@ public extension ViewerViewModel {
                                       applied: inout [String],
                                       warnings: inout [String],
                                       defaultPreset presetName: String? = nil,
-                                      centerOnExistingMask: Bool = true) {
+                                      centerOnExistingMask: Bool = true,
+                                      createIfMissing: Bool = false) {
         let presetName = presetName ?? defaultPresetForCurrentVolume(labelName: labelName)
         guard let map = ensureLabelMapForAssistant(defaultPreset: presetName,
                                                    warnings: &warnings) else {
@@ -278,6 +280,21 @@ public extension ViewerViewModel {
         }
 
         guard let cls = map.classes.first(where: { classMatches($0.name, labelName) }) else {
+            if createIfMissing {
+                let labelID = nextAssistantLabelID(in: map)
+                let cls = LabelClass(
+                    labelID: labelID,
+                    name: labelName,
+                    category: inferredCategory(for: labelName),
+                    color: assistantLabelColor(index: Int(labelID))
+                )
+                map.classes.append(cls)
+                labeling.activeClassID = cls.labelID
+                map.visible = true
+                map.objectWillChange.send()
+                applied.append("Added and selected label class \(cls.name).")
+                return
+            }
             warnings.append("No label class matched \(labelName).")
             return
         }
@@ -315,7 +332,8 @@ public extension ViewerViewModel {
                 applied: &applied,
                 warnings: &warnings,
                 defaultPreset: plan.presetName,
-                centerOnExistingMask: false
+                centerOnExistingMask: false,
+                createIfMissing: true
             )
             activeTool = .wl
             labeling.labelingTool = plan.tool
@@ -340,6 +358,40 @@ public extension ViewerViewModel {
             .replacingOccurrences(of: "/", with: " ")
             .split(separator: " ")
             .joined(separator: " ")
+    }
+
+    private func nextAssistantLabelID(in map: LabelMap) -> UInt16 {
+        let used = Set(map.classes.map(\.labelID))
+        for id in UInt16(1)..<UInt16.max where !used.contains(id) {
+            return id
+        }
+        return UInt16.max
+    }
+
+    private func inferredCategory(for labelName: String) -> LabelCategory {
+        let q = normalizeLabelText(labelName)
+        if q.contains("tumor") || q.contains("tumour") || q.contains("mass") || q.contains("cancer") {
+            return .tumor
+        }
+        if q.contains("lesion") || q.contains("metast") || q.contains("nodule") || q.contains("cyst") {
+            return .lesion
+        }
+        if q.contains("vessel") || q.contains("vein") || q.contains("artery") {
+            return .vessel
+        }
+        if q.contains("heart") || q.contains("atrium") || q.contains("ventricle") {
+            return .cardiac
+        }
+        return .custom
+    }
+
+    private func assistantLabelColor(index: Int) -> Color {
+        let palette: [(Int, Int, Int)] = [
+            (255, 80, 80), (255, 150, 40), (220, 90, 180), (140, 90, 220),
+            (70, 160, 240), (70, 210, 190), (120, 210, 90), (240, 220, 80)
+        ]
+        let (r, g, b) = palette[index % palette.count]
+        return Color(r: r, g: g, b: b)
     }
 
     private func defaultPresetForCurrentVolume(labelName: String) -> String {

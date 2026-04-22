@@ -451,6 +451,45 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(plan?.tool, .brush)
     }
 
+    func testSegmentationRAGSelectsNNUnetForPancreaticMass() {
+        let plan = SegmentationRAG.plan(
+            for: "Use the best model to segment a pancreatic mass on CT",
+            currentModality: .CT
+        )
+
+        XCTAssertEqual(plan?.preferredEngine, .nnUNet)
+        XCTAssertEqual(plan?.nnunetEntryID, "MSD-Pancreas")
+        XCTAssertEqual(plan?.nnunetDatasetID, "Dataset007_Pancreas")
+        XCTAssertEqual(plan?.presetName, "MSD Pancreas")
+        XCTAssertEqual(plan?.labelName, "pancreatic lesion")
+    }
+
+    func testSegmentationRAGSelectsNNUnetForLungNodule() {
+        let plan = SegmentationRAG.plan(
+            for: "Auto segment the lung nodule with an AI model",
+            currentModality: .CT
+        )
+
+        XCTAssertEqual(plan?.preferredEngine, .nnUNet)
+        XCTAssertEqual(plan?.nnunetEntryID, "MSD-Lung")
+        XCTAssertEqual(plan?.labelName, "lung nodule")
+    }
+
+    @MainActor
+    func testNNUnetViewModelSelectsRoutedEntryFromAssistantPlan() {
+        let plan = SegmentationRAG.plan(
+            for: "Use the best model to segment a pancreatic mass on CT",
+            currentModality: .CT
+        )
+        let nnunet = NNUnetViewModel()
+
+        let entry = plan.flatMap { nnunet.selectBestEntry(for: $0) }
+
+        XCTAssertEqual(entry?.id, "MSD-Pancreas")
+        XCTAssertEqual(nnunet.selectedEntryID, "MSD-Pancreas")
+        XCTAssertTrue(nnunet.statusMessage.contains("Segmentation RAG selected nnU-Net"))
+    }
+
     func testAssistantCommandInterpreterEmitsSegmentationRAGPlan() {
         let actions = AssistantCommandInterpreter().actions(
             for: "Segment FDG avid lymphoma lesions on PET/CT"

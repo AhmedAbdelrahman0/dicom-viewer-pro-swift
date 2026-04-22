@@ -3,6 +3,7 @@ import SwiftUI
 struct AssistantPanel: View {
     @EnvironmentObject var vm: ViewerViewModel
     @EnvironmentObject var monai: MONAILabelViewModel
+    @EnvironmentObject var nnunet: NNUnetViewModel
     @State private var provider: AssistantCLIProvider = .local
     @State private var draft: String = ""
     @State private var messages: [AssistantChatMessage] = [
@@ -158,6 +159,16 @@ struct AssistantPanel: View {
                 summary += "\nSelected MONAI Label model \(selectedModel)."
             } else if !availableMONAIModels.isEmpty {
                 summary += "\nNo connected MONAI model name matched this route; local labels/tool were prepared."
+            }
+        }
+        if let plan, let entry = nnunet.selectBestEntry(for: plan) {
+            summary += "\nSelected nnU-Net model \(entry.displayName) (\(entry.datasetID))."
+            if entry.multiChannel {
+                summary += "\nThis nnU-Net model needs multiple input channels, so it is selected but blocked from one-click inference until channel pairing is configured."
+            } else if nnunet.isSubprocessAvailable {
+                summary += "\nLocal nnU-Net runner is available; open the nnU-Net panel to run or review settings."
+            } else {
+                summary += "\nInstall nnunetv2 or point the nnU-Net panel at a CoreML package before running inference."
             }
         }
         if report.didApplyActions || !report.warnings.isEmpty || provider == .local {

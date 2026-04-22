@@ -156,7 +156,8 @@ Full multimodality labeling support with emphasis on PET/CT:
 - PET/CT oncology routes to AutoPET / PET focal uptake labels with SUV Gradient as the default refinement tool
 - Anatomy requests route to TotalSegmentator / ITK-SNAP-style label taxonomies
 - RT planning requests route to GTV/CTV/PTV/OAR label sets instead of generic tumor labels
-- ChatGPT CLI / Claude CLI prompts receive the same routing context, and a connected MONAI Label server automatically selects the closest available model name
+- nnU-Net catalog entries are part of the same retrieval layer, so prompts like "segment pancreatic mass on CT" select MSD Pancreas and "lung nodule" selects MSD Lung
+- ChatGPT CLI / Claude CLI prompts receive the same routing context, and connected MONAI Label / nnU-Net panels automatically select the closest available model
 
 ### Annotation File Formats
 - **DICOM Viewer Labels** (`.dvlabels`) — native package with label voxels, classes, annotations, landmarks, and geometry

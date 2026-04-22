@@ -1,5 +1,19 @@
 import Foundation
 
+public enum SegmentationExecutionEngine: String, Equatable, Hashable {
+    case localTools
+    case monaiLabel
+    case nnUNet
+
+    public var displayName: String {
+        switch self {
+        case .localTools: return "Local tools"
+        case .monaiLabel: return "MONAI Label"
+        case .nnUNet: return "nnU-Net"
+        }
+    }
+}
+
 public struct SegmentationLabelRoute: Equatable, Hashable {
     public let labelName: String
     public let aliases: [String]
@@ -19,6 +33,8 @@ public struct SegmentationModelCard: Identifiable, Equatable, Hashable {
     public let aliases: [String]
     public let labels: [SegmentationLabelRoute]
     public let monaiKeywords: [String]
+    public let preferredEngine: SegmentationExecutionEngine
+    public let nnunetEntryID: String?
     public let rationale: String
 
     public init(id: String,
@@ -29,6 +45,8 @@ public struct SegmentationModelCard: Identifiable, Equatable, Hashable {
                 aliases: [String],
                 labels: [SegmentationLabelRoute],
                 monaiKeywords: [String],
+                preferredEngine: SegmentationExecutionEngine = .localTools,
+                nnunetEntryID: String? = nil,
                 rationale: String) {
         self.id = id
         self.displayName = displayName
@@ -38,6 +56,8 @@ public struct SegmentationModelCard: Identifiable, Equatable, Hashable {
         self.aliases = aliases
         self.labels = labels
         self.monaiKeywords = monaiKeywords
+        self.preferredEngine = preferredEngine
+        self.nnunetEntryID = nnunetEntryID
         self.rationale = rationale
     }
 }
@@ -54,10 +74,16 @@ public struct SegmentationRAGPlan: Equatable {
     public let evidence: [String]
     public let monaiModelKeywords: [String]
     public let matchedMONAIModel: String?
+    public let preferredEngine: SegmentationExecutionEngine
+    public let nnunetEntryID: String?
+    public let nnunetDatasetID: String?
+    public let nnunetDisplayName: String?
+    public let nnunetMultiChannel: Bool
 
     public var summary: String {
         var parts = [
             "Model route: \(modelName)",
+            "Engine: \(preferredEngine.displayName)",
             "Preset: \(presetName)",
             "Label: \(labelName)",
             "Tool: \(tool.displayName)",
@@ -65,6 +91,9 @@ public struct SegmentationRAGPlan: Equatable {
         ]
         if let matchedMONAIModel {
             parts.append("MONAI model: \(matchedMONAIModel)")
+        }
+        if let nnunetDatasetID {
+            parts.append("nnU-Net: \(nnunetDatasetID)")
         }
         return parts.joined(separator: " | ")
     }
@@ -313,6 +342,30 @@ public enum SegmentationRAG {
         )
     ]
 
+    public static var allModelCards: [SegmentationModelCard] {
+        modelCards + nnunetModelCards
+    }
+
+    public static var nnunetModelCards: [SegmentationModelCard] {
+        NNUnetCatalog.all.map { entry in
+            let labels = labelRoutes(for: entry)
+            let aliases = nnunetAliases(for: entry, labels: labels)
+            return SegmentationModelCard(
+                id: "nnunet-\(entry.id)",
+                displayName: "nnU-Net · \(entry.displayName)",
+                presetName: localPresetName(for: entry),
+                modalities: [entry.modality],
+                preferredTool: entry.multiChannel ? .brush : .regionGrow,
+                aliases: aliases,
+                labels: labels,
+                monaiKeywords: aliases,
+                preferredEngine: .nnUNet,
+                nnunetEntryID: entry.id,
+                rationale: "Use the executable nnU-Net \(entry.datasetID) model when the request matches \(entry.bodyRegion.lowercased()) \(entry.modality.displayName) labels."
+            )
+        }
+    }
+
     public static func plan(for prompt: String,
                             currentModality: Modality? = nil,
                             availableMONAIModels: [String] = []) -> SegmentationRAGPlan? {
@@ -320,8 +373,11 @@ public enum SegmentationRAG {
         guard hasSegmentationRoutingIntent(text) else { return nil }
 
         var best: (card: SegmentationModelCard, label: SegmentationLabelRoute, score: Int, evidence: [String])?
+        let modelIntent = text.containsAny(["nnunet", "nn u net", "deep learning", "ai model", "model", "inference", "auto segment", "auto-segment", "run segmentation", "best model"])
+        let diseaseIntent = text.containsAny(["tumor", "tumour", "lesion", "mass", "nodule", "cancer", "metastasis", "metastases", "glioma", "hcc"])
+        let rtIntent = text.containsAny(["radiotherapy", "radiation therapy", "rtstruct", "rt structure", "gtv", "ctv", "ptv", "gross tumor volume", "clinical target", "planning target", "oar"])
 
-        for card in modelCards {
+        for card in allModelCards {
             var score = 0
             var evidence: [String] = []
 
@@ -358,6 +414,28 @@ public enum SegmentationRAG {
                 evidence.append("MONAI server model match")
             }
 
+            if card.id == "rt-standard-targets", rtIntent {
+                score += 12
+                evidence.append("RT contouring semantics")
+            }
+
+            if card.preferredEngine == .nnUNet {
+                if modelIntent {
+                    score += 7
+                    evidence.append("model request")
+                } else if !diseaseIntent {
+                    score -= 5
+                }
+                if rtIntent {
+                    score -= 8
+                }
+                if card.nnunetEntryID != nil, !card.labels.isEmpty {
+                    score += 1
+                }
+            } else if modelIntent {
+                score -= 2
+            }
+
             if score > (best?.score ?? Int.min) {
                 best = (card, bestLabel, score, Array(NSOrderedSet(array: evidence)) as? [String] ?? evidence)
             }
@@ -365,6 +443,7 @@ public enum SegmentationRAG {
 
         guard let best, best.score >= 6 else { return nil }
         let matchedMONAI = bestAvailableMONAIModel(for: best.card, availableModels: availableMONAIModels)
+        let nnunetEntry = best.card.nnunetEntryID.flatMap(NNUnetCatalog.byID)
         let confidence = min(0.98, max(0.35, 0.35 + Double(best.score) / 24.0))
 
         return SegmentationRAGPlan(
@@ -378,7 +457,12 @@ public enum SegmentationRAG {
             rationale: best.card.rationale,
             evidence: best.evidence,
             monaiModelKeywords: best.card.monaiKeywords,
-            matchedMONAIModel: matchedMONAI
+            matchedMONAIModel: matchedMONAI,
+            preferredEngine: best.card.preferredEngine,
+            nnunetEntryID: best.card.nnunetEntryID,
+            nnunetDatasetID: nnunetEntry?.datasetID,
+            nnunetDisplayName: nnunetEntry?.displayName,
+            nnunetMultiChannel: nnunetEntry?.multiChannel ?? false
         )
     }
 
@@ -394,14 +478,18 @@ public enum SegmentationRAG {
             if !plan.evidence.isEmpty {
                 lines.append("Matched terms: \(plan.evidence.joined(separator: ", "))")
             }
-            lines.append("Use this route for labels/model selection. Do not invent unavailable MONAI models.")
+            if let nnunetDatasetID = plan.nnunetDatasetID {
+                lines.append("Selected nnU-Net dataset: \(nnunetDatasetID). Multi-channel: \(plan.nnunetMultiChannel ? "yes" : "no").")
+            }
+            lines.append("Use this route for labels/model selection. Do not invent unavailable MONAI models or nnU-Net datasets.")
         } else {
             lines.append("No segmentation route was selected for this request.")
         }
         if !availableMONAIModels.isEmpty {
             lines.append("Available MONAI Label models: \(availableMONAIModels.sorted().joined(separator: ", "))")
         }
-        lines.append("Local model routes: \(modelCards.map { $0.displayName }.joined(separator: "; "))")
+        lines.append("Executable nnU-Net routes: \(NNUnetCatalog.all.map { "\($0.id)=\($0.datasetID)" }.joined(separator: "; "))")
+        lines.append("Local label routes: \(modelCards.map { $0.displayName }.joined(separator: "; "))")
         return lines.joined(separator: "\n")
     }
 
@@ -445,6 +533,111 @@ public enum SegmentationRAG {
 
     private static func route(_ labelName: String, _ aliases: [String]) -> SegmentationLabelRoute {
         SegmentationLabelRoute(labelName: labelName, aliases: aliases)
+    }
+
+    private static func labelRoutes(for entry: NNUnetCatalog.Entry) -> [SegmentationLabelRoute] {
+        entry.classes
+            .sorted { $0.key < $1.key }
+            .map { _, rawName in
+                let localName = localLabelName(for: rawName, entry: entry)
+                return route(localName, Array(NSOrderedSet(array: [
+                    rawName,
+                    humanized(rawName),
+                    localName,
+                    humanized(localName)
+                ] + labelAliases(for: rawName, entry: entry))) as? [String] ?? [rawName, localName])
+            }
+    }
+
+    private static func nnunetAliases(for entry: NNUnetCatalog.Entry,
+                                      labels: [SegmentationLabelRoute]) -> [String] {
+        var aliases = [
+            entry.id,
+            entry.datasetID,
+            entry.displayName,
+            entry.description,
+            entry.bodyRegion,
+            "nnunet",
+            "nn u net",
+            "nnU-Net",
+            "deep learning segmentation",
+            "ai segmentation model"
+        ]
+        aliases.append(contentsOf: entry.displayName.components(separatedBy: CharacterSet(charactersIn: "—()+")).map(humanized))
+        aliases.append(contentsOf: labels.flatMap { [$0.labelName] + $0.aliases })
+        aliases.append(contentsOf: entry.notes.components(separatedBy: CharacterSet(charactersIn: ".;,/()")).map(humanized))
+        return Array(NSOrderedSet(array: aliases.map(normalize).filter { !$0.isEmpty })) as? [String] ?? aliases
+    }
+
+    private static func localPresetName(for entry: NNUnetCatalog.Entry) -> String {
+        switch entry.id {
+        case "MSD-Liver": return "MSD Liver"
+        case "MSD-Pancreas": return "MSD Pancreas"
+        case "MSD-Lung": return "MSD Lung"
+        case "MSD-Prostate": return "MSD Prostate"
+        case "MSD-Heart": return "Cardiac Cine MRI"
+        case "MSD-Spleen", "TotalSegmentatorCT": return "TotalSegmentator"
+        case "AMOS22": return "AMOS"
+        case "BraTS-GLI": return "BraTS"
+        case "KiTS23": return "TotalSegmentator"
+        case "MSD-Colon", "MSD-HepaticVessel": return "Oncology (Clinical)"
+        default: return "Oncology (Clinical)"
+        }
+    }
+
+    private static func localLabelName(for rawName: String,
+                                       entry: NNUnetCatalog.Entry) -> String {
+        let name = normalize(rawName)
+        switch name {
+        case "liver tumor": return "liver tumor"
+        case "lung tumor": return "lung nodule"
+        case "pancreatic mass": return "pancreatic lesion"
+        case "colon cancer": return "Primary tumor"
+        case "edema": return "Edema (non-enhancing)"
+        case "non enhancing core": return "Non-enhancing tumor core"
+        case "enhancing tumor": return "Enhancing tumor"
+        case "left atrium": return "left_atrium"
+        case "peripheral zone": return "peripheral zone"
+        case "central gland": return "central gland"
+        case "prostate or uterus": return "prostate/uterus"
+        default:
+            return rawName
+        }
+    }
+
+    private static func labelAliases(for rawName: String,
+                                     entry: NNUnetCatalog.Entry) -> [String] {
+        let name = normalize(rawName)
+        var aliases: [String] = []
+        if name.contains("tumor") || name.contains("cancer") || name.contains("mass") {
+            aliases.append(contentsOf: ["tumor", "tumour", "mass", "lesion", "cancer", "malignancy"])
+        }
+        if name.contains("nodule") || entry.id == "MSD-Lung" {
+            aliases.append(contentsOf: ["lung nodule", "pulmonary nodule", "spn"])
+        }
+        if name.contains("liver") {
+            aliases.append(contentsOf: ["liver", "hepatic", "hcc", "hepatocellular"])
+        }
+        if name.contains("pancre") {
+            aliases.append(contentsOf: ["pancreas", "pancreatic", "pancreatic mass", "pancreatic lesion"])
+        }
+        if name.contains("kidney") || entry.id == "KiTS23" {
+            aliases.append(contentsOf: ["kidney", "renal", "renal mass", "kidney tumor", "kidney cyst"])
+        }
+        if name.contains("edema") {
+            aliases.append(contentsOf: ["edema", "oedema", "flair", "peritumoral edema"])
+        }
+        if entry.id == "BraTS-GLI" {
+            aliases.append(contentsOf: ["brats", "glioma", "glioblastoma", "brain tumor", "gbm"])
+        }
+        return aliases
+    }
+
+    private static func humanized(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func hasSegmentationRoutingIntent(_ text: String) -> Bool {

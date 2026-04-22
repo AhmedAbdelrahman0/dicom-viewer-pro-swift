@@ -198,6 +198,7 @@ public final class NNUnetRunner: @unchecked Sendable {
     public func runInference(volume: ImageVolume,
                              datasetID: String,
                              logSink: @escaping @Sendable (String) -> Void = { _ in }) async throws -> InferenceResult {
+        setCancelled(false)
         guard let binary = Self.locatePredictBinary(
             override: configuration.predictBinaryPath
         ) else {
@@ -303,13 +304,16 @@ public final class NNUnetRunner: @unchecked Sendable {
             stderrBuffer.append(chunk)
         }
 
-        processLock.lock()
-        guard !cancelled else {
-            processLock.unlock()
+        let canStart = withProcessLock {
+            if cancelled {
+                return false
+            }
+            activeProcess = proc
+            return true
+        }
+        guard canStart else {
             throw RunError.cancelled
         }
-        activeProcess = proc
-        processLock.unlock()
 
         do {
             try proc.run()
@@ -341,10 +345,11 @@ public final class NNUnetRunner: @unchecked Sendable {
         let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
         let stdoutStr = String(data: stdoutData, encoding: .utf8) ?? ""
 
-        processLock.lock()
-        let wasCancelled = cancelled
-        activeProcess = nil
-        processLock.unlock()
+        let wasCancelled = withProcessLock {
+            let value = cancelled
+            activeProcess = nil
+            return value
+        }
 
         if wasCancelled {
             throw RunError.cancelled
@@ -355,6 +360,18 @@ public final class NNUnetRunner: @unchecked Sendable {
             throw RunError.subprocessFailed(exitCode: exit, stderr: stderrBuffer.flush())
         }
         return (stdoutStr, stderrBuffer.flush())
+    }
+
+    private func setCancelled(_ value: Bool) {
+        processLock.lock()
+        cancelled = value
+        processLock.unlock()
+    }
+
+    private func withProcessLock<T>(_ body: () -> T) -> T {
+        processLock.lock()
+        defer { processLock.unlock() }
+        return body()
     }
 
     private func parseDatasetLabelNames(at url: URL) throws -> [Int: String] {
