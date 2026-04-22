@@ -78,6 +78,9 @@ public extension ViewerViewModel {
             case .selectLabel(let labelName):
                 selectAssistantLabel(labelName, applied: &applied, warnings: &warnings)
 
+            case .planSegmentation(let plan):
+                applySegmentationPlan(plan, applied: &applied, warnings: &warnings)
+
             case .centerSlices:
                 if let v = currentVolume {
                     sliceIndices = [v.width / 2, v.height / 2, v.depth / 2]
@@ -259,14 +262,17 @@ public extension ViewerViewModel {
 
     private func selectAssistantLabel(_ labelName: String,
                                       applied: inout [String],
-                                      warnings: inout [String]) {
-        guard let map = ensureLabelMapForAssistant(defaultPreset: defaultPresetForCurrentVolume(labelName: labelName),
+                                      warnings: inout [String],
+                                      defaultPreset presetName: String? = nil,
+                                      centerOnExistingMask: Bool = true) {
+        let presetName = presetName ?? defaultPresetForCurrentVolume(labelName: labelName)
+        guard let map = ensureLabelMapForAssistant(defaultPreset: presetName,
                                                    warnings: &warnings) else {
             return
         }
 
         if map.classes.isEmpty || !map.classes.contains(where: { classMatches($0.name, labelName) }) {
-            if let preset = LabelPresets.byName(defaultPresetForCurrentVolume(labelName: labelName)) {
+            if let preset = LabelPresets.byName(presetName) {
                 labeling.applyPreset(preset)
             }
         }
@@ -285,20 +291,60 @@ public extension ViewerViewModel {
             setSlice(axis: 1, index: (box.minY + box.maxY) / 2)
             setSlice(axis: 2, index: (box.minZ + box.maxZ) / 2)
             applied.append("Centered slices on the existing \(cls.name) mask.")
-        } else {
+        } else if centerOnExistingMask {
             warnings.append("\(cls.name) is selected, but it has no labeled voxels yet.")
         }
     }
 
+    private func applySegmentationPlan(_ plan: SegmentationRAGPlan,
+                                       applied: inout [String],
+                                       warnings: inout [String]) {
+        guard currentVolume != nil else {
+            warnings.append("Load a volume before applying a segmentation plan.")
+            return
+        }
+
+        guard LabelPresets.byName(plan.presetName) != nil else {
+            warnings.append("Segmentation RAG selected \(plan.presetName), but that preset is not installed.")
+            return
+        }
+
+        if ensureLabelMapForAssistant(defaultPreset: plan.presetName, warnings: &warnings) != nil {
+            selectAssistantLabel(
+                plan.labelName,
+                applied: &applied,
+                warnings: &warnings,
+                defaultPreset: plan.presetName,
+                centerOnExistingMask: false
+            )
+            activeTool = .wl
+            labeling.labelingTool = plan.tool
+            applied.append("Segmentation RAG selected \(plan.modelName): \(plan.labelName) using \(plan.tool.displayName).")
+            applied.append("Rationale: \(plan.rationale)")
+            if plan.confidence < 0.55 {
+                warnings.append("Segmentation RAG confidence is modest; verify the label/model before batch work.")
+            }
+        }
+    }
+
     private func classMatches(_ className: String, _ query: String) -> Bool {
-        let normalizedClass = className.lowercased().replacingOccurrences(of: "_", with: " ")
-        let normalizedQuery = query.lowercased().replacingOccurrences(of: "_", with: " ")
+        let normalizedClass = normalizeLabelText(className)
+        let normalizedQuery = normalizeLabelText(query)
         return normalizedClass.contains(normalizedQuery) || normalizedQuery.contains(normalizedClass)
+    }
+
+    private func normalizeLabelText(_ value: String) -> String {
+        value.lowercased()
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .replacingOccurrences(of: "/", with: " ")
+            .split(separator: " ")
+            .joined(separator: " ")
     }
 
     private func defaultPresetForCurrentVolume(labelName: String) -> String {
         let q = labelName.lowercased()
-        if q.contains("lesion") || q.contains("tumor") {
+        if q.contains("fdg") || q.contains("lesion") || q.contains("tumor") || q.contains("metast") {
             return Modality.normalize(currentVolume?.modality ?? "") == .PT ? "AutoPET" : "Oncology (Clinical)"
         }
         if q.contains("gtv") || q.contains("ctv") || q.contains("ptv") {

@@ -61,6 +61,7 @@ public struct ContentView: View {
             }
         }
         .environmentObject(vm)
+        .environmentObject(monai)
         .sheet(isPresented: $showMONAIPanel) {
             MONAILabelPanel(viewer: vm, monai: monai, labeling: vm.labeling)
                 .frame(minWidth: 420, minHeight: 560)

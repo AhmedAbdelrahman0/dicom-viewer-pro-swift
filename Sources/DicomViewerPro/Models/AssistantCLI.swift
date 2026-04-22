@@ -74,7 +74,8 @@ public struct AssistantCLIRunner {
 
         let fullPrompt = """
         You are a medical imaging workstation assistant. Be concise. Do not diagnose. \
-        Help the user operate the viewer, reason about display/segmentation workflow, and suggest safe next steps.
+        Help the user operate the viewer, reason about display/segmentation workflow, and suggest safe next steps. \
+        If the context includes a Segmentation RAG route, treat it as the app's local label/model routing decision.
 
         Viewer state:
         \(context)

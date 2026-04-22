@@ -416,6 +416,54 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertTrue(actions.contains(.setSUVInjectedDose(350)))
     }
 
+    func testSegmentationRAGSelectsAutoPETForFDGLymphoma() {
+        let plan = SegmentationRAG.plan(
+            for: "Segment FDG avid lymphoma lesions on PET/CT",
+            currentModality: .PT,
+            availableMONAIModels: ["whole_body_ct", "autopet_fdg_lesion"]
+        )
+
+        XCTAssertEqual(plan?.presetName, "AutoPET")
+        XCTAssertEqual(plan?.labelName, "FDG-avid lesion")
+        XCTAssertEqual(plan?.tool, .suvGradient)
+        XCTAssertEqual(plan?.matchedMONAIModel, "autopet_fdg_lesion")
+    }
+
+    func testSegmentationRAGSelectsAnatomyForSimpleLiverRequest() {
+        let plan = SegmentationRAG.plan(
+            for: "Segment the liver for cleanup",
+            currentModality: .CT
+        )
+
+        XCTAssertEqual(plan?.presetName, "TotalSegmentator")
+        XCTAssertEqual(plan?.labelName, "liver")
+        XCTAssertEqual(plan?.tool, .regionGrow)
+    }
+
+    func testSegmentationRAGSelectsRadiotherapyTargetLabels() {
+        let plan = SegmentationRAG.plan(
+            for: "Contour the gross tumor volume and nodal disease for radiotherapy",
+            currentModality: .CT
+        )
+
+        XCTAssertEqual(plan?.presetName, "RT Standard")
+        XCTAssertEqual(plan?.labelName, "GTV")
+        XCTAssertEqual(plan?.tool, .brush)
+    }
+
+    func testAssistantCommandInterpreterEmitsSegmentationRAGPlan() {
+        let actions = AssistantCommandInterpreter().actions(
+            for: "Segment FDG avid lymphoma lesions on PET/CT"
+        )
+        let plan = actions.compactMap { action -> SegmentationRAGPlan? in
+            if case .planSegmentation(let plan) = action { return plan }
+            return nil
+        }.first
+
+        XCTAssertEqual(plan?.presetName, "AutoPET")
+        XCTAssertEqual(plan?.labelName, "FDG-avid lesion")
+    }
+
     @MainActor
     func testAssistantCanUpdateSUVCalculationSettings() {
         let vm = ViewerViewModel()
@@ -429,6 +477,27 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(vm.suvSettings.patientWeightKg, 70, accuracy: 1e-9)
         XCTAssertEqual(vm.suvSettings.injectedDoseMBq, 350, accuracy: 1e-9)
         XCTAssertEqual(vm.suvValue(rawStoredValue: 5), 1.0, accuracy: 1e-9)
+    }
+
+    @MainActor
+    func testAssistantAppliesSegmentationRAGPlanToLabelingState() {
+        let vm = ViewerViewModel()
+        vm.currentVolume = ImageVolume(
+            pixels: [0],
+            depth: 1,
+            height: 1,
+            width: 1,
+            modality: "PT",
+            seriesDescription: "FDG PET"
+        )
+
+        let report = vm.performAssistantCommand("Segment FDG avid lymphoma lesions on PET/CT")
+
+        XCTAssertTrue(report.didApplyActions)
+        XCTAssertEqual(vm.labeling.activeLabelMap?.name, "AutoPET Labels")
+        XCTAssertEqual(vm.labeling.labelingTool, .suvGradient)
+        let selected = vm.labeling.activeLabelMap?.classInfo(id: vm.labeling.activeClassID)?.name
+        XCTAssertEqual(selected, "FDG-avid lesion")
     }
 
     func testSUVCalculationModesSupportClinicalInputs() {

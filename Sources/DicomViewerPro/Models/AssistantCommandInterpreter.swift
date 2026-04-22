@@ -8,6 +8,7 @@ public enum AssistantAction: Equatable {
     case createLabelMap(String?)
     case applyLabelPreset(String)
     case selectLabel(String)
+    case planSegmentation(SegmentationRAGPlan)
     case centerSlices
     case setSlice(axis: Int, index: Int)
     case setOverlayOpacity(Double)
@@ -180,18 +181,23 @@ public struct AssistantCommandInterpreter {
 
     private func segmentationActions(in text: String) -> [AssistantAction] {
         var actions: [AssistantAction] = []
+        let ragPlan = SegmentationRAG.plan(for: text)
+        if let ragPlan {
+            actions.append(.planSegmentation(ragPlan))
+        }
 
         if text.containsAny(["create label", "new label", "label map", "segmentation map", "new segmentation"]) {
             let preset = labelPresetName(in: text)
             actions.append(.createLabelMap(preset))
         }
 
-        if let preset = labelPresetName(in: text),
+        if ragPlan == nil,
+           let preset = labelPresetName(in: text),
            text.containsAny(["preset", "load", "apply", "organ", "anatomy", "segmentation", "segment"]) {
             actions.append(.applyLabelPreset(preset))
         }
 
-        if let target = labelTarget(in: text) {
+        if ragPlan == nil, let target = labelTarget(in: text) {
             actions.append(.selectLabel(target))
         }
 

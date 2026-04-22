@@ -2,6 +2,7 @@ import SwiftUI
 
 struct AssistantPanel: View {
     @EnvironmentObject var vm: ViewerViewModel
+    @EnvironmentObject var monai: MONAILabelViewModel
     @State private var provider: AssistantCLIProvider = .local
     @State private var draft: String = ""
     @State private var messages: [AssistantChatMessage] = [
@@ -98,6 +99,12 @@ struct AssistantPanel: View {
                 QuickCommandButton(title: "SUV 2.5", icon: "flame") {
                     submit("Threshold SUV 2.5")
                 }
+                QuickCommandButton(title: "PET Lesion", icon: "flame.fill") {
+                    submit("Segment FDG avid disease on PET/CT with the best lesion model")
+                }
+                QuickCommandButton(title: "RT GTV", icon: "scope") {
+                    submit("Contour gross tumor volume for radiotherapy")
+                }
                 QuickCommandButton(title: "Liver", icon: "target") {
                     submit("Select and view liver")
                 }
@@ -137,15 +144,37 @@ struct AssistantPanel: View {
         draft = ""
         messages.append(AssistantChatMessage(role: .user, text: request))
 
+        let currentModality = vm.currentVolume.map { Modality.normalize($0.modality) }
+        let availableMONAIModels = monai.info?.modelNames ?? []
+        let plan = SegmentationRAG.plan(
+            for: request,
+            currentModality: currentModality,
+            availableMONAIModels: availableMONAIModels
+        )
         let report = vm.performAssistantCommand(request)
+        var summary = report.summary
+        if let plan, monai.isConnected {
+            if let selectedModel = monai.selectBestModel(for: plan) {
+                summary += "\nSelected MONAI Label model \(selectedModel)."
+            } else if !availableMONAIModels.isEmpty {
+                summary += "\nNo connected MONAI model name matched this route; local labels/tool were prepared."
+            }
+        }
         if report.didApplyActions || !report.warnings.isEmpty || provider == .local {
-            messages.append(AssistantChatMessage(role: .assistant, text: report.summary))
+            messages.append(AssistantChatMessage(role: .assistant, text: summary))
         }
 
         guard provider != .local else { return }
 
         isRunning = true
-        let context = vm.assistantContextSummary
+        let context = [
+            vm.assistantContextSummary,
+            SegmentationRAG.assistantContext(
+                for: request,
+                currentModality: currentModality,
+                availableMONAIModels: availableMONAIModels
+            )
+        ].joined(separator: "\n\n")
         let imageURLs = vm.exportAssistantViewportSnapshots()
         let selectedProvider = provider
 

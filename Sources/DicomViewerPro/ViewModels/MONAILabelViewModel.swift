@@ -74,6 +74,19 @@ public final class MONAILabelViewModel: ObservableObject {
         statusMessage = "Disconnected."
     }
 
+    @discardableResult
+    public func selectBestModel(for plan: SegmentationRAGPlan) -> String? {
+        guard isConnected, let models = info?.modelNames, !models.isEmpty else {
+            return nil
+        }
+        guard let match = SegmentationRAG.bestAvailableMONAIModel(for: plan, availableModels: models) else {
+            return nil
+        }
+        selectedModel = match
+        statusMessage = "Segmentation RAG selected MONAI model \(match) for \(plan.labelName)."
+        return match
+    }
+
     // MARK: - Inference
 
     /// Upload `volume` to the MONAI Label server, run inference with the
