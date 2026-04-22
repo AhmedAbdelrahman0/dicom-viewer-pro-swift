@@ -2,7 +2,7 @@ import SwiftUI
 
 struct ControlsPanel: View {
     @EnvironmentObject var vm: ViewerViewModel
-    @State private var tab: Tab = .wl
+    @State private var tab: Tab = .assistant
 
     enum Tab: String, CaseIterable, Identifiable {
         case assistant = "AI"
@@ -44,7 +44,16 @@ struct ControlsPanel: View {
         }
         .navigationTitle("Controls")
         .environmentObject(vm)
+        .onReceive(NotificationCenter.default.publisher(for: .focusAssistantTab)) { _ in
+            tab = .assistant
+        }
     }
+}
+
+extension Notification.Name {
+    /// Posted when the user clicks the chatbot icon in the main toolbar —
+    /// `ControlsPanel` listens and switches its segmented picker to `.assistant`.
+    public static let focusAssistantTab = Notification.Name("DicomViewerPro.focusAssistantTab")
 }
 
 // MARK: - W/L Tab

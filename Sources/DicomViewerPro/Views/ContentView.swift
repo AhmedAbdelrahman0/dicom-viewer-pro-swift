@@ -137,6 +137,17 @@ public struct ContentView: View {
             .keyboardShortcut("r", modifiers: [.command])
 
             HoverIconButton(
+                systemImage: "bubble.left.and.bubble.right",
+                tooltip: "Assistant Chat\n"
+                       + "Open the AI assistant panel on the right.\n"
+                       + "Type natural-language commands like\n"
+                       + "“Show lungs”, “threshold SUV 2.5”, or\n"
+                       + "“create label map TotalSegmentator”."
+            ) {
+                NotificationCenter.default.post(name: .focusAssistantTab, object: nil)
+            }
+
+            HoverIconButton(
                 systemImage: "brain.head.profile",
                 tooltip: "MONAI Label\n"
                        + "Open the AI-assisted labeling panel.\n"
