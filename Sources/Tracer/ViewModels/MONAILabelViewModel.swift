@@ -29,6 +29,14 @@ public final class MONAILabelViewModel: ObservableObject {
 
     public init(client: MONAILabelClient = MONAILabelClient()) {
         self.client = client
+        // Pull the Settings-configured default URL when present. Keeps the
+        // hardcoded localhost fallback for first-run users who haven't
+        // touched preferences yet.
+        if let stored = UserDefaults.standard.string(
+            forKey: "Tracer.Prefs.MONAI.DefaultURL"
+        ), !stored.isEmpty {
+            self.serverURL = stored
+        }
     }
 
     // MARK: - Connection

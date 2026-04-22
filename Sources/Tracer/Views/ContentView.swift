@@ -7,6 +7,9 @@ import AppKit
 
 public struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
+    #if canImport(UIKit)
+    @Environment(\.horizontalSizeClass) private var hSizeClass
+    #endif
     @StateObject private var vm = ViewerViewModel()
     @StateObject private var monai = MONAILabelViewModel()
     @StateObject private var nnunet = NNUnetViewModel()
@@ -23,6 +26,19 @@ public struct ContentView: View {
     /// Persists across launches via `@AppStorage`.
     @AppStorage("focusModeEnabled") private var focusModeEnabled = false
     @State private var browserVisibility: NavigationSplitViewVisibility = .all
+
+    // User-rebindable W/L preset names for ⌘1 / ⌘2 / ⌘3. Defaults are set
+    // to match most radiologists' muscle memory (Lung / Bone / Brain)
+    // but every value is pickable from the Settings window.
+    #if os(macOS)
+    @AppStorage(TracerSettings.Keys.wlShortcut1) private var wlShortcut1: String = "Lung"
+    @AppStorage(TracerSettings.Keys.wlShortcut2) private var wlShortcut2: String = "Bone"
+    @AppStorage(TracerSettings.Keys.wlShortcut3) private var wlShortcut3: String = "Brain"
+    #else
+    private let wlShortcut1 = "Lung"
+    private let wlShortcut2 = "Bone"
+    private let wlShortcut3 = "Brain"
+    #endif
 
     enum FileImporterMode { case volume, overlay }
     enum DirectoryImporterMode { case open, index }
@@ -72,31 +88,38 @@ public struct ContentView: View {
         .environmentObject(vm)
         .environmentObject(monai)
         .environmentObject(nnunet)
-        // Engine panels open as right-side inspector drawers (macOS 14+ /
-        // iPadOS 17+) instead of modal sheets. This keeps the MPR viewport
-        // visible while a model runs so the radiologist can tweak W/L or
-        // scroll slices without closing the panel.
-        //
-        // Only one inspector is visible at a time; the `.inspector` modifier
-        // doesn't stack, so we gate each on its own `showXPanel` flag and
-        // make the toolbar buttons mutually exclusive when opening.
-        .inspector(isPresented: $showMONAIPanel) {
+        // Engine panels open as right-side inspector drawers on regular-
+        // width windows (macOS / iPad in landscape). In `.compact` widths
+        // (iPad portrait, narrow windows) we fall back to `.sheet` since
+        // an inspector drawer eats too much of the viewport. Only one is
+        // ever visible at a time — the AI Engines menu calls
+        // `showInspector(_:)` which closes the others first.
+        .engineInspector(
+            isCompact: useCompactEnginePresentation,
+            isPresented: $showMONAIPanel,
+            inspectorWidth: (min: 360, ideal: 440, max: 560)
+        ) {
             MONAILabelPanel(viewer: vm, monai: monai, labeling: vm.labeling)
-                .inspectorColumnWidth(min: 360, ideal: 440, max: 560)
                 .overlay(alignment: .topTrailing) {
                     closeInspectorButton { showMONAIPanel = false }
                 }
         }
-        .inspector(isPresented: $showNNUnetPanel) {
+        .engineInspector(
+            isCompact: useCompactEnginePresentation,
+            isPresented: $showNNUnetPanel,
+            inspectorWidth: (min: 400, ideal: 480, max: 640)
+        ) {
             NNUnetPanel(viewer: vm, nnunet: nnunet, labeling: vm.labeling)
-                .inspectorColumnWidth(min: 400, ideal: 480, max: 640)
                 .overlay(alignment: .topTrailing) {
                     closeInspectorButton { showNNUnetPanel = false }
                 }
         }
-        .inspector(isPresented: $showPETEnginePanel) {
+        .engineInspector(
+            isCompact: useCompactEnginePresentation,
+            isPresented: $showPETEnginePanel,
+            inspectorWidth: (min: 440, ideal: 500, max: 640)
+        ) {
             PETEnginePanel(viewer: vm, nnunet: nnunet, pet: pet, labeling: vm.labeling)
-                .inspectorColumnWidth(min: 440, ideal: 500, max: 640)
                 .overlay(alignment: .topTrailing) {
                     closeInspectorButton { showPETEnginePanel = false }
                 }
@@ -172,14 +195,21 @@ public struct ContentView: View {
 
             // Invisible buttons that own the global W/L shortcuts. Kept off-
             // screen so they participate in the shortcut graph without
-            // crowding the visible toolbar.
+            // crowding the visible toolbar. The preset names are read from
+            // Settings (`@AppStorage`) so users can rebind ⌘1 / ⌘2 / ⌘3.
             Group {
-                Button("Lung W/L") { vm.applyPresetNamed("Lung") }
-                    .keyboardShortcut("1", modifiers: [.command])
-                Button("Bone W/L") { vm.applyPresetNamed("Bone") }
-                    .keyboardShortcut("2", modifiers: [.command])
-                Button("Brain W/L") { vm.applyPresetNamed("Brain") }
-                    .keyboardShortcut("3", modifiers: [.command])
+                Button("W/L Slot 1 (\(wlShortcut1))") {
+                    vm.applyPresetNamed(wlShortcut1)
+                }
+                .keyboardShortcut("1", modifiers: [.command])
+                Button("W/L Slot 2 (\(wlShortcut2))") {
+                    vm.applyPresetNamed(wlShortcut2)
+                }
+                .keyboardShortcut("2", modifiers: [.command])
+                Button("W/L Slot 3 (\(wlShortcut3))") {
+                    vm.applyPresetNamed(wlShortcut3)
+                }
+                .keyboardShortcut("3", modifiers: [.command])
                 Button("Auto W/L") { vm.autoWLHistogram(preset: .balanced) }
                     .keyboardShortcut("4", modifiers: [.command])
             }
@@ -326,6 +356,18 @@ public struct ContentView: View {
     }
 
     // MARK: - File handlers
+
+    /// Should engine panels render as `.sheet` (compact) or `.inspector`
+    /// (regular)? On macOS we always have the room for an inspector; on
+    /// iPad we fall back to a sheet when the horizontal size class is
+    /// compact (portrait or split view) so the viewport isn't crushed.
+    private var useCompactEnginePresentation: Bool {
+        #if canImport(UIKit)
+        return hSizeClass == .compact
+        #else
+        return false
+        #endif
+    }
 
     /// Toggle focus mode. In focus mode both the browser and the controls
     /// panel slide out of the way; the center viewport gets the full window.
@@ -550,5 +592,38 @@ struct MPRLayoutView: View {
             }
         }
         .background(Color.black)
+    }
+}
+
+// MARK: - Compact-aware engine presentation
+
+private extension View {
+    /// Routes an engine panel to `.inspector` on regular-width devices and
+    /// to `.sheet` on compact widths (iPad portrait / narrow splits). One
+    /// call site per engine keeps ContentView's body small while still
+    /// giving each engine its own presentation flag.
+    @ViewBuilder
+    func engineInspector<Body: View>(
+        isCompact: Bool,
+        isPresented: Binding<Bool>,
+        inspectorWidth: (min: CGFloat, ideal: CGFloat, max: CGFloat),
+        @ViewBuilder content: @escaping () -> Body
+    ) -> some View {
+        if isCompact {
+            self.sheet(isPresented: isPresented) {
+                content()
+                    .frame(minWidth: inspectorWidth.min,
+                           minHeight: 560)
+            }
+        } else {
+            self.inspector(isPresented: isPresented) {
+                content()
+                    .inspectorColumnWidth(
+                        min: inspectorWidth.min,
+                        ideal: inspectorWidth.ideal,
+                        max: inspectorWidth.max
+                    )
+            }
+        }
     }
 }

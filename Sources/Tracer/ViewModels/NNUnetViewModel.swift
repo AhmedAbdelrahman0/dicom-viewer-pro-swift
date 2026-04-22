@@ -49,7 +49,19 @@ public final class NNUnetViewModel: ObservableObject {
     private let subprocessRunner = NNUnetRunner()
     private let coreMLRunner = NNUnetCoreMLRunner()
 
-    public init() {}
+    public init() {
+        // Adopt Settings defaults for the binary path and the $nnUNet_results
+        // directory. These can still be overridden in the panel per-session.
+        let defaults = UserDefaults.standard
+        if let bin = defaults.string(forKey: "Tracer.Prefs.NNUnet.Binary"),
+           !bin.isEmpty {
+            self.customBinaryPath = bin
+        }
+        if let results = defaults.string(forKey: "Tracer.Prefs.NNUnet.Results"),
+           !results.isEmpty {
+            self.resultsDirPath = results
+        }
+    }
 
     public var selectedEntry: NNUnetCatalog.Entry? {
         NNUnetCatalog.byID(selectedEntryID)

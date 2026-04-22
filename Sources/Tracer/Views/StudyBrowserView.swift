@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import UniformTypeIdentifiers
 
 private enum StudyBrowserMode: String, CaseIterable, Identifiable {
     case worklist
@@ -41,6 +42,7 @@ struct StudyBrowserView: View {
     @State private var dateFilter: WorklistDateFilter = .all
     @State private var studyStatuses: [String: WorklistStudyStatus] = [:]
     @State private var expandedStudyIDs: Set<String> = []
+    @State private var isDropTargeted: Bool = false
 
     private let indexPageSize = 5_000
     private let statusDefaultsKey = "Tracer.WorklistStudyStatuses"
@@ -77,6 +79,88 @@ struct StudyBrowserView: View {
         .onChange(of: vm.indexRevision) { _, _ in
             reloadIndexResults()
         }
+        // Accept DICOM files / directories / NIfTI files dropped from Finder.
+        // `UTType.fileURL` matches anything dragged off the filesystem; the
+        // dispatcher below sorts volumes vs directories vs overlays.
+        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
+            handleDrop(providers: providers)
+        }
+        .overlay {
+            if isDropTargeted {
+                dropHighlightOverlay
+            }
+        }
+    }
+
+    private var dropHighlightOverlay: some View {
+        RoundedRectangle(cornerRadius: 12)
+            .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 2, dash: [6]))
+            .background(Color.accentColor.opacity(0.08))
+            .padding(6)
+            .overlay(
+                VStack(spacing: 4) {
+                    Image(systemName: "tray.and.arrow.down.fill")
+                        .font(.system(size: 28))
+                    Text("Drop DICOM folder or NIfTI file")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .foregroundColor(.accentColor)
+            )
+            .allowsHitTesting(false)
+            .transition(.opacity)
+    }
+
+    // MARK: - Drag and drop dispatcher
+
+    /// Route one or more drag-and-drop providers to the right loader based
+    /// on the URL's extension.  A folder is treated as a DICOM directory;
+    /// `.nii` / `.nii.gz` is treated as a NIfTI volume; `.dcm` / `.IMA`
+    /// are opened via their parent directory (nnU-Net / loader scans the
+    /// whole series).  Anything else is skipped with a status message.
+    private func handleDrop(providers: [NSItemProvider]) -> Bool {
+        guard let provider = providers.first else { return false }
+        _ = provider.loadObject(ofClass: URL.self) { url, _ in
+            guard let url else { return }
+            let resolved = url
+            Task { @MainActor in
+                await dispatchDroppedURL(resolved)
+            }
+        }
+        return true
+    }
+
+    @MainActor
+    private func dispatchDroppedURL(_ url: URL) async {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
+            vm.statusMessage = "Dropped item no longer exists at \(url.path)."
+            return
+        }
+
+        let lowercased = url.lastPathComponent.lowercased()
+
+        if isDirectory.boolValue {
+            // Directory — DICOM series or a folder to index.
+            await vm.loadDICOMDirectory(url: url)
+            return
+        }
+
+        if NIfTILoader.isVolumeFile(url)
+            || lowercased.hasSuffix(".nii")
+            || lowercased.hasSuffix(".nii.gz") {
+            await vm.loadNIfTI(url: url)
+            return
+        }
+
+        if lowercased.hasSuffix(".dcm")
+            || lowercased.hasSuffix(".ima")
+            || lowercased.hasSuffix(".dicom") {
+            // Single DICOM file dropped — load its parent folder as a series.
+            await vm.loadDICOMDirectory(url: url.deletingLastPathComponent())
+            return
+        }
+
+        vm.statusMessage = "Unsupported dropped file: \(url.lastPathComponent)"
     }
 
     // MARK: - Recent volumes strip

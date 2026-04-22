@@ -1819,6 +1819,43 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(after.filter { $0.id == "v5" }.count, 1, "no duplicates")
     }
 
+    // MARK: - Settings
+
+    #if os(macOS)
+    func testTracerSettingsWLPresetsContainsAllModalityPresets() {
+        let names = Set(TracerSettings.wlPresetNames)
+        // Spot-check a preset from each modality to prove the union was built.
+        XCTAssertTrue(names.contains("Lung"),
+                      "CT lung preset must surface in the settings picker")
+        XCTAssertTrue(names.contains("FLAIR"),
+                      "MR FLAIR preset must surface in the settings picker")
+        XCTAssertTrue(names.contains("Standard"),
+                      "PET standard preset must surface in the settings picker")
+        // De-duplicated: "Brain" appears in both CT and MR lists; should be one entry.
+        XCTAssertEqual(names.filter { $0 == "Brain" }.count, 1,
+                       "Duplicate preset names should be collapsed in the Settings list")
+    }
+
+    func testTracerSettingsKeysAreDisjointFromOtherAppStorageKeys() {
+        let keys: Set<String> = [
+            TracerSettings.Keys.wlShortcut1,
+            TracerSettings.Keys.wlShortcut2,
+            TracerSettings.Keys.wlShortcut3,
+            TracerSettings.Keys.defaultMONAIURL,
+            TracerSettings.Keys.defaultNNUnetBinary,
+            TracerSettings.Keys.defaultNNUnetResults
+        ]
+        // All settings keys must be prefixed with "Tracer.Prefs." so they
+        // never collide with runtime state like recents or focus mode.
+        for key in keys {
+            XCTAssertTrue(key.hasPrefix("Tracer.Prefs."),
+                          "Settings key \(key) must live under Tracer.Prefs.* namespace")
+        }
+        // And the runtime-state keys live under a different prefix.
+        XCTAssertFalse(RecentVolumesStore.defaultsKey.hasPrefix("Tracer.Prefs."))
+    }
+    #endif
+
     // MARK: - Named W/L preset shortcuts
 
     @MainActor
