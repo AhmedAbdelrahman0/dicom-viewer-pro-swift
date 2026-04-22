@@ -55,6 +55,29 @@ public final class NNUnetViewModel: ObservableObject {
         ) != nil
     }
 
+    public var coreMLReadinessMessage: String? {
+        let trimmed = coreMLModelPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return "Point the CoreML path at a .mlpackage or .mlmodelc first."
+        }
+
+        let url = URL(fileURLWithPath: (trimmed as NSString).expandingTildeInPath)
+        let allowedExtensions: Set<String> = ["mlpackage", "mlmodelc"]
+        guard allowedExtensions.contains(url.pathExtension.lowercased()) else {
+            return "CoreML model path must end in .mlpackage or .mlmodelc."
+        }
+
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
+            return "CoreML model package not found at \(url.path)."
+        }
+        guard isDirectory.boolValue else {
+            return "CoreML model path must point to a package directory."
+        }
+
+        return nil
+    }
+
     public func cancel() {
         subprocessRunner.cancel()
     }
@@ -160,9 +183,9 @@ public final class NNUnetViewModel: ObservableObject {
                            volume: ImageVolume,
                            labeling: LabelingViewModel,
                            start: Date) async -> LabelMap? {
-        let trimmed = coreMLModelPath.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else {
-            statusMessage = "Point the CoreML path at a .mlpackage first."
+        let trimmed = coreMLModelPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let readinessMessage = coreMLReadinessMessage {
+            statusMessage = readinessMessage
             return nil
         }
         let url = URL(fileURLWithPath: (trimmed as NSString).expandingTildeInPath)

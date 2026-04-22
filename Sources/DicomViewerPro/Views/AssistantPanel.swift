@@ -9,9 +9,10 @@ struct AssistantPanel: View {
     @State private var messages: [AssistantChatMessage] = [
         AssistantChatMessage(role: .assistant, text: "Ready for workstation commands.")
     ]
-    @State private var isRunning = false
+    @State private var activeAssistantTasks = 0
 
     private let runner = AssistantCLIRunner()
+    private var isRunning: Bool { activeAssistantTasks > 0 }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -175,6 +176,9 @@ struct AssistantPanel: View {
                     summary += "\nThis model needs multiple input channels; one-click inference is blocked until channel pairing is wired."
                 } else if nnunet.mode == .subprocess, !nnunet.isSubprocessAvailable {
                     summary += "\nInstall nnunetv2 or point the nnU-Net panel at a CoreML package before running inference."
+                } else if nnunet.mode == .coreML, let readinessMessage = nnunet.coreMLReadinessMessage {
+                    nnunet.statusMessage = readinessMessage
+                    summary += "\n\(readinessMessage)"
                 } else {
                     kickOffNNUnet = true
                 }
@@ -199,7 +203,7 @@ struct AssistantPanel: View {
 
         guard provider != .local else { return }
 
-        isRunning = true
+        beginAssistantTask()
         let context = [
             vm.assistantContextSummary,
             SegmentationRAG.assistantContext(
@@ -221,15 +225,23 @@ struct AssistantPanel: View {
                 )
                 await MainActor.run {
                     messages.append(AssistantChatMessage(role: .assistant, text: reply))
-                    isRunning = false
+                    finishAssistantTask()
                 }
             } catch {
                 await MainActor.run {
                     messages.append(AssistantChatMessage(role: .assistant, text: "CLI unavailable: \(error.localizedDescription)"))
-                    isRunning = false
+                    finishAssistantTask()
                 }
             }
         }
+    }
+
+    private func beginAssistantTask() {
+        activeAssistantTasks += 1
+    }
+
+    private func finishAssistantTask() {
+        activeAssistantTasks = max(0, activeAssistantTasks - 1)
     }
 
     /// Kick off the nnU-Net runner selected by the RAG planner on the current
@@ -248,7 +260,9 @@ struct AssistantPanel: View {
             role: .assistant,
             text: "Running \(entryName) on the current volume…"
         ))
+        beginAssistantTask()
         Task { @MainActor in
+            defer { finishAssistantTask() }
             if let labelMap = await nnunet.run(on: volume, labeling: vm.labeling) {
                 messages.append(AssistantChatMessage(
                     role: .assistant,
@@ -278,7 +292,9 @@ struct AssistantPanel: View {
             role: .assistant,
             text: "Running MONAI Label \(modelName) on the current volume…"
         ))
+        beginAssistantTask()
         Task { @MainActor in
+            defer { finishAssistantTask() }
             if let labelMap = await monai.runInference(on: volume, in: vm.labeling) {
                 messages.append(AssistantChatMessage(
                     role: .assistant,

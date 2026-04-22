@@ -1410,6 +1410,34 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(spec.preprocessing, entry.preprocessing)
     }
 
+    @MainActor
+    func testNNUnetCoreMLReadinessRequiresExistingPackageDirectory() throws {
+        let vm = NNUnetViewModel()
+        XCTAssertTrue(vm.coreMLReadinessMessage?.contains(".mlpackage") == true)
+
+        vm.coreMLModelPath = "/tmp/not-a-coreml-model.txt"
+        XCTAssertTrue(vm.coreMLReadinessMessage?.contains("must end") == true)
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("coreml-readiness-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let missingPackage = root.appendingPathComponent("missing.mlpackage", isDirectory: true)
+        vm.coreMLModelPath = missingPackage.path
+        XCTAssertTrue(vm.coreMLReadinessMessage?.contains("not found") == true)
+
+        let filePackage = root.appendingPathComponent("file.mlpackage")
+        XCTAssertTrue(FileManager.default.createFile(atPath: filePackage.path, contents: Data()))
+        vm.coreMLModelPath = filePackage.path
+        XCTAssertTrue(vm.coreMLReadinessMessage?.contains("package directory") == true)
+
+        let directoryPackage = root.appendingPathComponent("model.mlpackage", isDirectory: true)
+        try FileManager.default.createDirectory(at: directoryPackage, withIntermediateDirectories: true)
+        vm.coreMLModelPath = directoryPackage.path
+        XCTAssertNil(vm.coreMLReadinessMessage)
+    }
+
     func testNNUnetCTPreprocessingClipsAndNormalizes() {
         // Values at -2000, -17, 99.4, 201, 800 should behave as follows
         // for MSD-Liver preprocessing: clip to [-17, 201], then (v - 99.4) / 39.4.
