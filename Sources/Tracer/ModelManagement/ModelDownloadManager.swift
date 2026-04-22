@@ -55,7 +55,7 @@ public final class ModelDownloadManager: ObservableObject {
             tasks[model.id] = nil
             if let http = response as? HTTPURLResponse,
                !(200..<300).contains(http.statusCode) {
-                try? FileManager.default.removeItem(at: tempURL)
+                Self.removeOrLog(tempURL, context: "HTTP \(http.statusCode) temp cleanup")
                 throw ModelDownloadError.httpStatus(http.statusCode)
             }
             // Move the tempfile into the model directory, replacing any prior.
@@ -78,7 +78,7 @@ public final class ModelDownloadManager: ObservableObject {
                 statusByModelID[model.id] = .failed(
                     "SHA-256 mismatch. Expected \(expected), got \(hash)."
                 )
-                try? FileManager.default.removeItem(at: dst)
+                Self.removeOrLog(dst, context: "SHA-256 mismatch cleanup")
                 return .failure(ModelDownloadError.hashMismatch(expected: expected, actual: hash))
             }
 
@@ -151,6 +151,22 @@ public final class ModelDownloadManager: ObservableObject {
             }
             tasks[modelID] = task
             task.resume()
+        }
+    }
+
+    /// Best-effort filesystem cleanup that logs failures instead of silently
+    /// swallowing them. Silent `try?` was making it easy to miss a locked /
+    /// permission-denied file leftover after a failed download — the next
+    /// retry would hit a stale corrupt artifact and get a confusing error.
+    /// We still don't throw (cleanup is best-effort) but at least NSLog gives
+    /// us a breadcrumb when a user reports "download is broken, can't retry."
+    static func removeOrLog(_ url: URL, context: String) {
+        do {
+            if FileManager.default.fileExists(atPath: url.path) {
+                try FileManager.default.removeItem(at: url)
+            }
+        } catch {
+            NSLog("ModelDownloadManager: \(context) failed for \(url.path) — \(error.localizedDescription)")
         }
     }
 

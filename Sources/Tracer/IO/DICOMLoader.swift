@@ -468,31 +468,31 @@ public enum DICOMLoader {
             return []
         }
 
-        var totalFiles = 0
-        for case let fileURL as URL in enumerator {
+        // Single-pass scan — pull every URL once and filter to regular files.
+        // A second full-tree walk to pre-count just to feed a `progress(scanned,
+        // totalFiles)` bar doubled I/O on huge PACS dumps (50k+ files). With
+        // one pass we don't have the final total, so we surface scanned-only
+        // progress via `progress(scanned, 0)` and emit the final total at the
+        // end. Call sites that want a percentage can treat `total == 0` as
+        // "indeterminate" and show a spinner; the final `progress(total, total)`
+        // call lands the "done" signal.
+        let regularFiles: [URL] = enumerator.compactMap { element in
+            guard let fileURL = element as? URL else { return nil }
             let isFile = (try? fileURL.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) ?? false
-            if !isFile { continue }
-            totalFiles += 1
+            return isFile ? fileURL : nil
         }
 
-        guard let enumerator2 = fm.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey],
-                                               options: [.skipsHiddenFiles]) else {
-            return []
-        }
-
-        var scanned = 0
-        for case let fileURL as URL in enumerator2 {
-            let isFile = (try? fileURL.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) ?? false
-            if !isFile { continue }
-            scanned += 1
-            if scanned % 20 == 0 || scanned == totalFiles {
-                progress(scanned, totalFiles)
+        let total = regularFiles.count
+        for (index, fileURL) in regularFiles.enumerated() {
+            let scanned = index + 1
+            if scanned % 20 == 0 || scanned == total {
+                progress(scanned, total)
             }
             if let dcm = try? parseHeader(at: fileURL) {
                 files.append(dcm)
             }
         }
-        progress(totalFiles, totalFiles)
+        progress(total, total)
 
         return groupIntoSeries(files)
     }

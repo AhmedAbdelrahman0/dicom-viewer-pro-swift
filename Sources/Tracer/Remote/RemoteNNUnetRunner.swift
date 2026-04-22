@@ -177,22 +177,28 @@ public final class RemoteNNUnetRunner: @unchecked Sendable {
             throw Error.subprocessFailed(exitCode: result.exitCode, stderr: result.stderr)
         }
 
-        // Pull the result file.
+        // Pull the result file. Prefer the .nii.gz produced by stock nnU-Net
+        // v2; fall back to plain .nii for users running an older fork.
+        // We let scp's own exit code signal "not found" rather than a
+        // separate `test -f` probe, which would leave a TOCTOU gap between
+        // the check and the transfer.
         let remoteOutputGz = "\(remoteOut)/\(caseID).nii.gz"
         let remoteOutputNii = "\(remoteOut)/\(caseID).nii"
         let localOutputGz = localOut.appendingPathComponent("\(caseID).nii.gz")
         let localOutputNii = localOut.appendingPathComponent("\(caseID).nii")
 
-        var resolvedLocal: URL?
-        if (try? executor.run("test -f \(RemoteExecutor.shellEscape(remoteOutputGz))"))?.exitCode == 0 {
+        let labelURL: URL
+        do {
             try executor.downloadFile(remoteOutputGz, toLocal: localOutputGz)
-            resolvedLocal = localOutputGz
-        } else if (try? executor.run("test -f \(RemoteExecutor.shellEscape(remoteOutputNii))"))?.exitCode == 0 {
-            try executor.downloadFile(remoteOutputNii, toLocal: localOutputNii)
-            resolvedLocal = localOutputNii
-        }
-        guard let labelURL = resolvedLocal else {
-            throw Error.missingRemoteOutput(remoteOutputGz)
+            labelURL = localOutputGz
+        } catch {
+            // scp exits non-zero for missing-file. Try the .nii fallback.
+            do {
+                try executor.downloadFile(remoteOutputNii, toLocal: localOutputNii)
+                labelURL = localOutputNii
+            } catch {
+                throw Error.missingRemoteOutput(remoteOutputGz)
+            }
         }
 
         let labelMap = try LabelIO.loadNIfTILabelmap(from: labelURL,
