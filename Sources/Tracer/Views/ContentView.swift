@@ -14,6 +14,7 @@ public struct ContentView: View {
     @StateObject private var monai = MONAILabelViewModel()
     @StateObject private var nnunet = NNUnetViewModel()
     @StateObject private var pet = PETEngineViewModel()
+    @StateObject private var classification = ClassificationViewModel()
     @State private var showingFileImporter = false
     @State private var showingDirectoryPicker = false
     @State private var fileImporterMode: FileImporterMode = .volume
@@ -21,6 +22,7 @@ public struct ContentView: View {
     @State private var showMONAIPanel = false
     @State private var showNNUnetPanel = false
     @State private var showPETEnginePanel = false
+    @State private var showClassificationPanel = false
     @State private var showAboutWindow = false
     @State private var showOnboarding = false
     /// First-launch onboarding gate — once dismissed the welcome card
@@ -97,6 +99,18 @@ public struct ContentView: View {
             PETEnginePanel(viewer: vm, nnunet: nnunet, pet: pet, labeling: vm.labeling)
                 .overlay(alignment: .topTrailing) {
                     closeInspectorButton { showPETEnginePanel = false }
+                }
+        }
+        .engineInspector(
+            isCompact: useCompactEnginePresentation,
+            isPresented: $showClassificationPanel,
+            inspectorWidth: (min: 480, ideal: 520, max: 640)
+        ) {
+            ClassificationPanel(viewer: vm,
+                                classifier: classification,
+                                labeling: vm.labeling)
+                .overlay(alignment: .topTrailing) {
+                    closeInspectorButton { showClassificationPanel = false }
                 }
         }
         .fileImporter(
@@ -326,13 +340,23 @@ public struct ContentView: View {
                           systemImage: "flame.fill")
                 }
                 .keyboardShortcut("p", modifiers: [.command, .shift])
+
+                Divider()
+
+                Button {
+                    showInspector(.classification)
+                } label: {
+                    Label("Classify lesions — radiomics / CoreML / MedGemma",
+                          systemImage: "square.stack.3d.forward.dottedline")
+                }
+                .keyboardShortcut("c", modifiers: [.command, .shift])
             } label: {
                 Label("AI Engines", systemImage: "cpu")
                     .font(.system(size: 12, weight: .medium))
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
-            .help("AI Engines\n• MONAI Label (⌘⇧M)\n• nnU-Net (⌘⇧N)\n• PET Engine (⌘⇧P)\nPanels open as side inspectors — ⌘. to close.")
+            .help("AI Engines\n• MONAI Label (⌘⇧M)\n• nnU-Net (⌘⇧N)\n• PET Engine (⌘⇧P)\n• Classify (⌘⇧C)\nPanels open as side inspectors — ⌘. to close.")
 
             Spacer()
 
@@ -461,17 +485,19 @@ public struct ContentView: View {
         showMONAIPanel = false
         showNNUnetPanel = false
         showPETEnginePanel = false
+        showClassificationPanel = false
         // Open the requested one next tick so the close animations settle.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
             switch which {
             case .monai: showMONAIPanel = true
             case .nnunet: showNNUnetPanel = true
             case .pet: showPETEnginePanel = true
+            case .classification: showClassificationPanel = true
             }
         }
     }
 
-    private enum EngineInspector { case monai, nnunet, pet }
+    private enum EngineInspector { case monai, nnunet, pet, classification }
 
     private func handleFileImport(result: Result<[URL], Error>) {
         guard case .success(let urls) = result, let url = urls.first else { return }

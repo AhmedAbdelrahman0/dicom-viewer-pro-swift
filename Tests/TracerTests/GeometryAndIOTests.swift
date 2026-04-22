@@ -701,6 +701,147 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(stats.tlg ?? 0, 0.2, accuracy: 1e-9)
     }
 
+    // MARK: - Classification
+
+    func testRadiomicsExtractorProducesFirstOrderAndShape() throws {
+        // 4×4×1 volume with a bright 2×2 centre lesion.
+        let volume = ImageVolume(
+            pixels: [
+                0, 0, 0, 0,
+                0, 100, 100, 0,
+                0, 100, 100, 0,
+                0, 0, 0, 0,
+            ],
+            depth: 1, height: 4, width: 4,
+            spacing: (1, 1, 1),
+            modality: "CT"
+        )
+        let mask = LabelMap(parentSeriesUID: volume.seriesUID,
+                            depth: 1, height: 4, width: 4)
+        for y in 1...2 { for x in 1...2 { mask.setValue(1, z: 0, y: y, x: x) } }
+
+        let bounds = MONAITransforms.VoxelBounds(
+            minZ: 0, maxZ: 0, minY: 1, maxY: 2, minX: 1, maxX: 2
+        )
+        let features = try RadiomicsExtractor.extract(
+            volume: volume, mask: mask, classID: 1, bounds: bounds
+        )
+
+        XCTAssertEqual(features["original_firstorder_Mean"] ?? 0,
+                       100, accuracy: 1e-6)
+        XCTAssertEqual(features["original_firstorder_Maximum"] ?? 0,
+                       100, accuracy: 1e-6)
+        XCTAssertEqual(features["original_shape_VoxelCount"] ?? 0,
+                       4, accuracy: 1e-6,
+                       "2×2 centre lesion should have 4 voxels")
+        XCTAssertEqual(features["original_shape_VoxelVolume"] ?? 0,
+                       4, accuracy: 1e-6)
+    }
+
+    func testRadiomicsExtractorRejectsEmptyBoundsOrTooFewVoxels() {
+        let volume = ImageVolume(
+            pixels: [0, 0, 0, 0],
+            depth: 1, height: 2, width: 2, modality: "CT"
+        )
+        let mask = LabelMap(parentSeriesUID: volume.seriesUID,
+                            depth: 1, height: 2, width: 2)
+        let bounds = MONAITransforms.VoxelBounds(
+            minZ: 0, maxZ: 0, minY: 0, maxY: 1, minX: 0, maxX: 1
+        )
+        // No voxels in the mask match classID=1 → emptyLesion.
+        XCTAssertThrowsError(try RadiomicsExtractor.extract(
+            volume: volume, mask: mask, classID: 1, bounds: bounds
+        ))
+    }
+
+    func testTreeModelScoresWithAggregation() throws {
+        let model = TreeModel(
+            features: ["f0"],
+            classes: ["benign", "malignant"],
+            aggregation: .mean,
+            trees: [
+                TreeModel.Tree(nodes: [
+                    TreeModel.Node(feature: 0, threshold: 10, left: 1, right: 2, leaf: nil),
+                    TreeModel.Node(feature: nil, threshold: nil, left: nil, right: nil, leaf: [0.9, 0.1]),
+                    TreeModel.Node(feature: nil, threshold: nil, left: nil, right: nil, leaf: [0.2, 0.8])
+                ])
+            ]
+        )
+        let low = try model.score(["f0": 5])
+        let high = try model.score(["f0": 20])
+        XCTAssertEqual(low[0], 0.9, accuracy: 1e-6)
+        XCTAssertEqual(high[1], 0.8, accuracy: 1e-6)
+    }
+
+    func testTreeModelRejectsMalformedNodes() {
+        let model = TreeModel(
+            features: ["f0"],
+            classes: ["a", "b"],
+            aggregation: .mean,
+            trees: [
+                TreeModel.Tree(nodes: [
+                    // Split node references a left child outside the node array.
+                    TreeModel.Node(feature: 0, threshold: 0,
+                                   left: 99, right: 1, leaf: nil),
+                    TreeModel.Node(feature: nil, threshold: nil,
+                                   left: nil, right: nil, leaf: [1, 0])
+                ])
+            ]
+        )
+        XCTAssertThrowsError(try model.score(["f0": 0]))
+    }
+
+    func testLesionClassifierCatalogHasExpectedEntries() {
+        let ids = LesionClassifierCatalog.all.map(\.id)
+        XCTAssertTrue(ids.contains("lung-nodule-radiomics"))
+        XCTAssertTrue(ids.contains("liver-lesion-radiomics"))
+        XCTAssertTrue(ids.contains("medsiglip-zero-shot"))
+        XCTAssertTrue(ids.contains("medgemma-4b"))
+        XCTAssertTrue(ids.contains("subprocess-pyradiomics"))
+    }
+
+    func testMedGemmaParserExtractsLabelAndRationale() throws {
+        let raw = """
+        Here's my analysis: { "label": "malignant",
+          "confidence": 0.87,
+          "rationale": "Lesion shows heterogeneous enhancement with ill-defined margins." }
+        Thanks for the image.
+        """
+        let parsed = try MedGemmaClassifier.parseJSON(
+            in: raw, expectedLabels: ["benign", "malignant"]
+        )
+        XCTAssertEqual(parsed.predictions.first?.label, "malignant")
+        XCTAssertEqual(parsed.predictions.first?.probability ?? 0,
+                       0.87, accuracy: 1e-6)
+        XCTAssertTrue(parsed.rationale?.contains("heterogeneous") ?? false)
+    }
+
+    @MainActor
+    func testClassificationReportCSVContainsHeaderAndLesions() {
+        let lesion = PETQuantification.LesionStats(
+            id: 1, classID: 1, className: "lesion #1",
+            voxelCount: 12, volumeMM3: 12, volumeML: 0.012,
+            suvMax: 8.5, suvMean: 4.2, suvPeak: 8.5, tlg: 0.0504,
+            bounds: (0, 0, 0, 0, 0, 0)
+        )
+        let result = ClassificationResult(
+            predictions: [
+                LabelPrediction(label: "malignant", probability: 0.87),
+                LabelPrediction(label: "benign", probability: 0.13)
+            ],
+            rationale: "demo",
+            features: [:],
+            durationSeconds: 0.5,
+            classifierID: "demo"
+        )
+        let row = ClassificationViewModel.LesionResult(id: 1, lesion: lesion, result: result)
+        let csv = ClassificationReport.csvData(for: [row])
+        let text = String(data: csv, encoding: .utf8) ?? ""
+        XCTAssertTrue(text.contains("lesion_id,class_name"))
+        XCTAssertTrue(text.contains("malignant:0.8700"))
+        XCTAssertTrue(text.contains("demo"))
+    }
+
     func testNIfTIGunzipRejectsCorruptedISIZETrailer() throws {
         // Author a valid .nii.gz, then flip the last 4 bytes (ISIZE) so the
         // declared uncompressed size no longer matches the real payload.
