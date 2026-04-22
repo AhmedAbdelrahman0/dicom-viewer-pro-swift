@@ -517,6 +517,12 @@ public final class ViewerViewModel: ObservableObject {
         recentVolumes = recentVolumesStore.recordOpen(RecentVolume(from: volume))
     }
 
+    /// Refresh the published strip from persistence. Settings and other
+    /// windows can mutate the shared store outside this view model.
+    public func reloadRecentVolumes() {
+        recentVolumes = recentVolumesStore.load()
+    }
+
     /// Drop a recent entry (e.g. after the user clicks the × chip).
     public func removeRecent(id: String) {
         recentVolumes = recentVolumesStore.remove(id: id)
@@ -863,7 +869,7 @@ public final class ViewerViewModel: ObservableObject {
         return SUVProbe(
             voxel: (z: z, y: y, x: x),
             rawValue: raw,
-            suv: suvValue(rawStoredValue: raw)
+            suv: suvValue(rawStoredValue: raw, volume: pet)
         )
     }
 
@@ -876,9 +882,7 @@ public final class ViewerViewModel: ObservableObject {
             pet,
             labelMap,
             classID: classID,
-            suvTransform: { [suvSettings] rawValue in
-                suvSettings.suv(forStoredValue: rawValue)
-            }
+            suvTransform: suvTransform(for: pet)
         )
     }
 
@@ -893,7 +897,7 @@ public final class ViewerViewModel: ObservableObject {
         }
 
         labeling.thresholdValue = threshold
-        let transform: ((Double) -> Double)? = source.usesSUV ? suvTransform : nil
+        let transform: ((Double) -> Double)? = source.usesSUV ? suvTransform(for: source.volume) : nil
         var count = 0
         labeling.recordVoxelEdit(named: "SUV threshold") {
             count = PETSegmentation.thresholdAbove(
@@ -923,7 +927,7 @@ public final class ViewerViewModel: ObservableObject {
         }
 
         labeling.percentOfMax = percent
-        let transform: ((Double) -> Double)? = source.usesSUV ? suvTransform : nil
+        let transform: ((Double) -> Double)? = source.usesSUV ? suvTransform(for: source.volume) : nil
         let box = VoxelBox.around(seed, radius: boxRadius, in: source.volume)
         var count = 0
         labeling.recordVoxelEdit(named: "SUV percent of max") {
@@ -958,7 +962,7 @@ public final class ViewerViewModel: ObservableObject {
         labeling.thresholdValue = minimumValue
         labeling.gradientCutoffFraction = gradientCutoffFraction
         labeling.gradientSearchRadius = searchRadius
-        let transform: ((Double) -> Double)? = source.usesSUV ? suvTransform : nil
+        let transform: ((Double) -> Double)? = source.usesSUV ? suvTransform(for: source.volume) : nil
         let result = labeling.gradientEdge(
             volume: source.volume,
             seed: seed,
@@ -972,9 +976,9 @@ public final class ViewerViewModel: ObservableObject {
         statusMessage = "SUV gradient segmented \(result.voxelCount) voxels | floor \(unit) \(String(format: "%.2f", minimumValue)), peak \(String(format: "%.2f", result.maxValue)), edge \(String(format: "%.3f", result.gradientCutoff))/mm"
     }
 
-    private var suvTransform: (Double) -> Double {
-        { [suvSettings] rawValue in
-            suvSettings.suv(forStoredValue: rawValue)
+    private func suvTransform(for volume: ImageVolume) -> (Double) -> Double {
+        { [suvSettings, volume] rawValue in
+            suvSettings.suv(forStoredValue: rawValue, volume: volume)
         }
     }
 

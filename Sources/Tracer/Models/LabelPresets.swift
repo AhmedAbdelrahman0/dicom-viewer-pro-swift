@@ -446,7 +446,7 @@ public enum LabelPresets {
 }
 
 /// A preset collection of labels for a particular segmentation task.
-public struct LabelPresetSet: Identifiable {
+public struct LabelPresetSet: Identifiable, Sendable {
     public var id: String { name }
     public let name: String
     public let description: String

@@ -1,5 +1,9 @@
 import Foundation
 
+public extension Notification.Name {
+    static let recentVolumesDidChange = Notification.Name("Tracer.recentVolumesDidChange")
+}
+
 /// Lightweight bookmark for a volume the user has opened in a previous
 /// (or current) session. Shown as a single chip in the Study Browser's
 /// "Recently opened" strip and used to reopen a study with one click.
@@ -66,8 +70,8 @@ public struct RecentVolume: Codable, Identifiable, Hashable {
 /// the newest volume is always at index 0.
 @MainActor
 public final class RecentVolumesStore {
-    public static let defaultsKey = "Tracer.RecentVolumes"
-    public static let maximumEntries = 8
+    public nonisolated static let defaultsKey = "Tracer.RecentVolumes"
+    public nonisolated static let maximumEntries = 8
 
     private let defaults: UserDefaults
     private let decoder = JSONDecoder()
@@ -88,6 +92,7 @@ public final class RecentVolumesStore {
     public func save(_ list: [RecentVolume]) {
         guard let data = try? encoder.encode(list) else { return }
         defaults.set(data, forKey: Self.defaultsKey)
+        NotificationCenter.default.post(name: .recentVolumesDidChange, object: self)
     }
 
     /// Insert `entry` at the head of the list, remove any duplicate id, and
@@ -113,5 +118,6 @@ public final class RecentVolumesStore {
 
     public func clear() {
         defaults.removeObject(forKey: Self.defaultsKey)
+        NotificationCenter.default.post(name: .recentVolumesDidChange, object: self)
     }
 }

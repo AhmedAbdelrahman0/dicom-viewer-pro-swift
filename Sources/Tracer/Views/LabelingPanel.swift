@@ -409,7 +409,7 @@ struct LabelingPanel: View {
                     Group {
                         let petStats = vm.activePETRegionStats(for: map, classID: cls.labelID)
                         let currentSUVTransform: ((Double) -> Double)? = Modality.normalize(v.modality) == .PT
-                            ? { raw in vm.suvValue(rawStoredValue: raw) }
+                            ? { raw in vm.suvValue(rawStoredValue: raw, volume: v) }
                             : nil
                         let stats = petStats ?? RegionStats.compute(
                             v,
@@ -497,7 +497,7 @@ struct LabelingPanel: View {
         }
         .fileExporter(
             isPresented: $showingExporter,
-            document: LabelDocumentRef(vm: vm, format: exportFormat),
+            document: LabelDocumentRef(),
             contentType: .data,
             defaultFilename: defaultExportFilename
         ) { result in
@@ -709,17 +709,10 @@ private struct StatRow: View {
 // MARK: - Document wrapper for file export
 
 private struct LabelDocumentRef: FileDocument {
-    @MainActor static var readableContentTypes: [UTType] { [.data] }
+    static var readableContentTypes: [UTType] { [.data] }
     static var writableContentTypes: [UTType] { [.data] }
 
-    var vm: ViewerViewModel
-    var format: LabelIO.Format
-
-    @MainActor
-    init(vm: ViewerViewModel, format: LabelIO.Format) {
-        self.vm = vm
-        self.format = format
-    }
+    init() {}
 
     init(configuration: ReadConfiguration) throws {
         throw CocoaError(.fileReadUnsupportedScheme)

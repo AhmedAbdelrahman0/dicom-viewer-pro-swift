@@ -5,7 +5,7 @@ import AppKit
 
 // MARK: - Tooltip preference (bubbles hovered tooltip info up to the root view)
 
-struct TooltipPayload: Equatable {
+struct TooltipPayload: Equatable, Sendable {
     let id = UUID()
     var text: String
     /// Source anchor frame in the GLOBAL coordinate space of the root view.
@@ -13,7 +13,7 @@ struct TooltipPayload: Equatable {
 }
 
 struct TooltipPreferenceKey: PreferenceKey {
-    static var defaultValue: TooltipPayload? = nil
+    static let defaultValue: TooltipPayload? = nil
     static func reduce(value: inout TooltipPayload?, nextValue: () -> TooltipPayload?) {
         // Last writer wins — since only one tooltip is hovered at a time,
         // this naturally tracks the active one.

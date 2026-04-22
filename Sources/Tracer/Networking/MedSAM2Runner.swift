@@ -64,7 +64,7 @@ public final class MedSAM2Runner: @unchecked Sendable {
         }
     }
 
-    public enum Error: Swift.Error, LocalizedError {
+    public enum Error: Swift.Error, LocalizedError, Sendable {
         case coreMLUnavailable
         case modelLoadFailed(String)
         case unsupportedShape(String)
@@ -82,9 +82,18 @@ public final class MedSAM2Runner: @unchecked Sendable {
         }
     }
 
-    public struct Result {
+    public struct Result: Sendable {
         public let voxelsChanged: Int
         public let sliceBounds: (minX: Int, maxX: Int, minY: Int, maxY: Int)
+    }
+
+    public struct MaskPrediction: Sendable {
+        public let mask: [Float]
+        public let maskSize: Int
+        public let sliceWidth: Int
+        public let sliceHeight: Int
+        public let axis: Int
+        public let sliceIndex: Int
     }
 
     public init() {}
@@ -96,6 +105,7 @@ public final class MedSAM2Runner: @unchecked Sendable {
     /// only the voxels on the given slice keeps the action local and
     /// undo-friendly.
     @discardableResult
+    @MainActor
     public func refineLesion(volume: ImageVolume,
                              axis: Int,
                              sliceIndex: Int,
@@ -103,6 +113,21 @@ public final class MedSAM2Runner: @unchecked Sendable {
                              into labelMap: LabelMap,
                              classID: UInt16,
                              spec: Spec) async throws -> Result {
+        let prediction = try await predictLesionMask(
+            volume: volume,
+            axis: axis,
+            sliceIndex: sliceIndex,
+            box: box,
+            spec: spec
+        )
+        return paint(prediction: prediction, into: labelMap, classID: classID)
+    }
+
+    public func predictLesionMask(volume: ImageVolume,
+                                  axis: Int,
+                                  sliceIndex: Int,
+                                  box: CGRect,
+                                  spec: Spec) async throws -> MaskPrediction {
         #if canImport(CoreML)
         try ensureSliceInBounds(volume: volume, axis: axis, index: sliceIndex)
         try validateBox(box, slice: sliceDimensions(volume: volume, axis: axis))
@@ -165,14 +190,14 @@ public final class MedSAM2Runner: @unchecked Sendable {
                                  fromWidth: spec.targetSize,
                                  fromHeight: spec.targetSize,
                                  toSize: max(sliceBuf.width, sliceBuf.height))
-        return paint(mask: resizedMask,
-                     maskSize: max(sliceBuf.width, sliceBuf.height),
-                     sliceWidth: sliceBuf.width,
-                     sliceHeight: sliceBuf.height,
-                     axis: axis,
-                     sliceIndex: sliceIndex,
-                     labelMap: labelMap,
-                     classID: classID)
+        return MaskPrediction(
+            mask: resizedMask,
+            maskSize: max(sliceBuf.width, sliceBuf.height),
+            sliceWidth: sliceBuf.width,
+            sliceHeight: sliceBuf.height,
+            axis: axis,
+            sliceIndex: sliceIndex
+        )
         #else
         throw Error.coreMLUnavailable
         #endif
@@ -262,6 +287,21 @@ public final class MedSAM2Runner: @unchecked Sendable {
     }
     #endif
 
+    @MainActor
+    public func paint(prediction: MaskPrediction,
+                      into labelMap: LabelMap,
+                      classID: UInt16) -> Result {
+        paint(mask: prediction.mask,
+              maskSize: prediction.maskSize,
+              sliceWidth: prediction.sliceWidth,
+              sliceHeight: prediction.sliceHeight,
+              axis: prediction.axis,
+              sliceIndex: prediction.sliceIndex,
+              labelMap: labelMap,
+              classID: classID)
+    }
+
+    @MainActor
     private func paint(mask: [Float],
                        maskSize: Int,
                        sliceWidth: Int,

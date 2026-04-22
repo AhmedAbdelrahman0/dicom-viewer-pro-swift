@@ -249,7 +249,10 @@ public struct SliceView: View {
         }
 
         let px = Int(localX.rounded(.down))
-        let py = Int(localY.rounded(.down))
+        var py = Int(localY.rounded(.down))
+        if axis == 0 || axis == 1 {
+            py = Int(imgH) - 1 - py
+        }
         let (vz, vy, vx) = volumeVoxel(px: px, py: py, sliceIndex: vm.sliceIndices[axis])
         guard vx >= 0, vx < volume.width,
               vy >= 0, vy < volume.height,

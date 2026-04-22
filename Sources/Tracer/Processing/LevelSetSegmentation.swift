@@ -111,15 +111,43 @@ public enum LevelSetSegmentation {
                               speed: SpeedMode,
                               parameters: Parameters = Parameters(),
                               classID: UInt16) -> Result {
-        precondition(volume.width == label.width
-                     && volume.height == label.height
-                     && volume.depth == label.depth,
-                     "Level-set: label map dimensions must match the volume")
+        guard volume.width == label.width,
+              volume.height == label.height,
+              volume.depth == label.depth
+        else {
+            return Result(insideVoxels: 0,
+                          iterations: 0,
+                          finalRMS: .infinity,
+                          converged: false)
+        }
 
         let w = volume.width, h = volume.height, d = volume.depth
         let count = w * h * d
+        guard volume.pixels.count == count, label.voxels.count == count else {
+            return Result(insideVoxels: 0,
+                          iterations: 0,
+                          finalRMS: .infinity,
+                          converged: false)
+        }
 
         var phi = signedDistanceField(from: seeds, width: w, height: h, depth: d)
+        func paintInside(from phi: [Float]) -> Int {
+            var inside = 0
+            for i in 0..<count where phi[i] <= 0 {
+                label.voxels[i] = classID
+                inside += 1
+            }
+            return inside
+        }
+
+        guard w >= 3, h >= 3, d >= 3 else {
+            let inside = paintInside(from: phi)
+            return Result(insideVoxels: inside,
+                          iterations: 0,
+                          finalRMS: 0,
+                          converged: false)
+        }
+
         let F = buildSpeedField(from: volume.pixels,
                                 width: w, height: h, depth: d,
                                 mode: speed)
@@ -213,13 +241,7 @@ public enum LevelSetSegmentation {
         }
 
         // Paint the inside voxels (φ ≤ 0) into the label map.
-        var inside = 0
-        for i in 0..<count {
-            if phi[i] <= 0 {
-                label.voxels[i] = classID
-                inside += 1
-            }
-        }
+        let inside = paintInside(from: phi)
 
         return Result(insideVoxels: inside,
                       iterations: actualIters,

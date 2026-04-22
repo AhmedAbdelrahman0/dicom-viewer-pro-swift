@@ -464,9 +464,12 @@ public final class LabelingViewModel: ObservableObject {
                                          landmarks: landmarks,
                                          parentVolume: parentVolume,
                                          to: url)
-        case .niftiLabelmap, .niftiGz, .itkSnap:
+        case .niftiLabelmap, .itkSnap:
             try LabelIO.saveNIfTI(map, to: url, parentVolume: parentVolume,
                                    writeLabelDescriptor: true)
+        case .niftiGz:
+            try LabelIO.saveNIfTIGz(map, to: url, parentVolume: parentVolume,
+                                     writeLabelDescriptor: true)
         case .nrrdLabelmap:
             try LabelIO.saveNRRD(map, to: url, parentVolume: parentVolume)
         case .slicerSeg:
@@ -649,7 +652,7 @@ public struct LabelImportResult {
     public let landmarks: [LandmarkPair]
 }
 
-public enum LabelingTool: String, CaseIterable, Identifiable {
+public enum LabelingTool: String, CaseIterable, Identifiable, Sendable {
     case none, brush, eraser, threshold, suvGradient, regionGrow, landmark
 
     public var id: String { rawValue }

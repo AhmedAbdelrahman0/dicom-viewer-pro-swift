@@ -2,7 +2,7 @@ import Foundation
 import SwiftUI
 
 /// A labeled class used inside a `LabelMap`.
-public struct LabelClass: Identifiable, Equatable, Hashable {
+public struct LabelClass: Identifiable, Equatable, Hashable, Sendable {
     public var id = UUID()
 
     /// Integer ID stored in the voxel grid (1–65535).
@@ -60,7 +60,7 @@ public struct LabelClass: Identifiable, Equatable, Hashable {
 }
 
 /// Top-level categories for organizing labels.
-public enum LabelCategory: String, CaseIterable, Identifiable {
+public enum LabelCategory: String, CaseIterable, Identifiable, Sendable {
     case organ = "Organ"
     case vessel = "Vessel"
     case bone = "Bone"

@@ -268,8 +268,17 @@ public struct AssistantCommandInterpreter {
     }
 
     private func thresholdValue(in text: String) -> Double? {
-        guard text.containsAny(["threshold", "suv", ">="]) else { return nil }
-        return firstNumber(in: text)
+        if text.containsAny(["threshold", ">=", "greater than", "above"]) {
+            return firstNumber(in: text)
+        }
+        if wantsGradientSegmentation(in: text),
+           text.containsAny(["floor", "minimum", "min"]) {
+            return firstNumber(in: text)
+        }
+        return firstCapturedNumber(
+            pattern: "\\bsuv\\b\\s*(?:>=|>|at|above|over)?\\s*([-+]?\\d*\\.?\\d+)",
+            in: text
+        )
     }
 
     private func wantsGradientSegmentation(in text: String) -> Bool {
@@ -319,6 +328,10 @@ public struct AssistantCommandInterpreter {
     private func number(after token: String, in text: String) -> Double? {
         let escaped = NSRegularExpression.escapedPattern(for: token)
         let pattern = "\\b\(escaped)\\b\\s*(?:is|=|to|at|of)?\\s*([-+]?\\d*\\.?\\d+)"
+        return firstCapturedNumber(pattern: pattern, in: text)
+    }
+
+    private func firstCapturedNumber(pattern: String, in text: String) -> Double? {
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
         let range = NSRange(text.startIndex..<text.endIndex, in: text)
         guard let match = regex.firstMatch(in: text, range: range),

@@ -1,6 +1,6 @@
 import Foundation
 
-public struct WindowLevel: Hashable, Identifiable {
+public struct WindowLevel: Hashable, Identifiable, Sendable {
     public var id: String { name }
     public let name: String
     public let window: Double

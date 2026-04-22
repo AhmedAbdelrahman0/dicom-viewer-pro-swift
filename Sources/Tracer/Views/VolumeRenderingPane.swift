@@ -231,6 +231,7 @@ struct MetalVolumeView: NSViewRepresentable {
     final class Coordinator {
         let renderer = MetalVolumeRenderer()
 
+        @MainActor
         func makeView() -> MTKView {
             let view = MTKView(frame: .zero, device: renderer.device)
             view.delegate = renderer

@@ -52,38 +52,7 @@ public struct ContentView: View {
     public init() {}
 
     public var body: some View {
-        NavigationSplitView(columnVisibility: $browserVisibility) {
-            StudyBrowserView(vm: vm,
-                             onImportFolder: {
-                                 directoryImporterMode = .open
-                                 showingDirectoryPicker = true
-                             },
-                             onIndexFolder: {
-                                 directoryImporterMode = .index
-                                 showingDirectoryPicker = true
-                             },
-                             onImportVolume: {
-                                 fileImporterMode = .volume
-                                 showingFileImporter = true
-                             },
-                             onImportOverlay: {
-                                 fileImporterMode = .overlay
-                                 showingFileImporter = true
-                             })
-                .navigationSplitViewColumnWidth(min: 300, ideal: 380, max: 520)
-        } content: {
-            VStack(spacing: 0) {
-                customToolbar
-                workstationHeader
-                MPRLayoutView()
-                    .environmentObject(vm)
-            }
-            .navigationSplitViewColumnWidth(min: 400, ideal: 900)
-        } detail: {
-            ControlsPanel()
-                .environmentObject(vm)
-                .navigationSplitViewColumnWidth(min: 260, ideal: 320, max: 400)
-        }
+        rootLayout
         .overlay(alignment: .bottom) {
             if vm.isLoading {
                 loadingIndicator
@@ -158,6 +127,14 @@ public struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .showOnboarding)) { _ in
             showOnboarding = true
         }
+        .onReceive(NotificationCenter.default.publisher(for: .recentVolumesDidChange)) { _ in
+            vm.reloadRecentVolumes()
+        }
+        .onChange(of: focusModeEnabled) { _, enabled in
+            if !enabled {
+                browserVisibility = .all
+            }
+        }
         #if os(macOS)
         .sheet(isPresented: $showAboutWindow) {
             TracerAboutView()
@@ -169,8 +146,7 @@ public struct ContentView: View {
         }
         #endif
         .onAppear {
-            // Honour the persisted focus preference on launch.
-            browserVisibility = focusModeEnabled ? .detailOnly : .all
+            browserVisibility = .all
             // Show the onboarding card set once per install, before the
             // user loads any data.
             if !hasSeenOnboarding {
@@ -181,12 +157,61 @@ public struct ContentView: View {
         .tooltipHost()  // must wrap the whole window so tooltips escape any clipping
     }
 
+    @ViewBuilder
+    private var rootLayout: some View {
+        if focusModeEnabled {
+            workstationScaffold
+        } else {
+            splitWorkstation
+        }
+    }
+
+    private var splitWorkstation: some View {
+        NavigationSplitView(columnVisibility: $browserVisibility) {
+            StudyBrowserView(vm: vm,
+                             onImportFolder: {
+                                 directoryImporterMode = .open
+                                 showingDirectoryPicker = true
+                             },
+                             onIndexFolder: {
+                                 directoryImporterMode = .index
+                                 showingDirectoryPicker = true
+                             },
+                             onImportVolume: {
+                                 fileImporterMode = .volume
+                                 showingFileImporter = true
+                             },
+                             onImportOverlay: {
+                                 fileImporterMode = .overlay
+                                 showingFileImporter = true
+                             })
+                .navigationSplitViewColumnWidth(min: 300, ideal: 380, max: 520)
+        } content: {
+            workstationScaffold
+                .navigationSplitViewColumnWidth(min: 400, ideal: 900)
+        } detail: {
+            ControlsPanel()
+                .environmentObject(vm)
+                .navigationSplitViewColumnWidth(min: 260, ideal: 320, max: 400)
+        }
+    }
+
+    private var workstationScaffold: some View {
+        VStack(spacing: 0) {
+            customToolbar
+            workstationHeader
+            MPRLayoutView()
+                .environmentObject(vm)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
     // MARK: - Custom toolbar (in-content so hover + tooltips work reliably)
 
     private var customToolbar: some View {
         HStack(spacing: 6) {
             VStack(alignment: .leading, spacing: 1) {
-                Text("DICOM Viewer Pro")
+                Text("Tracer")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundColor(.primary)
                 Text("diagnostic workstation")
@@ -400,9 +425,11 @@ public struct ContentView: View {
     /// Toggle focus mode. In focus mode both the browser and the controls
     /// panel slide out of the way; the center viewport gets the full window.
     private func toggleFocusMode() {
-        focusModeEnabled.toggle()
         withAnimation(.easeInOut(duration: 0.2)) {
-            browserVisibility = focusModeEnabled ? .detailOnly : .all
+            focusModeEnabled.toggle()
+            if !focusModeEnabled {
+                browserVisibility = .all
+            }
         }
     }
 

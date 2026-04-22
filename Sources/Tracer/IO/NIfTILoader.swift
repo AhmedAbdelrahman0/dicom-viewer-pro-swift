@@ -28,8 +28,8 @@ public enum NIfTILoaderError: Error, LocalizedError {
 
 public enum NIfTILoader {
 
-    /// Recognized volume file extensions.
-    public static let extensions = ["nii", "nii.gz", "mha", "mhd", "nrrd", "hdr", "img"]
+    /// Recognized volume file extensions handled by this parser.
+    public static let extensions = ["nii", "nii.gz"]
 
     public static func isVolumeFile(_ url: URL) -> Bool {
         let name = url.lastPathComponent.lowercased()

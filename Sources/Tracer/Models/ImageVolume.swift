@@ -2,7 +2,7 @@ import Foundation
 import simd
 
 /// A 3D medical image volume stored as a contiguous Float array in (Z, Y, X) order.
-public final class ImageVolume: Identifiable, ObservableObject {
+public final class ImageVolume: Identifiable, ObservableObject, @unchecked Sendable {
     public let id = UUID()
 
     /// Pixel data, shape = depth * height * width (Z-major, C-order).
@@ -33,15 +33,7 @@ public final class ImageVolume: Identifiable, ObservableObject {
     public let sourceFiles: [String]
 
     /// Cached intensity range for auto W/L.
-    public private(set) lazy var intensityRange: (min: Float, max: Float) = {
-        guard !pixels.isEmpty else { return (0, 1) }
-        var mn = pixels[0], mx = pixels[0]
-        for v in pixels {
-            if v < mn { mn = v }
-            if v > mx { mx = v }
-        }
-        return (mn, mx)
-    }()
+    public let intensityRange: (min: Float, max: Float)
 
     public init(pixels: [Float],
                 depth: Int,
@@ -77,10 +69,21 @@ public final class ImageVolume: Identifiable, ObservableObject {
         self.studyDescription = studyDescription
         self.suvScaleFactor = suvScaleFactor
         self.sourceFiles = sourceFiles.map(Self.canonicalPath).sorted()
+        self.intensityRange = Self.computeIntensityRange(pixels)
     }
 
     /// Size in bytes.
     public var sizeBytes: Int { pixels.count * MemoryLayout<Float>.stride }
+
+    private static func computeIntensityRange(_ pixels: [Float]) -> (min: Float, max: Float) {
+        guard !pixels.isEmpty else { return (0, 1) }
+        var mn = pixels[0], mx = pixels[0]
+        for v in pixels {
+            if v < mn { mn = v }
+            if v > mx { mx = v }
+        }
+        return (mn, mx)
+    }
 
     public var sessionIdentity: String {
         if !seriesUID.isEmpty {

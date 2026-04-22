@@ -1,6 +1,6 @@
 import Foundation
 
-public enum AssistantCLIProvider: String, CaseIterable, Identifiable {
+public enum AssistantCLIProvider: String, CaseIterable, Identifiable, Sendable {
     case local
     case claude
     case chatGPT
@@ -27,7 +27,7 @@ public enum AssistantCLIProvider: String, CaseIterable, Identifiable {
     }
 }
 
-public enum AssistantCLIError: LocalizedError {
+public enum AssistantCLIError: LocalizedError, Sendable {
     case unavailable(String)
     case failed(String)
 
@@ -39,7 +39,7 @@ public enum AssistantCLIError: LocalizedError {
     }
 }
 
-public struct AssistantCLIRunner {
+public struct AssistantCLIRunner: Sendable {
     public init() {}
 
     public func isAvailable(_ provider: AssistantCLIProvider) -> Bool {

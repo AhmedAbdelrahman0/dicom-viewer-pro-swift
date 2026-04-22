@@ -18,7 +18,7 @@ public enum DICOMError: Error, LocalizedError {
 /// Minimal DICOM parser — reads Explicit VR Little Endian and Implicit VR
 /// Little Endian uncompressed pixel data. Sufficient for CT/MR/PT raw-pixel
 /// DICOMs. JPEG-compressed DICOMs are not supported.
-public final class DICOMFile {
+public final class DICOMFile: @unchecked Sendable {
     public var patientID: String = ""
     public var patientName: String = ""
     public var accessionNumber: String = ""
@@ -540,7 +540,7 @@ public enum DICOMLoader {
     }
 }
 
-public struct DICOMSeries: Identifiable {
+public struct DICOMSeries: Identifiable, Sendable {
     public var id: String { uid }
     public var uid: String
     public var modality: String

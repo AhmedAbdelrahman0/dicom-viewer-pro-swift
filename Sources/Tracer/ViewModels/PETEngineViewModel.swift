@@ -240,7 +240,7 @@ public final class PETEngineViewModel: ObservableObject {
             return statusMessage
         }
         let suv: (Double) -> Double = { [weak viewer] raw in
-            viewer?.suvValue(rawStoredValue: raw) ?? raw
+            viewer?.suvValue(rawStoredValue: raw, volume: pet) ?? raw
         }
         do {
             let report = try PETQuantification.compute(

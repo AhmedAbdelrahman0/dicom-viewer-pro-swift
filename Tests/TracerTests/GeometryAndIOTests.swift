@@ -79,6 +79,14 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(volume.pixels[0], 42, accuracy: 1e-6)
     }
 
+    func testNIfTILoaderOnlyAdvertisesFormatsItParses() {
+        XCTAssertTrue(NIfTILoader.isVolumeFile(URL(fileURLWithPath: "/tmp/study.nii")))
+        XCTAssertTrue(NIfTILoader.isVolumeFile(URL(fileURLWithPath: "/tmp/study.nii.gz")))
+        XCTAssertFalse(NIfTILoader.isVolumeFile(URL(fileURLWithPath: "/tmp/study.nrrd")))
+        XCTAssertFalse(NIfTILoader.isVolumeFile(URL(fileURLWithPath: "/tmp/study.mha")))
+        XCTAssertFalse(NIfTILoader.isVolumeFile(URL(fileURLWithPath: "/tmp/study.hdr")))
+    }
+
     func testCompressedDICOMTransferSyntaxFailsBeforePixelRead() {
         let dcm = DICOMFile()
         dcm.rows = 1
@@ -614,6 +622,23 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(vm.suvValue(rawStoredValue: 5), 1.0, accuracy: 1e-9)
     }
 
+    func testAssistantSUVCalculationPromptDoesNotTriggerThreshold() {
+        let actions = AssistantCommandInterpreter().actions(
+            for: "Use SUVbw from kBq/mL, patient weight 70 kg, injected dose 350 MBq"
+        )
+
+        XCTAssertFalse(actions.contains { action in
+            if case .threshold = action { return true }
+            return false
+        })
+    }
+
+    func testAssistantShortSUVThresholdStillParses() {
+        let actions = AssistantCommandInterpreter().actions(for: "SUV 2.5")
+
+        XCTAssertTrue(actions.contains(.threshold(2.5)))
+    }
+
     @MainActor
     func testAssistantAppliesSegmentationRAGPlanToLabelingState() {
         let vm = ViewerViewModel()
@@ -676,6 +701,91 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(stats.tlg ?? 0, 0.2, accuracy: 1e-9)
     }
 
+    func testCompressedNIfTILabelExportRoundTrips() throws {
+        let volume = ImageVolume(
+            pixels: [0, 0, 0, 0],
+            depth: 1,
+            height: 2,
+            width: 2,
+            modality: "CT"
+        )
+        let map = LabelMap(parentSeriesUID: volume.seriesUID, depth: 1, height: 2, width: 2)
+        map.setValue(3, z: 0, y: 1, x: 1)
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("labels-\(UUID().uuidString).nii.gz")
+        defer {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(at: url.deletingPathExtension().appendingPathExtension("label.txt"))
+        }
+
+        try LabelIO.saveNIfTIGz(map, to: url, parentVolume: volume)
+        let bytes = try Data(contentsOf: url)
+        XCTAssertEqual(bytes[0], 0x1f)
+        XCTAssertEqual(bytes[1], 0x8b)
+
+        let loaded = try LabelIO.loadNIfTILabelmap(from: url, parentVolume: volume)
+        XCTAssertEqual(loaded.voxels, map.voxels)
+    }
+
+    func testNRRDExportPreservesDirectionCosines() throws {
+        let direction = simd_double3x3(
+            SIMD3<Double>(0, 1, 0),
+            SIMD3<Double>(1, 0, 0),
+            SIMD3<Double>(0, 0, 1)
+        )
+        let volume = ImageVolume(
+            pixels: [0],
+            depth: 1,
+            height: 1,
+            width: 1,
+            spacing: (2, 3, 4),
+            direction: direction
+        )
+        let map = LabelMap(parentSeriesUID: volume.seriesUID, depth: 1, height: 1, width: 1)
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("labels-\(UUID().uuidString).nrrd")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try LabelIO.saveNRRD(map, to: url, parentVolume: volume)
+
+        let text = try String(contentsOf: url, encoding: .ascii)
+        XCTAssertTrue(text.contains("space directions: (0,2,0) (3,0,0) (0,0,4)"))
+    }
+
+    @MainActor
+    func testActivePETRegionStatsUsesMatchedVolumeScale() {
+        let ct = ImageVolume(
+            pixels: [0, 0],
+            depth: 1,
+            height: 1,
+            width: 2,
+            modality: "CT"
+        )
+        let pet = ImageVolume(
+            pixels: [10, 20],
+            depth: 1,
+            height: 1,
+            width: 2,
+            modality: "PT",
+            suvScaleFactor: 0.5
+        )
+        let vm = ViewerViewModel()
+        vm.currentVolume = ct
+        vm.suvSettings.mode = .storedSUV
+        let pair = FusionPair(base: ct, overlay: pet)
+        pair.resampledOverlay = pet
+        vm.fusion = pair
+        let map = vm.labeling.createLabelMap(for: ct)
+        map.setValue(1, z: 0, y: 0, x: 0)
+        map.setValue(1, z: 0, y: 0, x: 1)
+
+        let stats = vm.activePETRegionStats(for: map, classID: 1)
+
+        XCTAssertEqual(stats?.suvMax ?? 0, 10, accuracy: 1e-9)
+        XCTAssertEqual(stats?.suvMean ?? 0, 7.5, accuracy: 1e-9)
+    }
+
     func testPETSegmentationThresholdUsesSUVTransform() {
         let volume = ImageVolume(
             pixels: [1, 2, 3, 4],
@@ -696,6 +806,37 @@ final class GeometryAndIOTests: XCTestCase {
 
         XCTAssertEqual(count, 2)
         XCTAssertEqual(map.voxelCounts()[1], 2)
+    }
+
+    @MainActor
+    func testViewerSUVThresholdUsesMatchedVolumeScale() {
+        let ct = ImageVolume(
+            pixels: [0, 0],
+            depth: 1,
+            height: 1,
+            width: 2,
+            modality: "CT"
+        )
+        let pet = ImageVolume(
+            pixels: [10, 20],
+            depth: 1,
+            height: 1,
+            width: 2,
+            modality: "PT",
+            suvScaleFactor: 0.5
+        )
+        let vm = ViewerViewModel()
+        vm.currentVolume = ct
+        vm.suvSettings.mode = .storedSUV
+        let pair = FusionPair(base: ct, overlay: pet)
+        pair.resampledOverlay = pet
+        vm.fusion = pair
+        let map = vm.labeling.createLabelMap(for: ct)
+
+        vm.thresholdActiveLabel(atOrAbove: 8)
+
+        XCTAssertEqual(map.voxels, [0, 1],
+                       "Thresholding must compare scaled SUV, not raw PET counts")
     }
 
     func testPETSegmentationGradientEdgeStopsAtSUVDrop() {
@@ -1326,6 +1467,40 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertLessThanOrEqual(result.insideVoxels, w * h * d)
     }
 
+    func testLevelSetReturnsCleanlyForMismatchedLabelGrid() {
+        let volume = ImageVolume(pixels: [0, 1, 2, 3], depth: 1, height: 2, width: 2)
+        let label = LabelMap(parentSeriesUID: volume.seriesUID, depth: 1, height: 1, width: 1)
+
+        let result = LevelSetSegmentation.evolve(
+            volume: volume,
+            label: label,
+            seeds: [LevelSetSegmentation.Seed(z: 0, y: 0, x: 0, radius: 1)],
+            speed: .regionCompetition(midpoint: 1, halfWidth: 1),
+            classID: 1
+        )
+
+        XCTAssertEqual(result.insideVoxels, 0)
+        XCTAssertEqual(result.iterations, 0)
+        XCTAssertEqual(label.voxels, [0])
+    }
+
+    func testLevelSetHandlesTinyVolumesWithoutRangeTrap() {
+        let volume = ImageVolume(pixels: [0], depth: 1, height: 1, width: 1)
+        let label = LabelMap(parentSeriesUID: volume.seriesUID, depth: 1, height: 1, width: 1)
+
+        let result = LevelSetSegmentation.evolve(
+            volume: volume,
+            label: label,
+            seeds: [LevelSetSegmentation.Seed(z: 0, y: 0, x: 0, radius: 1)],
+            speed: .regionCompetition(midpoint: 0, halfWidth: 1),
+            classID: 7
+        )
+
+        XCTAssertEqual(result.insideVoxels, 1)
+        XCTAssertEqual(result.iterations, 0)
+        XCTAssertEqual(label.voxels, [7])
+    }
+
     // MARK: - Marching cubes mesh export
 
     func testMarchingCubesGeneratesTrianglesForBinaryCube() throws {
@@ -1764,6 +1939,28 @@ final class GeometryAndIOTests: XCTestCase {
                        "Active-PET helper must honour per-volume scale")
     }
 
+    @MainActor
+    func testSUVProbeUsesExplicitVolumeScale() {
+        let vm = ViewerViewModel()
+        vm.suvSettings.mode = .storedSUV
+        vm.currentVolume = ImageVolume(
+            pixels: [100],
+            depth: 1, height: 1, width: 1,
+            modality: "PT",
+            suvScaleFactor: 1
+        )
+        let probedVolume = ImageVolume(
+            pixels: [10],
+            depth: 1, height: 1, width: 1,
+            modality: "PT",
+            suvScaleFactor: 0.25
+        )
+
+        let probe = vm.suvProbe(z: 0, y: 0, x: 0, in: probedVolume)
+
+        XCTAssertEqual(probe?.suv ?? 0, 2.5, accuracy: 1e-9)
+    }
+
     func testNNUnetRunnerReportsAvailabilityFromPATH() {
         // We don't assume nnUNetv2_predict is installed in CI — just prove
         // the detector runs without crashing and returns a reasonable value.
@@ -1817,6 +2014,30 @@ final class GeometryAndIOTests: XCTestCase {
         let after = store.load()
         XCTAssertEqual(after.first?.id, "v5", "re-opened entry should jump to head")
         XCTAssertEqual(after.filter { $0.id == "v5" }.count, 1, "no duplicates")
+    }
+
+    @MainActor
+    func testRecentVolumesStoreClearPostsChangeNotification() {
+        let defaultsName = "Tracer.Tests.Recents.Clear.\(UUID().uuidString)"
+        guard let suite = UserDefaults(suiteName: defaultsName) else {
+            return XCTFail("Could not create test UserDefaults suite")
+        }
+        defer { suite.removePersistentDomain(forName: defaultsName) }
+
+        let store = RecentVolumesStore(defaults: suite)
+        let didNotify = expectation(description: "recent volumes change notification")
+        let token = NotificationCenter.default.addObserver(
+            forName: .recentVolumesDidChange,
+            object: nil,
+            queue: nil
+        ) { _ in
+            didNotify.fulfill()
+        }
+        defer { NotificationCenter.default.removeObserver(token) }
+
+        store.clear()
+
+        wait(for: [didNotify], timeout: 1)
     }
 
     // MARK: - Settings

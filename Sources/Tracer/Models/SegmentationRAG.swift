@@ -1,6 +1,6 @@
 import Foundation
 
-public enum SegmentationExecutionEngine: String, Equatable, Hashable {
+public enum SegmentationExecutionEngine: String, Equatable, Hashable, Sendable {
     case localTools
     case monaiLabel
     case nnUNet
@@ -14,7 +14,7 @@ public enum SegmentationExecutionEngine: String, Equatable, Hashable {
     }
 }
 
-public struct SegmentationLabelRoute: Equatable, Hashable {
+public struct SegmentationLabelRoute: Equatable, Hashable, Sendable {
     public let labelName: String
     public let aliases: [String]
 
@@ -24,7 +24,7 @@ public struct SegmentationLabelRoute: Equatable, Hashable {
     }
 }
 
-public struct SegmentationModelCard: Identifiable, Equatable, Hashable {
+public struct SegmentationModelCard: Identifiable, Equatable, Hashable, Sendable {
     public let id: String
     public let displayName: String
     public let presetName: String
@@ -62,7 +62,7 @@ public struct SegmentationModelCard: Identifiable, Equatable, Hashable {
     }
 }
 
-public struct SegmentationRAGPlan: Equatable {
+public struct SegmentationRAGPlan: Equatable, Sendable {
     public let diseaseProcess: String
     public let requestedTarget: String
     public let modelName: String
