@@ -23,6 +23,7 @@ public final class ClassificationViewModel: ObservableObject {
     a CT image of a hepatic metastasis
     """
     @Published public var zeroShotPromptLabels: String = "benign\nmalignant\nmetastasis"
+    @Published public var zeroShotTokenIDs: String = ""
     @Published public var customEnvironment: String = ""
     @Published public var candidateLabels: String = "benign\nmalignant"
 
@@ -87,6 +88,7 @@ public final class ClassificationViewModel: ObservableObject {
             lastResults = []
             return []
         }
+        let classifierMask = labelMap.snapshot(name: "\(labelMap.name) classification snapshot")
 
         // Build the concrete classifier from the entry + user config.
         let classifier: LesionClassifier
@@ -110,7 +112,7 @@ public final class ClassificationViewModel: ObservableObject {
             do {
                 let result = try await classifier.classify(
                     volume: volume,
-                    mask: labelMap,
+                    mask: classifierMask,
                     classID: lesion.classID,
                     bounds: bounds
                 )
@@ -134,20 +136,14 @@ public final class ClassificationViewModel: ObservableObject {
     private func makeClassifier(for entry: LesionClassifierCatalog.Entry) throws -> LesionClassifier {
         switch entry.backend {
         case .radiomicsTree:
-            // Demo / placeholder model — two-class benign/malignant with a
-            // single stump on the 90th percentile. Users will override with
-            // their own trained tree model via `customModelPath`. Keeps the
-            // code path exercisable without shipping a real classifier weight.
-            let model: TreeModel
-            if !customModelPath.isEmpty {
-                model = try TreeModel.load(
-                    contentsOf: URL(fileURLWithPath: (customModelPath as NSString).expandingTildeInPath)
+            guard !customModelPath.isEmpty else {
+                throw ClassificationError.modelUnavailable(
+                    "Provide a trained TreeModel JSON exported from your training pipeline."
                 )
-            } else {
-                model = Self.builtInPlaceholderTree(classes: entry.classes.isEmpty
-                                                    ? ["benign", "malignant"]
-                                                    : entry.classes)
             }
+            let model = try TreeModel.load(
+                contentsOf: URL(fileURLWithPath: (customModelPath as NSString).expandingTildeInPath)
+            )
             return RadiomicsLesionClassifier(
                 id: entry.id,
                 displayName: entry.displayName,
@@ -190,16 +186,19 @@ public final class ClassificationViewModel: ObservableObject {
 
             let prompts = zeroShotPromptLines(zeroShotPrompts)
             let labels = zeroShotPromptLines(zeroShotPromptLabels)
-            guard prompts.count == labels.count, !prompts.isEmpty else {
+            let tokenRows = try Self.parseZeroShotTokenIDs(zeroShotTokenIDs)
+            guard prompts.count == labels.count,
+                  tokenRows.count == labels.count,
+                  !prompts.isEmpty else {
                 throw ClassificationError.modelUnavailable(
-                    "Zero-shot needs matching prompt + label lines"
+                    "MedSigLIP needs matching label, prompt, and tokenizer ID lines."
                 )
             }
-            let tokenised = zip(labels, prompts).map { label, text in
+            let tokenised = zip(zip(labels, prompts), tokenRows).map { pair, tokenIDs in
                 MedSigLIPClassifier.TokenisedPrompt(
-                    label: label,
-                    text: text,
-                    tokenIDs: Self.simpleByteTokens(text: text, maxLen: 77)
+                    label: pair.0,
+                    text: pair.1,
+                    tokenIDs: tokenIDs
                 )
             }
             let spec = MedSigLIPClassifier.Spec(
@@ -296,45 +295,26 @@ public final class ClassificationViewModel: ObservableObject {
             .filter { !$0.isEmpty }
     }
 
-    /// Extremely simple placeholder "tokeniser" — UTF-8 byte codes padded to
-    /// `maxLen`. MedSigLIP in the real world uses SentencePiece; users who
-    /// need real tokenisation should pre-build token ids in Python and pass
-    /// them through `tokenisedPrompts` directly on the Spec. This stub keeps
-    /// the code path exercisable without a bundled tokenizer.
-    private static func simpleByteTokens(text: String, maxLen: Int) -> [Int32] {
-        var ids: [Int32] = text.utf8.prefix(maxLen).map { Int32($0) }
-        while ids.count < maxLen { ids.append(0) }
-        return ids
-    }
-
-    /// A degenerate 2-class radiomics tree model used when the user hasn't
-    /// supplied their own JSON. Single feature, single split — it exists
-    /// so the "radiomics" path is exercisable end-to-end in tests and demos
-    /// without shipping real clinical weights.
-    private static func builtInPlaceholderTree(classes: [String]) -> TreeModel {
-        let leafA = Array(repeating: 0.0, count: classes.count).enumerated().map { i, _ in
-            i == 0 ? 0.8 : (i == 1 ? 0.2 : 0)
-        }
-        let leafB = Array(repeating: 0.0, count: classes.count).enumerated().map { i, _ in
-            i == 1 ? 0.8 : (i == 0 ? 0.2 : 0)
-        }
-        let normA = leafA.map { $0 / max(leafA.reduce(0, +), 1e-12) }
-        let normB = leafB.map { $0 / max(leafB.reduce(0, +), 1e-12) }
-        return TreeModel(
-            features: ["original_firstorder_90Percentile"],
-            classes: classes,
-            aggregation: .mean,
-            trees: [
-                TreeModel.Tree(nodes: [
-                    TreeModel.Node(feature: 0, threshold: 150, left: 1, right: 2,
-                                   leaf: nil),
-                    TreeModel.Node(feature: nil, threshold: nil, left: nil, right: nil,
-                                   leaf: normA),
-                    TreeModel.Node(feature: nil, threshold: nil, left: nil, right: nil,
-                                   leaf: normB)
-                ])
-            ]
-        )
+    static func parseZeroShotTokenIDs(_ raw: String) throws -> [[Int32]] {
+        try raw.split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .map { line in
+                let pieces = line.split { ch in
+                    ch == "," || ch == " " || ch == "\t"
+                }
+                guard !pieces.isEmpty else {
+                    throw ClassificationError.modelUnavailable("MedSigLIP token ID line is empty.")
+                }
+                return try pieces.map { piece -> Int32 in
+                    guard let value = Int32(String(piece)) else {
+                        throw ClassificationError.modelUnavailable(
+                            "Invalid MedSigLIP token ID: \(piece)"
+                        )
+                    }
+                    return value
+                }
+            }
     }
 
     #if canImport(AppKit)

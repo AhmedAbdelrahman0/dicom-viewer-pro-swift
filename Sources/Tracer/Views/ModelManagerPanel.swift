@@ -309,42 +309,14 @@ public struct ModelManagerPanel: View {
 private struct FlowRow<T: Hashable, Content: View>: View {
     let items: [T]
     let content: (T) -> Content
+    private let columns = [
+        GridItem(.adaptive(minimum: 96), spacing: 4, alignment: .leading)
+    ]
 
     var body: some View {
-        WrapHStack(data: items) { content($0) }
-    }
-}
-
-private struct WrapHStack<T: Hashable, Content: View>: View {
-    let data: [T]
-    let content: (T) -> Content
-
-    var body: some View {
-        GeometryReader { geo in
-            self.contentBody(in: geo.size)
-        }
-        .frame(minHeight: 24)
-    }
-
-    private func contentBody(in size: CGSize) -> some View {
-        var x: CGFloat = 0
-        var y: CGFloat = 0
-        return ZStack(alignment: .topLeading) {
-            ForEach(data, id: \.self) { item in
+        LazyVGrid(columns: columns, alignment: .leading, spacing: 4) {
+            ForEach(items, id: \.self) { item in
                 content(item)
-                    .alignmentGuide(.leading) { d in
-                        if abs(x - d.width) > size.width {
-                            x = 0; y -= (d.height + 4)
-                        }
-                        let result = x
-                        if item == data.last { x = 0 } else { x -= (d.width + 4) }
-                        return result
-                    }
-                    .alignmentGuide(.top) { _ in
-                        let result = y
-                        if item == data.last { y = 0 }
-                        return result
-                    }
             }
         }
     }

@@ -798,6 +798,19 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertTrue(ids.contains("medsiglip-zero-shot"))
         XCTAssertTrue(ids.contains("medgemma-4b"))
         XCTAssertTrue(ids.contains("subprocess-pyradiomics"))
+        XCTAssertTrue(LesionClassifierCatalog.lungNoduleRadiomics.requiresConfiguration)
+        XCTAssertTrue(LesionClassifierCatalog.petLesionRadiomics.notes.contains("Training/research"))
+    }
+
+    @MainActor
+    func testMedSigLIPTokenIDParserRequiresRealTokenizerOutput() throws {
+        let parsed = try ClassificationViewModel.parseZeroShotTokenIDs("""
+        1 2 3 0
+        9,8,7,0
+        """)
+        XCTAssertEqual(parsed, [[1, 2, 3, 0], [9, 8, 7, 0]])
+
+        XCTAssertThrowsError(try ClassificationViewModel.parseZeroShotTokenIDs("1 two 3"))
     }
 
     func testMedGemmaParserExtractsLabelAndRationale() throws {
@@ -2444,6 +2457,51 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(exports.count, 2)
         XCTAssertTrue(exports.contains("nnUNet_results=/weights"))
         XCTAssertTrue(exports.contains("CUDA_VISIBLE_DEVICES=0"))
+    }
+
+    func testRemoteExecutorShellEscapesEnvironmentExports() {
+        XCTAssertEqual(
+            RemoteExecutor.shellExportCommand("nnUNet_results=/path with spaces/weights"),
+            "export nnUNet_results='/path with spaces/weights';"
+        )
+        XCTAssertEqual(
+            RemoteExecutor.shellExportCommand("CUDA_VISIBLE_DEVICES=0; echo nope"),
+            "export CUDA_VISIBLE_DEVICES='0; echo nope';"
+        )
+        XCTAssertNil(RemoteExecutor.shellExportCommand("bad-name=value"))
+    }
+
+    func testRemoteNNUnetRejectsWorldGeometryMismatchBeforeSSH() async throws {
+        let reference = ImageVolume(
+            pixels: [Float](repeating: 0, count: 8),
+            depth: 2, height: 2, width: 2,
+            spacing: (1, 1, 1),
+            origin: (0, 0, 0),
+            modality: "CT"
+        )
+        let shifted = ImageVolume(
+            pixels: [Float](repeating: 0, count: 8),
+            depth: 2, height: 2, width: 2,
+            spacing: (1, 1, 1),
+            origin: (5, 0, 0),
+            modality: "PT"
+        )
+        let cfg = DGXSparkConfig(host: "dgx.invalid", enabled: true)
+        let runner = RemoteNNUnetRunner(configuration: .init(
+            dgx: cfg,
+            datasetID: "Dataset999_Test"
+        ))
+
+        do {
+            _ = try await runner.runInference(channels: [reference, shifted],
+                                              referenceVolume: reference)
+            XCTFail("Expected geometry mismatch before any SSH command is launched")
+        } catch let error as RemoteNNUnetRunner.Error {
+            guard case .geometryMismatch(let message) = error else {
+                return XCTFail("Unexpected remote nnU-Net error: \(error)")
+            }
+            XCTAssertTrue(message.contains("origin"))
+        }
     }
 
     @MainActor

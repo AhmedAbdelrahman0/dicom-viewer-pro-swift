@@ -68,49 +68,49 @@ public enum LesionClassifierCatalog {
 
     // MARK: - Curated entries
 
-    // --- Radiomics (ships with a default tree model JSON bundled in
-    //     Resources; entries are self-sufficient). ---
+    // --- Radiomics feature pipelines. Tracer supplies feature extraction and
+    //     model loading; researchers supply trained/calibrated tree JSON. ---
 
     public static let lungNoduleRadiomics = Entry(
         id: "lung-nodule-radiomics",
-        displayName: "Lung nodule — radiomics (pyradiomics features + RF)",
+        displayName: "Lung nodule — radiomics training scaffold",
         backend: .radiomicsTree,
         modality: .CT,
         bodyRegion: "Thorax",
         classes: ["benign", "malignant"],
-        description: "Classic 30-feature radiomics signature feeding a small RandomForest trained on LIDC-IDRI. Runs entirely on CPU, no external dependencies.",
-        provenance: "Trained on LIDC-IDRI — public research dataset.",
-        notes: "Sub-second per lesion. Apache-2.0 (pyradiomics port).",
+        description: "Extracts a 30-feature pyradiomics-compatible signature and runs a user-supplied TreeModel JSON exported from your training pipeline.",
+        provenance: "No bundled weights. Use your own LIDC-IDRI-trained or institution-trained model.",
+        notes: "Training/research workflow only. Requires calibration and validation before any clinical use.",
         license: "Apache-2.0 (code)",
-        requiresConfiguration: false
+        requiresConfiguration: true
     )
 
     public static let liverLesionRadiomics = Entry(
         id: "liver-lesion-radiomics",
-        displayName: "Liver lesion — radiomics (pyradiomics features + XGBoost)",
+        displayName: "Liver lesion — radiomics training scaffold",
         backend: .radiomicsTree,
         modality: .CT,
         bodyRegion: "Abdomen",
         classes: ["benign", "HCC", "metastasis"],
-        description: "Radiomics signature from the LiTS challenge, distilled into an XGBoost tree ensemble. Three-way HCC / mets / benign discrimination.",
-        provenance: "LiTS + in-house curation.",
-        notes: "Drop a volume + liver-lesion mask in; get predictions in <1 s.",
+        description: "Extracts liver-lesion radiomics features and runs a user-supplied TreeModel JSON trained outside Tracer.",
+        provenance: "No bundled weights. Bring a LiTS-trained, private-cohort, or experiment-specific model.",
+        notes: "Training/research workflow only. Treat outputs as experiment results, not diagnosis.",
         license: "Apache-2.0 (code), data references LiTS CC-BY-SA",
-        requiresConfiguration: false
+        requiresConfiguration: true
     )
 
     public static let petLesionRadiomics = Entry(
         id: "pet-lesion-radiomics",
-        displayName: "PET lesion — radiomics (SUV-scaled features + XGBoost)",
+        displayName: "PET lesion — SUV radiomics training scaffold",
         backend: .radiomicsTree,
         modality: .PT,
         bodyRegion: "Whole Body",
         classes: ["physiologic", "inflammatory", "malignant"],
-        description: "AutoPET-inspired radiomics signature — SUV-centric first-order features + shape compactness + texture.",
-        provenance: "AutoPET II training set (FDG-PET/CT).",
-        notes: "Intended as a triage tool after a lesion segmentation step.",
+        description: "Extracts SUV-centric first-order, shape, and texture features for a user-supplied PET lesion model.",
+        provenance: "No bundled weights. Bring an AutoPET/FDG-PET-trained model or train one from your labels.",
+        notes: "Training/research workflow only. Requires SUV harmonization and cohort validation.",
         license: "Apache-2.0 (code)",
-        requiresConfiguration: false
+        requiresConfiguration: true
     )
 
     // --- CoreML task-specific. User supplies the .mlpackage path. ---
@@ -166,9 +166,9 @@ public enum LesionClassifierCatalog {
         modality: nil,
         bodyRegion: "Any",
         classes: [],    // user-defined
-        description: "Google MedSigLIP — convert the image + text encoders to CoreML, supply a prompt list, and Tracer returns softmax-scored class probabilities without any training.",
+        description: "Google MedSigLIP — convert image/text encoders to CoreML and supply prompt text plus tokenizer-produced token IDs.",
         provenance: "Google HAI-DEF MedSigLIP.",
-        notes: "Flexible — any modality, any class list. Expect 70-85% of a fine-tuned model's accuracy.",
+        notes: "Training/research workflow only. Requires the real tokenizer output from the model conversion pipeline.",
         license: "Google HAI-DEF (research + commercial with terms)",
         requiresConfiguration: true
     )

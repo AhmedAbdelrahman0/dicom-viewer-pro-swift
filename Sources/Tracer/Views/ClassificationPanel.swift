@@ -105,18 +105,18 @@ public struct ClassificationPanel: View {
 
     private var radiomicsConfig: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Tree model JSON (optional)")
+            Text("Trained TreeModel JSON")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(.secondary)
             HStack {
-                TextField("path/to/model.json", text: $classifier.customModelPath)
+                TextField("path/to/trained-tree-model.json", text: $classifier.customModelPath)
                     .textFieldStyle(.roundedBorder)
                 #if canImport(AppKit)
                 Button("Browse…") { classifier.pickModelPath() }
                     .buttonStyle(.bordered).controlSize(.small)
                 #endif
             }
-            Text("Leave blank to use the built-in placeholder model — useful for exercising the pipeline without real weights.")
+            Text("Required. Tracer extracts features and runs your exported training artifact; it does not ship clinical weights.")
                 .font(.system(size: 10))
                 .foregroundColor(.secondary)
         }
@@ -163,6 +163,15 @@ public struct ClassificationPanel: View {
             TextEditor(text: $classifier.zeroShotPrompts)
                 .font(.system(size: 12, design: .monospaced))
                 .frame(height: 120)
+                .background(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.3)))
+
+            Text("Token IDs from model tokenizer (one line per prompt)")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.secondary)
+                .padding(.top, 4)
+            TextEditor(text: $classifier.zeroShotTokenIDs)
+                .font(.system(size: 12, design: .monospaced))
+                .frame(height: 80)
                 .background(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.3)))
         }
     }

@@ -65,7 +65,7 @@ public final class RemoteNNUnetRunner: @unchecked Sendable {
         }
     }
 
-    public struct InferenceResult {
+    public struct InferenceResult: @unchecked Sendable {
         public let labelMap: LabelMap
         public let durationSeconds: TimeInterval
         public let stderr: String
@@ -113,13 +113,13 @@ public final class RemoteNNUnetRunner: @unchecked Sendable {
         resetCancel()
 
         // Geometry parity — same contract as the local runner.
-        for (idx, channel) in channels.enumerated() where idx > 0 {
-            guard channel.width == referenceVolume.width,
-                  channel.height == referenceVolume.height,
-                  channel.depth == referenceVolume.depth else {
-                throw Error.geometryMismatch(
-                    "channel \(idx) is \(channel.width)x\(channel.height)x\(channel.depth), reference is \(referenceVolume.width)x\(referenceVolume.height)x\(referenceVolume.depth)"
-                )
+        for (idx, channel) in channels.enumerated() {
+            if let mismatch = NNUnetRunner.gridMismatchDescription(
+                channel,
+                reference: referenceVolume,
+                channelIndex: idx
+            ) {
+                throw Error.geometryMismatch(mismatch)
             }
         }
 
@@ -147,7 +147,7 @@ public final class RemoteNNUnetRunner: @unchecked Sendable {
         if isCancelled { throw Error.cancelled }
 
         logSink("→ Staging \(channels.count) channel(s) to \(configuration.dgx.sshDestination):\(remoteIn)")
-        try executor.uploadDirectory(localIn, toRemote: remoteBase)
+        try executor.uploadDirectory(localIn, toRemote: remoteIn)
         if isCancelled { throw Error.cancelled }
 
         // Build the nnU-Net command.

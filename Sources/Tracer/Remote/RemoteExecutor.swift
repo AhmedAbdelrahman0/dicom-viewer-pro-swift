@@ -68,7 +68,7 @@ public final class RemoteExecutor: @unchecked Sendable {
         var prefix = ""
         let envs = config.environmentExports()
         if !envs.isEmpty {
-            prefix = envs.map { "export \($0);" }.joined(separator: " ") + " "
+            prefix = envs.compactMap(Self.shellExportCommand).joined(separator: " ") + " "
         }
         let full = prefix + command
 
@@ -190,6 +190,15 @@ public final class RemoteExecutor: @unchecked Sendable {
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
+        let stdoutBuffer = ProcessOutputBuffer()
+        let stderrBuffer = ProcessOutputBuffer()
+        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
+            stdoutBuffer.append(handle.availableData)
+        }
+        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+            stderrBuffer.append(handle.availableData)
+        }
+
         try process.run()
 
         let timer: DispatchSourceTimer? = timeoutSeconds.map {
@@ -203,9 +212,13 @@ public final class RemoteExecutor: @unchecked Sendable {
         process.waitUntilExit()
         timer?.cancel()
 
-        let stdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(),
-                             encoding: .utf8) ?? ""
+        stdoutPipe.fileHandleForReading.readabilityHandler = nil
+        stderrPipe.fileHandleForReading.readabilityHandler = nil
+        stdoutBuffer.append(stdoutPipe.fileHandleForReading.readDataToEndOfFile())
+        stderrBuffer.append(stderrPipe.fileHandleForReading.readDataToEndOfFile())
+
+        let stdout = stdoutBuffer.data()
+        let stderr = stderrBuffer.string()
         return RunResult(exitCode: process.terminationStatus,
                          stdout: stdout,
                          stderr: stderr)
@@ -216,5 +229,17 @@ public final class RemoteExecutor: @unchecked Sendable {
     /// does — suitable for anything we're passing to the remote `sh -c`.
     public static func shellEscape(_ s: String) -> String {
         "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    public static func shellExportCommand(_ assignment: String) -> String? {
+        let pieces = assignment.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+        guard pieces.count == 2 else { return nil }
+        let key = pieces[0].trimmingCharacters(in: .whitespacesAndNewlines)
+        guard key.range(of: #"^[A-Za-z_][A-Za-z0-9_]*$"#,
+                        options: .regularExpression) != nil else {
+            return nil
+        }
+        let value = String(pieces[1])
+        return "export \(key)=\(shellEscape(value));"
     }
 }

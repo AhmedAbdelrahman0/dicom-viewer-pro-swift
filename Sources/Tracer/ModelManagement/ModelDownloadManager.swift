@@ -52,6 +52,12 @@ public final class ModelDownloadManager: ObservableObject {
         do {
             let (tempURL, response) = try await urlSessionDownload(from: effectiveURL,
                                                                    modelID: model.id)
+            tasks[model.id] = nil
+            if let http = response as? HTTPURLResponse,
+               !(200..<300).contains(http.statusCode) {
+                try? FileManager.default.removeItem(at: tempURL)
+                throw ModelDownloadError.httpStatus(http.statusCode)
+            }
             // Move the tempfile into the model directory, replacing any prior.
             if FileManager.default.fileExists(atPath: dst.path) {
                 try FileManager.default.removeItem(at: dst)
@@ -86,6 +92,7 @@ public final class ModelDownloadManager: ObservableObject {
             statusByModelID[model.id] = .completed(sizeBytes: actualSize)
             return .success(persisted)
         } catch {
+            tasks[model.id] = nil
             if (error as? URLError)?.code == .cancelled {
                 statusByModelID[model.id] = .cancelled
                 return .failure(ModelDownloadError.cancelled)
@@ -110,7 +117,6 @@ public final class ModelDownloadManager: ObservableObject {
     private func urlSessionDownload(from url: URL,
                                     modelID: String) async throws -> (URL, URLResponse) {
         try await withCheckedThrowingContinuation { continuation in
-            let session = URLSession.shared
             let delegate = DownloadProgressDelegate { [weak self] received, total in
                 Task { @MainActor in
                     self?.statusByModelID[modelID] =
@@ -143,7 +149,6 @@ public final class ModelDownloadManager: ObservableObject {
                 }
                 continuation.resume(throwing: ModelDownloadError.noResponse)
             }
-            _ = session   // keep the reference alive
             tasks[modelID] = task
             task.resume()
         }
@@ -167,6 +172,7 @@ public enum ModelDownloadError: Error, LocalizedError {
     case remoteArtifact
     case cancelled
     case hashMismatch(expected: String, actual: String)
+    case httpStatus(Int)
 
     public var errorDescription: String? {
         switch self {
@@ -176,6 +182,8 @@ public enum ModelDownloadError: Error, LocalizedError {
         case .cancelled:   return "Download cancelled."
         case .hashMismatch(let expected, let actual):
             return "SHA-256 mismatch: expected \(expected), got \(actual)."
+        case .httpStatus(let status):
+            return "Model download failed with HTTP \(status)."
         }
     }
 }
@@ -183,9 +191,9 @@ public enum ModelDownloadError: Error, LocalizedError {
 // MARK: - URLSession progress delegate
 
 private final class DownloadProgressDelegate: NSObject, URLSessionDownloadDelegate {
-    private let onProgress: (Int64, Int64) -> Void
+    private let onProgress: @Sendable (Int64, Int64) -> Void
 
-    init(onProgress: @escaping (Int64, Int64) -> Void) {
+    init(onProgress: @escaping @Sendable (Int64, Int64) -> Void) {
         self.onProgress = onProgress
     }
 

@@ -105,7 +105,7 @@ public final class NNUnetRunner: @unchecked Sendable {
 
     // MARK: - Result
 
-    public struct InferenceResult {
+    public struct InferenceResult: @unchecked Sendable {
         public let labelMap: LabelMap
         public let durationSeconds: TimeInterval
         public let stderr: String
@@ -317,10 +317,10 @@ public final class NNUnetRunner: @unchecked Sendable {
 
     // MARK: - Subprocess plumbing
 
-    private static func gridMismatchDescription(_ channel: ImageVolume,
-                                                reference: ImageVolume,
-                                                channelIndex: Int,
-                                                tolerance: Double = 1e-4) -> String? {
+    static func gridMismatchDescription(_ channel: ImageVolume,
+                                        reference: ImageVolume,
+                                        channelIndex: Int,
+                                        tolerance: Double = 1e-4) -> String? {
         guard channel.width == reference.width,
               channel.height == reference.height,
               channel.depth == reference.depth else {

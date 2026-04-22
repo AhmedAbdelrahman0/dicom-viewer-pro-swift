@@ -126,6 +126,15 @@ public final class SubprocessLesionClassifier: LesionClassifier, @unchecked Send
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
+        let stdoutBuffer = ProcessOutputBuffer()
+        let stderrBuffer = ProcessOutputBuffer()
+        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
+            stdoutBuffer.append(handle.availableData)
+        }
+        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+            stderrBuffer.append(handle.availableData)
+        }
+
         do {
             try process.run()
         } catch {
@@ -153,13 +162,16 @@ public final class SubprocessLesionClassifier: LesionClassifier, @unchecked Send
         }
         timeoutTask.cancel()
 
-        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        stdoutPipe.fileHandleForReading.readabilityHandler = nil
+        stderrPipe.fileHandleForReading.readabilityHandler = nil
+        stdoutBuffer.append(stdoutPipe.fileHandleForReading.readDataToEndOfFile())
+        stderrBuffer.append(stderrPipe.fileHandleForReading.readDataToEndOfFile())
+        let stdoutData = stdoutBuffer.data()
+        let stderr = stderrBuffer.string()
 
         guard process.terminationStatus == 0 else {
-            let err = String(data: stderrData, encoding: .utf8) ?? ""
             throw ClassificationError.inferenceFailed(
-                "subprocess exited \(process.terminationStatus): \(err)"
+                "subprocess exited \(process.terminationStatus): \(stderr)"
             )
         }
 

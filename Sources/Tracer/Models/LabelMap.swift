@@ -5,7 +5,7 @@ import SwiftUI
 ///
 /// Each voxel stores a `UInt16` class ID. Value `0` means "background /
 /// unlabeled". Non-zero values index into the associated `LabelClass` list.
-public final class LabelMap: Identifiable, ObservableObject {
+public final class LabelMap: Identifiable, ObservableObject, @unchecked Sendable {
     public let id = UUID()
 
     /// Parent volume UID — this label map is defined in that volume's voxel grid.
@@ -44,6 +44,21 @@ public final class LabelMap: Identifiable, ObservableObject {
         self.voxels = [UInt16](repeating: 0, count: depth * height * width)
         self.name = name
         self.classes = classes
+    }
+
+    public func snapshot(name: String? = nil) -> LabelMap {
+        let copy = LabelMap(
+            parentSeriesUID: parentSeriesUID,
+            depth: depth,
+            height: height,
+            width: width,
+            name: name ?? self.name,
+            classes: classes
+        )
+        copy.voxels = voxels
+        copy.opacity = opacity
+        copy.visible = visible
+        return copy
     }
 
     // MARK: - Voxel access

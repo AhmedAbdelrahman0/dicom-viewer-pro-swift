@@ -23,11 +23,11 @@ public enum RadiomicsExtractor {
 
     /// Number of gray levels to discretise to for GLCM features. Matches
     /// pyradiomics' default.
-    public static var glcmGrayLevels: Int = 32
+    public static let glcmGrayLevels: Int = 32
 
     /// Upper cap on surface-voxel samples when computing Maximum3DDiameter
     /// — the naïve algorithm is O(N²), so large lesions get sub-sampled.
-    public static var maximum3DDiameterSampleCap: Int = 2000
+    public static let maximum3DDiameterSampleCap: Int = 2000
 
     public static func extract(volume: ImageVolume,
                                mask: LabelMap,
