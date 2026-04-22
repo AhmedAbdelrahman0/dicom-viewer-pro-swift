@@ -16,6 +16,11 @@ public struct SliceView: View {
     @State private var dragStart: CGPoint?
     @State private var lastPaintPoint: (Int, Int)?
 
+    /// Voxel under the mouse cursor — drives the live intensity / SUV /
+    /// world-coordinate badge in the upper-right of the slice view.
+    /// `nil` when the cursor has left the image area.
+    @State private var hoverSample: HoverSample?
+
     public init(axis: Int, title: String) {
         self.axis = axis
         self.title = title
@@ -73,11 +78,15 @@ public struct SliceView: View {
                             .foregroundColor(.gray)
                     }
 
-                    // Info label (top-left)
+                    // Info label (top-left) and hover badge (top-right).
                     VStack {
-                        HStack {
+                        HStack(alignment: .top) {
                             infoText
                             Spacer()
+                            if let sample = hoverSample {
+                                hoverBadge(sample)
+                                    .transition(.opacity)
+                            }
                         }
                         Spacer()
                     }
@@ -89,8 +98,12 @@ public struct SliceView: View {
                 .gesture(dragGesture(geo: geo))
                 .onTapGesture(count: 2) { resetView() }
                 .onContinuousHover { phase in
-                    // Scroll wheel (on macOS) could be connected here via a different
-                    // mechanism; we use onScroll elsewhere.
+                    switch phase {
+                    case .active(let location):
+                        hoverSample = sampleVoxel(at: location, in: geo.size)
+                    case .ended:
+                        hoverSample = nil
+                    }
                 }
                 #if os(macOS)
                 .onAppear { NSCursor.setHiddenUntilMouseMoves(false) }
@@ -192,6 +205,119 @@ public struct SliceView: View {
         case 1: return (v.width, v.depth)
         default: return (v.width, v.height)
         }
+    }
+
+    // MARK: - Hover badge
+
+    /// Live voxel sample under the cursor. Used to populate the top-right
+    /// "hover badge" with raw intensity, SUV (when viewing PET), world
+    /// coordinates, and — when a label map is active — the class name.
+    struct HoverSample: Equatable {
+        let voxelX: Int
+        let voxelY: Int
+        let voxelZ: Int
+        let rawIntensity: Float
+        let suv: Double?
+        let world: SIMD3<Double>
+        let className: String?
+    }
+
+    private func sampleVoxel(at location: CGPoint, in viewSize: CGSize) -> HoverSample? {
+        guard let volume = vm.currentVolume,
+              let cg = vm.makeImage(for: axis) else {
+            return nil
+        }
+        let imgW = CGFloat(cg.width)
+        let imgH = CGFloat(cg.height)
+        let baseFit = min(viewSize.width / imgW, viewSize.height / imgH)
+        let fit = baseFit * zoom
+        guard fit > 0 else { return nil }
+
+        // Map screen point → displayed image point → voxel coordinates.
+        let imageOriginX = (viewSize.width - imgW * fit) / 2 + pan.width
+        let imageOriginY = (viewSize.height - imgH * fit) / 2 + pan.height
+        let localX = (location.x - imageOriginX) / fit
+        let localY = (location.y - imageOriginY) / fit
+        guard localX >= 0, localX < imgW, localY >= 0, localY < imgH else {
+            return nil
+        }
+
+        let px = Int(localX.rounded(.down))
+        let py = Int(localY.rounded(.down))
+        let (vz, vy, vx) = volumeVoxel(px: px, py: py, sliceIndex: vm.sliceIndices[axis])
+        guard vx >= 0, vx < volume.width,
+              vy >= 0, vy < volume.height,
+              vz >= 0, vz < volume.depth else {
+            return nil
+        }
+
+        let linear = vz * volume.height * volume.width + vy * volume.width + vx
+        let raw = volume.pixels[linear]
+
+        let isPET = Modality.normalize(volume.modality) == .PT
+        let suv: Double? = isPET
+            ? vm.suvValue(rawStoredValue: Double(raw), volume: volume)
+            : nil
+
+        let world = volume.worldPoint(
+            voxel: SIMD3<Double>(Double(vx), Double(vy), Double(vz))
+        )
+
+        // Label class name (if an active label map is visible).
+        var className: String?
+        if let map = vm.labeling.activeLabelMap, map.visible,
+           map.width == volume.width,
+           map.height == volume.height,
+           map.depth == volume.depth {
+            let classID = map.voxels[linear]
+            if classID != 0,
+               let cls = map.classInfo(id: classID) {
+                className = cls.name
+            }
+        }
+
+        return HoverSample(
+            voxelX: vx, voxelY: vy, voxelZ: vz,
+            rawIntensity: raw,
+            suv: suv,
+            world: world,
+            className: className
+        )
+    }
+
+    private func volumeVoxel(px: Int, py: Int, sliceIndex: Int) -> (Int, Int, Int) {
+        // Inverse of `vm.makeImage(for:)` axis mapping.
+        switch axis {
+        case 0:  return (py, px, sliceIndex)  // z, y, x
+        case 1:  return (py, sliceIndex, px)
+        default: return (sliceIndex, py, px)
+        }
+    }
+
+    private func hoverBadge(_ sample: HoverSample) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(String(format: "(%d, %d, %d)",
+                        sample.voxelX, sample.voxelY, sample.voxelZ))
+                .foregroundColor(.white)
+            Text(String(format: "raw %.2f", sample.rawIntensity))
+                .foregroundColor(.secondary)
+            if let suv = sample.suv {
+                Text(String(format: "SUV %.2f", suv))
+                    .foregroundColor(.orange)
+            }
+            Text(String(format: "world %.1f, %.1f, %.1f mm",
+                        sample.world.x, sample.world.y, sample.world.z))
+                .foregroundColor(.secondary)
+            if let className = sample.className {
+                Text(className)
+                    .foregroundColor(.green)
+            }
+        }
+        .font(.system(size: 10, design: .monospaced))
+        .padding(.vertical, 4)
+        .padding(.horizontal, 6)
+        .background(Color.black.opacity(0.55))
+        .cornerRadius(4)
     }
 
     // MARK: - Orientation markers

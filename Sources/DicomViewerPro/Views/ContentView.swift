@@ -18,6 +18,11 @@ public struct ContentView: View {
     @State private var showMONAIPanel = false
     @State private var showNNUnetPanel = false
     @State private var showPETEnginePanel = false
+    /// Focus mode — hides the study browser and controls panel so the MPR
+    /// viewport fills the window. Toggled via ⌘E or the toolbar button.
+    /// Persists across launches via `@AppStorage`.
+    @AppStorage("focusModeEnabled") private var focusModeEnabled = false
+    @State private var browserVisibility: NavigationSplitViewVisibility = .all
 
     enum FileImporterMode { case volume, overlay }
     enum DirectoryImporterMode { case open, index }
@@ -25,7 +30,7 @@ public struct ContentView: View {
     public init() {}
 
     public var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $browserVisibility) {
             StudyBrowserView(vm: vm,
                              onImportFolder: {
                                  directoryImporterMode = .open
@@ -116,6 +121,10 @@ public struct ContentView: View {
             fileImporterMode = .volume
             showingFileImporter = true
         }
+        .onAppear {
+            // Honour the persisted focus preference on launch.
+            browserVisibility = focusModeEnabled ? .detailOnly : .all
+        }
         .tooltipHost()  // must wrap the whole window so tooltips escape any clipping
     }
 
@@ -161,8 +170,20 @@ public struct ContentView: View {
             .keyboardShortcut("r", modifiers: [.command])
 
             HoverIconButton(
+                systemImage: focusModeEnabled
+                    ? "arrow.down.right.and.arrow.up.left"
+                    : "arrow.up.left.and.arrow.down.right",
+                tooltip: focusModeEnabled
+                    ? "Exit Focus Mode (⌘E)\nShow the study browser and controls panel."
+                    : "Focus Mode (⌘E)\nHide the side panels so the MPR viewport fills the window.\nGreat for contouring detailed lesions at full resolution."
+            ) {
+                toggleFocusMode()
+            }
+            .keyboardShortcut("e", modifiers: [.command])
+
+            HoverIconButton(
                 systemImage: "bubble.left.and.bubble.right",
-                tooltip: "Assistant Chat\n"
+                tooltip: "Assistant Chat  (⌘⇧A)\n"
                        + "Open the AI assistant panel on the right.\n"
                        + "Type natural-language commands like\n"
                        + "“Show lungs”, “threshold SUV 2.5”, or\n"
@@ -170,41 +191,43 @@ public struct ContentView: View {
             ) {
                 NotificationCenter.default.post(name: .focusAssistantTab, object: nil)
             }
+            .keyboardShortcut("a", modifiers: [.command, .shift])
 
-            HoverIconButton(
-                systemImage: "brain.head.profile",
-                tooltip: "MONAI Label\n"
-                       + "Open the AI-assisted labeling panel.\n"
-                       + "Connect to a local MONAI Label server and run\n"
-                       + "pre-trained segmentation models on the current volume."
-            ) {
-                showMONAIPanel.toggle()
-            }
+            // One menu for every AI engine — replaces three separate toolbar
+            // buttons that were crowding the top bar. Each entry opens its
+            // own sheet / drawer and carries a keyboard shortcut so power
+            // users never have to touch the menu.
+            Menu {
+                Button {
+                    showMONAIPanel.toggle()
+                } label: {
+                    Label("MONAI Label — interactive server models",
+                          systemImage: "brain.head.profile")
+                }
+                .keyboardShortcut("m", modifiers: [.command, .shift])
 
-            HoverIconButton(
-                systemImage: "square.stack.3d.up.fill",
-                tooltip: "nnU-Net\n"
-                       + "Run nnU-Net v2 segmentation on the current volume.\n"
-                       + "Uses your local Python install (nnUNetv2_predict)\n"
-                       + "or a pre-converted CoreML .mlpackage.\n"
-                       + "Models: MSD tasks, KiTS23, AMOS22, BraTS, TotalSegmentator."
-            ) {
-                showNNUnetPanel.toggle()
-            }
+                Button {
+                    showNNUnetPanel.toggle()
+                } label: {
+                    Label("nnU-Net — catalog of 15 pretrained datasets",
+                          systemImage: "square.stack.3d.up.fill")
+                }
+                .keyboardShortcut("n", modifiers: [.command, .shift])
 
-            HoverIconButton(
-                systemImage: "flame.fill",
-                tooltip: "PET Engine\n"
-                       + "Unified panel for PET-specific AI paths:\n"
-                       + "• AutoPET II (FDG baseline, 2-channel CT+PET)\n"
-                       + "• LesionTracer (AutoPET III winner — FDG + PSMA)\n"
-                       + "• LesionLocator (AutoPET IV interactive, experimental)\n"
-                       + "• MedSAM2 box-prompt refinement\n"
-                       + "• TMTV / TLG quantification\n"
-                       + "• Physiological uptake filter via TotalSegmentator"
-            ) {
-                showPETEnginePanel.toggle()
+                Button {
+                    showPETEnginePanel.toggle()
+                } label: {
+                    Label("PET Engine — AutoPET + MedSAM2 + TMTV",
+                          systemImage: "flame.fill")
+                }
+                .keyboardShortcut("p", modifiers: [.command, .shift])
+            } label: {
+                Label("AI Engines", systemImage: "cpu")
+                    .font(.system(size: 12, weight: .medium))
             }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("AI Engines\n• MONAI Label (⌘⇧M)\n• nnU-Net (⌘⇧N)\n• PET Engine (⌘⇧P)")
 
             Spacer()
 
@@ -285,6 +308,15 @@ public struct ContentView: View {
     }
 
     // MARK: - File handlers
+
+    /// Toggle focus mode. In focus mode both the browser and the controls
+    /// panel slide out of the way; the center viewport gets the full window.
+    private func toggleFocusMode() {
+        focusModeEnabled.toggle()
+        withAnimation(.easeInOut(duration: 0.2)) {
+            browserVisibility = focusModeEnabled ? .detailOnly : .all
+        }
+    }
 
     private func handleFileImport(result: Result<[URL], Error>) {
         guard case .success(let urls) = result, let url = urls.first else { return }
