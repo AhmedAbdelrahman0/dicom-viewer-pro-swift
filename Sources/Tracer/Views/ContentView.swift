@@ -146,7 +146,11 @@ public struct ContentView: View {
         }
         #endif
         .onAppear {
-            browserVisibility = .all
+            // Honour the persisted focus preference on launch so users who
+            // quit while in Focus Mode come back into Focus Mode. Using
+            // `.detailOnly` keeps the viewport dominant; exiting Focus Mode
+            // later re-expands via the `.onChange` handler above.
+            browserVisibility = focusModeEnabled ? .detailOnly : .all
             // Show the onboarding card set once per install, before the
             // user loads any data.
             if !hasSeenOnboarding {

@@ -386,9 +386,19 @@ public enum NIfTILoader {
         // FHCRC
         if flg & 0x02 != 0 { headerEnd += 2 }
 
-        // Strip 8-byte trailer (CRC32 + ISIZE)
+        // Strip 8-byte trailer (CRC32 + ISIZE) and capture the declared
+        // original size (ISIZE is the low 32 bits of the uncompressed
+        // stream length, little-endian). We re-check it below so a
+        // truncated / corrupted .nii.gz is rejected instead of silently
+        // producing a short decoded buffer.
         let payloadEnd = data.count - 8
         guard payloadEnd > headerEnd else { throw NIfTILoaderError.decompressionFailed }
+
+        let declaredSize: UInt32 =
+            UInt32(data[payloadEnd + 4])
+            | (UInt32(data[payloadEnd + 5]) << 8)
+            | (UInt32(data[payloadEnd + 6]) << 16)
+            | (UInt32(data[payloadEnd + 7]) << 24)
 
         let payload = data.subdata(in: headerEnd..<payloadEnd)
 
@@ -396,7 +406,7 @@ public enum NIfTILoader {
         let bufferSize = max(payload.count * 8, 1 << 20)
         var dstBuffer = Data(count: bufferSize)
 
-        let decompressed = dstBuffer.withUnsafeMutableBytes { (dst: UnsafeMutableRawBufferPointer) -> Int in
+        var produced = dstBuffer.withUnsafeMutableBytes { (dst: UnsafeMutableRawBufferPointer) -> Int in
             payload.withUnsafeBytes { (src: UnsafeRawBufferPointer) -> Int in
                 compression_decode_buffer(
                     dst.baseAddress!.assumingMemoryBound(to: UInt8.self), bufferSize,
@@ -405,9 +415,10 @@ public enum NIfTILoader {
             }
         }
 
-        guard decompressed > 0 else {
+        if produced <= 0 {
             // Retry with a larger buffer if needed (double until we succeed or give up)
             var sz = bufferSize * 2
+            var retriedBuffer: Data?
             while sz < (1 << 30) {
                 var buf = Data(count: sz)
                 let n = buf.withUnsafeMutableBytes { dst in
@@ -419,13 +430,27 @@ public enum NIfTILoader {
                     }
                 }
                 if n > 0 {
-                    return buf.prefix(n)
+                    retriedBuffer = buf
+                    produced = n
+                    break
                 }
                 sz *= 2
             }
+            guard let retriedBuffer else { throw NIfTILoaderError.decompressionFailed }
+            dstBuffer = retriedBuffer
+        }
+
+        // ISIZE consistency check. The gzip spec stores ISIZE mod 2^32, so
+        // for streams larger than 4 GB the trailer rolls over — only
+        // enforce the equality when the decoded size fits in 32 bits.
+        // (We still reject mismatches on smaller files, which catches the
+        // common "truncated mid-stream" failure mode.)
+        if produced <= Int(UInt32.max),
+           UInt32(produced) != declaredSize {
             throw NIfTILoaderError.decompressionFailed
         }
-        return dstBuffer.prefix(decompressed)
+
+        return dstBuffer.prefix(produced)
     }
 
     // MARK: - Modality inference from filename

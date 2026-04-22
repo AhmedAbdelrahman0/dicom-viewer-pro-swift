@@ -701,6 +701,47 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(stats.tlg ?? 0, 0.2, accuracy: 1e-9)
     }
 
+    func testNIfTIGunzipRejectsCorruptedISIZETrailer() throws {
+        // Author a valid .nii.gz, then flip the last 4 bytes (ISIZE) so the
+        // declared uncompressed size no longer matches the real payload.
+        // The loader must detect the trailer mismatch and throw instead of
+        // silently handing back a short buffer that would downstream-read
+        // past the volume's declared dimensions.
+        let volume = ImageVolume(
+            pixels: [0, 0, 0, 0],
+            depth: 1, height: 2, width: 2,
+            modality: "CT"
+        )
+        let map = LabelMap(parentSeriesUID: volume.seriesUID,
+                           depth: 1, height: 2, width: 2)
+        map.setValue(7, z: 0, y: 0, x: 0)
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("iSIZE-\(UUID().uuidString).nii.gz")
+        defer {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(
+                at: url.deletingPathExtension().appendingPathExtension("label.txt")
+            )
+        }
+        try LabelIO.saveNIfTIGz(map, to: url, parentVolume: volume)
+
+        // Mutate the last 4 bytes (ISIZE) to a bogus value.
+        var bytes = try Data(contentsOf: url)
+        let n = bytes.count
+        XCTAssertGreaterThan(n, 8, "Sanity: gz file must have a trailer")
+        bytes[n - 4] = 0xFF
+        bytes[n - 3] = 0xFF
+        bytes[n - 2] = 0xFF
+        bytes[n - 1] = 0x7F
+        try bytes.write(to: url)
+
+        XCTAssertThrowsError(
+            try LabelIO.loadNIfTILabelmap(from: url, parentVolume: volume),
+            "Corrupted ISIZE trailer must be rejected"
+        )
+    }
+
     func testCompressedNIfTILabelExportRoundTrips() throws {
         let volume = ImageVolume(
             pixels: [0, 0, 0, 0],
