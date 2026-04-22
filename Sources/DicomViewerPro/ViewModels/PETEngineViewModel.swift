@@ -162,9 +162,13 @@ public final class PETEngineViewModel: ObservableObject {
             primary: primaryVolume,
             auxiliary: extraChannels
         )
+        let modelChannel0 = makePETModelInputChannel(channel0, viewer: viewer)
+        let modelRestChannels = restChannels.map {
+            makePETModelInputChannel($0, viewer: viewer)
+        }
         guard let labelMap = await nnunet.run(
-            on: channel0,
-            auxiliaryChannels: restChannels,
+            on: modelChannel0,
+            auxiliaryChannels: modelRestChannels,
             labeling: labeling
         ) else {
             statusMessage = nnunet.statusMessage
@@ -238,14 +242,18 @@ public final class PETEngineViewModel: ObservableObject {
         let suv: (Double) -> Double = { [weak viewer] raw in
             viewer?.suvValue(rawStoredValue: raw) ?? raw
         }
-        let report = PETQuantification.compute(
-            petVolume: pet,
-            labelMap: map,
-            suvTransform: suv,
-            connectedComponents: true
-        )
-        lastReport = report
-        statusMessage = report.summary
+        do {
+            let report = try PETQuantification.compute(
+                petVolume: pet,
+                labelMap: map,
+                suvTransform: suv,
+                connectedComponents: true
+            )
+            lastReport = report
+            statusMessage = report.summary
+        } catch {
+            statusMessage = "TMTV failed: \(error.localizedDescription)"
+        }
         return statusMessage
     }
 
@@ -273,12 +281,21 @@ public final class PETEngineViewModel: ObservableObject {
             statusMessage = nnunet.statusMessage
             return statusMessage
         }
-        let result = PhysiologicalUptakeFilter.subtract(
-            petLesionMask: petMask,
-            anatomyMask: anatomyMask,
-            suppressedOrganNames: suppressedOrganNames
-        )
-        statusMessage = "✓ Suppressed \(result.voxelsSuppressed) voxels across \(result.classesSuppressed.count) organs (\(result.classesSuppressed.joined(separator: ", "))"
+        do {
+            let result = try PhysiologicalUptakeFilter.subtract(
+                petLesionMask: petMask,
+                anatomyMask: anatomyMask,
+                suppressedOrganNames: suppressedOrganNames
+            )
+            labeling.activeLabelMap = petMask
+            if labeling.activeClassID == 0, let firstClass = petMask.classes.first {
+                labeling.activeClassID = firstClass.labelID
+            }
+            statusMessage = "✓ Suppressed \(result.voxelsSuppressed) voxels across \(result.classesSuppressed.count) organs (\(result.classesSuppressed.joined(separator: ", "))"
+        } catch {
+            labeling.activeLabelMap = petMask
+            statusMessage = "Physiological uptake filter failed: \(error.localizedDescription)"
+        }
         return statusMessage
     }
 
@@ -320,6 +337,48 @@ public final class PETEngineViewModel: ObservableObject {
             return (aux, [primary] + Array(auxiliary.dropFirst()))
         }
         return (primary, auxiliary)
+    }
+
+    func makePETModelInputChannel(_ volume: ImageVolume,
+                                  viewer: ViewerViewModel) -> ImageVolume {
+        guard Modality.normalize(volume.modality) == .PT else { return volume }
+
+        let scaledPixels = volume.pixels.map { raw -> Float in
+            let suv = suvInputValue(rawStoredValue: Double(raw),
+                                    volume: volume,
+                                    viewer: viewer)
+            return Float(suv)
+        }
+
+        return ImageVolume(
+            pixels: scaledPixels,
+            depth: volume.depth,
+            height: volume.height,
+            width: volume.width,
+            spacing: volume.spacing,
+            origin: volume.origin,
+            direction: volume.direction,
+            modality: volume.modality,
+            seriesUID: volume.seriesUID,
+            studyUID: volume.studyUID,
+            patientID: volume.patientID,
+            patientName: volume.patientName,
+            seriesDescription: volume.seriesDescription.isEmpty
+                ? "PET SUV input"
+                : "\(volume.seriesDescription) (SUV input)",
+            studyDescription: volume.studyDescription,
+            suvScaleFactor: nil,
+            sourceFiles: volume.sourceFiles
+        )
+    }
+
+    private func suvInputValue(rawStoredValue: Double,
+                               volume: ImageVolume,
+                               viewer: ViewerViewModel) -> Double {
+        if viewer.suvSettings.mode == .storedSUV, let scale = volume.suvScaleFactor {
+            return rawStoredValue * scale
+        }
+        return viewer.suvValue(rawStoredValue: rawStoredValue)
     }
 
     private func parseBox(_ text: String) -> CGRect? {

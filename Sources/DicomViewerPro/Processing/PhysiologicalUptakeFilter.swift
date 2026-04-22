@@ -21,6 +21,17 @@ import Foundation
 ///    `PhysiologicalUptakeFilter.subtract(...)`.
 public enum PhysiologicalUptakeFilter {
 
+    public enum FilterError: Swift.Error, LocalizedError {
+        case gridMismatch(String)
+
+        public var errorDescription: String? {
+            switch self {
+            case .gridMismatch(let message):
+                return "Physiological uptake filter grid mismatch: \(message)"
+            }
+        }
+    }
+
     public struct SuppressionResult {
         public let voxelsSuppressed: Int
         public let classesSuppressed: [String]
@@ -45,11 +56,14 @@ public enum PhysiologicalUptakeFilter {
     public static func subtract(petLesionMask: LabelMap,
                                 anatomyMask: LabelMap,
                                 suppressedOrganNames: [String] = defaultSuppressedOrganNames,
-                                dilationIterations: Int = 1) -> SuppressionResult {
-        precondition(petLesionMask.width == anatomyMask.width
-                     && petLesionMask.height == anatomyMask.height
-                     && petLesionMask.depth == anatomyMask.depth,
-                     "PhysiologicalUptakeFilter: mask dimensions must match")
+                                dilationIterations: Int = 1) throws -> SuppressionResult {
+        guard petLesionMask.width == anatomyMask.width,
+              petLesionMask.height == anatomyMask.height,
+              petLesionMask.depth == anatomyMask.depth else {
+            throw FilterError.gridMismatch(
+                "PET mask is \(petLesionMask.width)x\(petLesionMask.height)x\(petLesionMask.depth), anatomy mask is \(anatomyMask.width)x\(anatomyMask.height)x\(anatomyMask.depth). Run the anatomy model on the same grid or resample before filtering."
+            )
+        }
 
         // Resolve names → class ids in the anatomy map.
         let lowered = Set(suppressedOrganNames.map { $0.lowercased() })

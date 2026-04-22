@@ -19,6 +19,17 @@ import Foundation
 /// `ImageVolume` or that the caller passes a `suvTransform` closure.
 public enum PETQuantification {
 
+    public enum QuantificationError: Swift.Error, LocalizedError {
+        case gridMismatch(String)
+
+        public var errorDescription: String? {
+            switch self {
+            case .gridMismatch(let message):
+                return "PET quantification grid mismatch: \(message)"
+            }
+        }
+    }
+
     public struct LesionStats: Identifiable, Equatable {
         public let id: UInt16
         public let classID: UInt16
@@ -85,11 +96,14 @@ public enum PETQuantification {
                                labelMap: LabelMap,
                                classes: [UInt16]? = nil,
                                suvTransform: ((Double) -> Double)? = nil,
-                               connectedComponents: Bool = true) -> Report {
-        precondition(petVolume.width == labelMap.width
-                     && petVolume.height == labelMap.height
-                     && petVolume.depth == labelMap.depth,
-                     "PETQuantification: label grid must match PET volume grid")
+                               connectedComponents: Bool = true) throws -> Report {
+        guard petVolume.width == labelMap.width,
+              petVolume.height == labelMap.height,
+              petVolume.depth == labelMap.depth else {
+            throw QuantificationError.gridMismatch(
+                "PET is \(petVolume.width)x\(petVolume.height)x\(petVolume.depth), label map is \(labelMap.width)x\(labelMap.height)x\(labelMap.depth). Load or resample the matching PET/label pair."
+            )
+        }
 
         let targets: Set<UInt16> = {
             if let classes { return Set(classes) }

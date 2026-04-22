@@ -1486,7 +1486,7 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(autoPETII?.channelDescriptions.count, 2)
     }
 
-    func testPETQuantificationReportsTMTVAndPerLesion() {
+    func testPETQuantificationReportsTMTVAndPerLesion() throws {
         // 3x3x1 PET with two lesions separated by background.
         let pet = ImageVolume(
             pixels: [
@@ -1508,7 +1508,7 @@ final class GeometryAndIOTests: XCTestCase {
             0, 0, 0
         ]
 
-        let report = PETQuantification.compute(
+        let report = try PETQuantification.compute(
             petVolume: pet,
             labelMap: map,
             classes: [1],
@@ -1528,7 +1528,43 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(report.totalMetabolicTumorVolumeML, 0.004, accuracy: 1e-9)
     }
 
-    func testPhysiologicalUptakeFilterSubtractsBrainVoxels() {
+    func testPETQuantificationThrowsOnGridMismatch() {
+        let pet = ImageVolume(pixels: [0], depth: 1, height: 1, width: 1, modality: "PT")
+        let map = LabelMap(parentSeriesUID: pet.seriesUID, depth: 1, height: 1, width: 2)
+
+        XCTAssertThrowsError(
+            try PETQuantification.compute(petVolume: pet, labelMap: map)
+        ) { error in
+            XCTAssertTrue(error.localizedDescription.contains("grid mismatch"))
+        }
+    }
+
+    @MainActor
+    func testPETEngineScalesPETChannelToSUVForModelInput() {
+        let viewer = ViewerViewModel()
+        let petEngine = PETEngineViewModel()
+        let pet = ImageVolume(
+            pixels: [10, 20],
+            depth: 1, height: 1, width: 2,
+            spacing: (2, 3, 4),
+            origin: (5, 6, 7),
+            modality: "PT",
+            suvScaleFactor: 0.5
+        )
+
+        let scaledFromVolume = petEngine.makePETModelInputChannel(pet, viewer: viewer)
+        XCTAssertEqual(scaledFromVolume.pixels, [5, 10])
+        XCTAssertNil(scaledFromVolume.suvScaleFactor)
+        XCTAssertEqual(scaledFromVolume.spacing.x, pet.spacing.x)
+        XCTAssertEqual(scaledFromVolume.origin.x, pet.origin.x)
+
+        viewer.suvSettings.mode = .manualScale
+        viewer.suvSettings.manualScaleFactor = 3
+        let scaledFromUserSettings = petEngine.makePETModelInputChannel(pet, viewer: viewer)
+        XCTAssertEqual(scaledFromUserSettings.pixels, [30, 60])
+    }
+
+    func testPhysiologicalUptakeFilterSubtractsBrainVoxels() throws {
         let pet = LabelMap(parentSeriesUID: "pet",
                            depth: 1, height: 2, width: 3)
         pet.classes = [LabelClass(labelID: 1, name: "lesion",
@@ -1549,7 +1585,7 @@ final class GeometryAndIOTests: XCTestCase {
             0, 0, 2
         ]
 
-        let result = PhysiologicalUptakeFilter.subtract(
+        let result = try PhysiologicalUptakeFilter.subtract(
             petLesionMask: pet,
             anatomyMask: anatomy,
             suppressedOrganNames: ["brain"],
@@ -1558,6 +1594,17 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(result.voxelsSuppressed, 2)
         XCTAssertTrue(result.classesSuppressed.contains("brain"))
         XCTAssertEqual(pet.voxels, [1, 1, 0, 1, 1, 0])
+    }
+
+    func testPhysiologicalUptakeFilterThrowsOnGridMismatch() {
+        let pet = LabelMap(parentSeriesUID: "pet", depth: 1, height: 1, width: 1)
+        let anatomy = LabelMap(parentSeriesUID: "ct", depth: 1, height: 1, width: 2)
+
+        XCTAssertThrowsError(
+            try PhysiologicalUptakeFilter.subtract(petLesionMask: pet, anatomyMask: anatomy)
+        ) { error in
+            XCTAssertTrue(error.localizedDescription.contains("grid mismatch"))
+        }
     }
 
     @MainActor
@@ -1576,6 +1623,32 @@ final class GeometryAndIOTests: XCTestCase {
                 datasetID: "Dataset221_AutoPETII_2023"
             )
             XCTFail("Expected geometry mismatch to throw")
+        } catch let err as NNUnetRunner.RunError {
+            if case .geometryMismatch = err { return }
+            XCTFail("Expected .geometryMismatch, got \(err)")
+        } catch {
+            XCTFail("Unexpected error type: \(error)")
+        }
+    }
+
+    @MainActor
+    func testNNUnetRunnerRejectsSameDimensionsDifferentWorldGeometry() async {
+        let primary = ImageVolume(pixels: [0],
+                                  depth: 1, height: 1, width: 1,
+                                  origin: (0, 0, 0),
+                                  modality: "CT")
+        let shifted = ImageVolume(pixels: [0],
+                                  depth: 1, height: 1, width: 1,
+                                  origin: (10, 0, 0),
+                                  modality: "PT")
+        let runner = NNUnetRunner()
+        do {
+            _ = try await runner.runInference(
+                channels: [primary, shifted],
+                referenceVolume: primary,
+                datasetID: "Dataset221_AutoPETII_2023"
+            )
+            XCTFail("Expected geometry mismatch to throw before binary lookup")
         } catch let err as NNUnetRunner.RunError {
             if case .geometryMismatch = err { return }
             XCTFail("Expected .geometryMismatch, got \(err)")

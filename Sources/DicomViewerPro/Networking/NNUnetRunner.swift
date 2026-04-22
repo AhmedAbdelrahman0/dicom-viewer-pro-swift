@@ -98,7 +98,7 @@ public final class NNUnetRunner: @unchecked Sendable {
                 let snippet = stderr.count > 600 ? String(stderr.suffix(600)) : stderr
                 return "nnU-Net exited \(code):\n\(snippet)"
             case .geometryMismatch(let msg):
-                return "Label geometry mismatch: \(msg)"
+                return "nnU-Net input geometry mismatch: \(msg)"
             }
         }
     }
@@ -225,13 +225,13 @@ public final class NNUnetRunner: @unchecked Sendable {
         // Validate geometry *before* hitting the filesystem / subprocess —
         // no need to require nnunetv2 just to reject malformed inputs, and
         // this makes the contract easier to unit-test.
-        for (idx, channel) in channels.enumerated() where idx > 0 {
-            guard channel.width == referenceVolume.width,
-                  channel.height == referenceVolume.height,
-                  channel.depth == referenceVolume.depth else {
-                throw RunError.geometryMismatch(
-                    "channel \(idx) is \(channel.width)x\(channel.height)x\(channel.depth), reference is \(referenceVolume.width)x\(referenceVolume.height)x\(referenceVolume.depth) — resample before calling"
-                )
+        for (idx, channel) in channels.enumerated() {
+            if let mismatch = Self.gridMismatchDescription(
+                channel,
+                reference: referenceVolume,
+                channelIndex: idx
+            ) {
+                throw RunError.geometryMismatch(mismatch)
             }
         }
 
@@ -316,6 +316,41 @@ public final class NNUnetRunner: @unchecked Sendable {
     }
 
     // MARK: - Subprocess plumbing
+
+    private static func gridMismatchDescription(_ channel: ImageVolume,
+                                                reference: ImageVolume,
+                                                channelIndex: Int,
+                                                tolerance: Double = 1e-4) -> String? {
+        guard channel.width == reference.width,
+              channel.height == reference.height,
+              channel.depth == reference.depth else {
+            return "channel \(channelIndex) is \(channel.width)x\(channel.height)x\(channel.depth), reference is \(reference.width)x\(reference.height)x\(reference.depth) — resample before calling"
+        }
+
+        guard abs(channel.spacing.x - reference.spacing.x) < tolerance,
+              abs(channel.spacing.y - reference.spacing.y) < tolerance,
+              abs(channel.spacing.z - reference.spacing.z) < tolerance else {
+            return "channel \(channelIndex) spacing \(format(channel.spacing)) does not match reference \(format(reference.spacing)) — resample before calling"
+        }
+
+        guard abs(channel.origin.x - reference.origin.x) < tolerance,
+              abs(channel.origin.y - reference.origin.y) < tolerance,
+              abs(channel.origin.z - reference.origin.z) < tolerance else {
+            return "channel \(channelIndex) origin \(format(channel.origin)) does not match reference \(format(reference.origin)) — resample before calling"
+        }
+
+        for column in 0..<3 {
+            for row in 0..<3 where abs(channel.direction[column][row] - reference.direction[column][row]) >= tolerance {
+                return "channel \(channelIndex) direction does not match reference — resample before calling"
+            }
+        }
+
+        return nil
+    }
+
+    private static func format(_ v: (x: Double, y: Double, z: Double)) -> String {
+        String(format: "(%.4f, %.4f, %.4f)", v.x, v.y, v.z)
+    }
 
     private func launchAndWait(binary: String,
                                arguments: [String],
