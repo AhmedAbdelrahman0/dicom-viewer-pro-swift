@@ -740,7 +740,20 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     public func suvValue(rawStoredValue: Double) -> Double {
-        suvSettings.suv(forStoredValue: rawStoredValue)
+        if let vol = activePETQuantificationVolume {
+            return suvSettings.suv(forStoredValue: rawStoredValue, volume: vol)
+        }
+        return suvSettings.suv(forStoredValue: rawStoredValue)
+    }
+
+    /// Volume-aware SUV lookup. Callers that already have a specific PET
+    /// volume in hand (e.g. the PET Engine staging an auxiliary channel for
+    /// nnU-Net inference) should use this — it honours the per-volume DICOM
+    /// SUV scale factor when the user has `.storedSUV` selected, which the
+    /// plain `suvValue(rawStoredValue:)` can't do for any volume other than
+    /// the currently-active one.
+    public func suvValue(rawStoredValue: Double, volume: ImageVolume) -> Double {
+        suvSettings.suv(forStoredValue: rawStoredValue, volume: volume)
     }
 
     public func activePETProbe() -> SUVProbe? {

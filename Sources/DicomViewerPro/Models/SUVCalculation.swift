@@ -84,6 +84,29 @@ public struct SUVCalculationSettings: Equatable {
         }
     }
 
+    /// Volume-aware SUV transform.
+    ///
+    /// The global settings can't know which specific volume a caller wants
+    /// to quantify — and in `.storedSUV` mode the raw pixel values are only
+    /// meaningful when the volume itself carries a DICOM-baked
+    /// `suvScaleFactor`. This overload honours that per-volume scale when
+    /// present so the PET Engine, the TMTV report, and the viewer probe can
+    /// all pull SUV numbers through a single code path without each
+    /// reimplementing the "stored + scale factor" fallback.
+    ///
+    /// Precedence for `.storedSUV`:
+    ///   1. If `volume.suvScaleFactor` is set, use `raw × scale`.
+    ///   2. Otherwise, fall through to the mode-based formula (raw counts).
+    ///
+    /// All other modes ignore the volume's stored scale — the user has
+    /// explicitly asked for a derived SUV (bodyWeight / SUL / BSA / manual).
+    public func suv(forStoredValue rawValue: Double, volume: ImageVolume) -> Double {
+        if mode == .storedSUV, let scale = volume.suvScaleFactor {
+            return rawValue * scale
+        }
+        return suv(forStoredValue: rawValue)
+    }
+
     public var scaleDescription: String {
         switch mode {
         case .storedSUV:

@@ -339,15 +339,18 @@ public final class PETEngineViewModel: ObservableObject {
         return (primary, auxiliary)
     }
 
+    /// Produce the PET channel that should be handed to an nnU-Net model
+    /// trained on SUV-calibrated inputs (AutoPET II / LesionTracer / etc.).
+    ///
+    /// Single source of truth: delegates to the viewer's volume-aware SUV
+    /// lookup, which in turn routes through `SUVCalculationSettings.suv(
+    /// forStoredValue:volume:)`. No scaling logic is duplicated here.
     func makePETModelInputChannel(_ volume: ImageVolume,
                                   viewer: ViewerViewModel) -> ImageVolume {
         guard Modality.normalize(volume.modality) == .PT else { return volume }
 
         let scaledPixels = volume.pixels.map { raw -> Float in
-            let suv = suvInputValue(rawStoredValue: Double(raw),
-                                    volume: volume,
-                                    viewer: viewer)
-            return Float(suv)
+            Float(viewer.suvValue(rawStoredValue: Double(raw), volume: volume))
         }
 
         return ImageVolume(
@@ -370,15 +373,6 @@ public final class PETEngineViewModel: ObservableObject {
             suvScaleFactor: nil,
             sourceFiles: volume.sourceFiles
         )
-    }
-
-    private func suvInputValue(rawStoredValue: Double,
-                               volume: ImageVolume,
-                               viewer: ViewerViewModel) -> Double {
-        if viewer.suvSettings.mode == .storedSUV, let scale = volume.suvScaleFactor {
-            return rawStoredValue * scale
-        }
-        return viewer.suvValue(rawStoredValue: rawStoredValue)
     }
 
     private func parseBox(_ text: String) -> CGRect? {

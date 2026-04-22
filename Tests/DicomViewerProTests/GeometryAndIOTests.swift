@@ -1657,6 +1657,113 @@ final class GeometryAndIOTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testNNUnetRunnerRejectsRotatedDirectionMatrix() async {
+        // Same dims, same spacing, same origin — but the secondary channel
+        // is rotated 90° around Z (X axis becomes Y). The runner must catch
+        // this through the direction-cosine check and throw without ever
+        // needing nnUNetv2_predict on PATH.
+        let primary = ImageVolume(
+            pixels: [0],
+            depth: 1, height: 1, width: 1,
+            spacing: (1, 1, 1),
+            origin: (0, 0, 0),
+            direction: matrix_identity_double3x3,
+            modality: "CT"
+        )
+        // 90° rotation about Z: X → Y, Y → -X.
+        let rotatedDirection = simd_double3x3(
+            SIMD3<Double>(0, 1, 0),
+            SIMD3<Double>(-1, 0, 0),
+            SIMD3<Double>(0, 0, 1)
+        )
+        let rotated = ImageVolume(
+            pixels: [0],
+            depth: 1, height: 1, width: 1,
+            spacing: (1, 1, 1),
+            origin: (0, 0, 0),
+            direction: rotatedDirection,
+            modality: "PT"
+        )
+        let runner = NNUnetRunner()
+        do {
+            _ = try await runner.runInference(
+                channels: [primary, rotated],
+                referenceVolume: primary,
+                datasetID: "Dataset221_AutoPETII_2023"
+            )
+            XCTFail("Expected direction-mismatch to throw before subprocess launch")
+        } catch let err as NNUnetRunner.RunError {
+            if case .geometryMismatch = err { return }
+            XCTFail("Expected .geometryMismatch, got \(err)")
+        } catch {
+            XCTFail("Unexpected error type: \(error)")
+        }
+    }
+
+    // MARK: - SUV single source of truth
+
+    func testSUVSettingsStoredModeUsesVolumeScaleWhenPresent() {
+        // `.storedSUV` with a DICOM-baked scale factor should multiply the
+        // raw value by that scale — regardless of whatever settings are
+        // configured on the viewer (which can't know about an auxiliary
+        // volume's per-voxel calibration).
+        var settings = SUVCalculationSettings()
+        settings.mode = .storedSUV
+        let volume = ImageVolume(
+            pixels: [10],
+            depth: 1, height: 1, width: 1,
+            modality: "PT",
+            suvScaleFactor: 0.5
+        )
+        XCTAssertEqual(settings.suv(forStoredValue: 10, volume: volume),
+                       5.0, accuracy: 1e-9)
+        // Without a stored factor, falls back to raw.
+        let plain = ImageVolume(
+            pixels: [10],
+            depth: 1, height: 1, width: 1,
+            modality: "PT"
+        )
+        XCTAssertEqual(settings.suv(forStoredValue: 10, volume: plain),
+                       10.0, accuracy: 1e-9)
+    }
+
+    func testSUVSettingsNonStoredModeIgnoresVolumeScale() {
+        // Manual scale is a *global* user choice — must not be overridden by
+        // whatever a specific volume happened to store.
+        var settings = SUVCalculationSettings()
+        settings.mode = .manualScale
+        settings.manualScaleFactor = 3.0
+        let volume = ImageVolume(
+            pixels: [10],
+            depth: 1, height: 1, width: 1,
+            modality: "PT",
+            suvScaleFactor: 0.5  // Would yield 5.0 if it leaked through.
+        )
+        XCTAssertEqual(settings.suv(forStoredValue: 10, volume: volume),
+                       30.0, accuracy: 1e-9,
+                       "Manual mode must ignore volume-level SUV scale")
+    }
+
+    @MainActor
+    func testViewerSUVValueUsesActivePETVolumeScale() {
+        // Without passing a volume, the viewer should still honour the
+        // currently-active PET volume's scale in `.storedSUV` mode.
+        let vm = ViewerViewModel()
+        vm.suvSettings.mode = .storedSUV
+        let pet = ImageVolume(
+            pixels: [10],
+            depth: 1, height: 1, width: 1,
+            modality: "PT",
+            suvScaleFactor: 0.25
+        )
+        _ = vm.addLoadedVolumeIfNeeded(pet)
+        vm.currentVolume = pet
+        XCTAssertEqual(vm.suvValue(rawStoredValue: 10),
+                       2.5, accuracy: 1e-9,
+                       "Active-PET helper must honour per-volume scale")
+    }
+
     func testNNUnetRunnerReportsAvailabilityFromPATH() {
         // We don't assume nnUNetv2_predict is installed in CI — just prove
         // the detector runs without crashing and returns a reasonable value.
