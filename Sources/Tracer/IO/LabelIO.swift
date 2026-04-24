@@ -76,7 +76,7 @@ public enum LabelIO {
                                   to url: URL,
                                   parentVolume: ImageVolume,
                                   writeLabelDescriptor: Bool = true) throws {
-        try niftiLabelData(label, parentVolume: parentVolume).write(to: url)
+        try niftiLabelData(label, parentVolume: parentVolume).write(to: url, options: [.atomic])
 
         if writeLabelDescriptor {
             try saveITKSnapDescriptor(label, to: url.deletingPathExtension().appendingPathExtension("label.txt"))
@@ -90,7 +90,9 @@ public enum LabelIO {
                                    writeLabelDescriptor: Bool = true) throws {
         let nifti = niftiLabelData(label, parentVolume: parentVolume)
         let compressed = try gzip(nifti)
-        try compressed.write(to: url)
+        // Atomic so cohort runs (which write + immediately read each study's
+        // labels.nii.gz) never see a half-written gz that blows up gunzip.
+        try compressed.write(to: url, options: [.atomic])
 
         if writeLabelDescriptor {
             try saveITKSnapDescriptor(label, to: url.deletingPathExtension().appendingPathExtension("label.txt"))
@@ -173,7 +175,7 @@ public enum LabelIO {
             landmarks: landmarks.map(LandmarkDTO.init)
         )
         let data = try JSONEncoder.prettySorted.encode(package)
-        try data.write(to: url)
+        try data.write(to: url, options: [.atomic])
     }
 
     public static func loadLabelPackage(from url: URL,
@@ -231,7 +233,7 @@ public enum LabelIO {
                           vis, 1, cls.name)
         }
 
-        try txt.data(using: .utf8)?.write(to: url)
+        try txt.data(using: .utf8)?.write(to: url, options: [.atomic])
     }
 
     /// Load ITK-SNAP label descriptor.
@@ -300,7 +302,7 @@ public enum LabelIO {
         label.voxels.withUnsafeBufferPointer { buf in
             data.append(UnsafeBufferPointer(start: buf.baseAddress, count: buf.count))
         }
-        try data.write(to: url)
+        try data.write(to: url, options: [.atomic])
     }
 
     public static func loadNRRDLabelmap(from url: URL,
@@ -415,7 +417,7 @@ public enum LabelIO {
         label.voxels.withUnsafeBufferPointer { buf in
             data.append(UnsafeBufferPointer(start: buf.baseAddress, count: buf.count))
         }
-        try data.write(to: url)
+        try data.write(to: url, options: [.atomic])
     }
 
     // MARK: - JSON annotations
@@ -465,7 +467,7 @@ public enum LabelIO {
 
         let data = try JSONSerialization.data(withJSONObject: root,
                                                 options: [.prettyPrinted, .sortedKeys])
-        try data.write(to: url)
+        try data.write(to: url, options: [.atomic])
     }
 
     // MARK: - CSV landmarks
@@ -477,7 +479,7 @@ public enum LabelIO {
             csv += "\(lm.label),\(lm.fixed.x),\(lm.fixed.y),\(lm.fixed.z),"
             csv += "\(lm.moving.x),\(lm.moving.y),\(lm.moving.z)\n"
         }
-        try csv.data(using: .utf8)?.write(to: url)
+        try csv.data(using: .utf8)?.write(to: url, options: [.atomic])
     }
 
     public static func loadLandmarks(from url: URL) throws -> [LandmarkPair] {

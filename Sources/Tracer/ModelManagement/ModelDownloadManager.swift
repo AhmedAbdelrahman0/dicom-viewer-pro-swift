@@ -117,7 +117,17 @@ public final class ModelDownloadManager: ObservableObject {
     private func urlSessionDownload(from url: URL,
                                     modelID: String) async throws -> (URL, URLResponse) {
         try await withCheckedThrowingContinuation { continuation in
+            // Throttle progress updates to ~10 Hz. URLSession's progress
+            // delegate fires per-chunk (often 100+ Hz on fast links); without
+            // throttling we were spawning a Task { @MainActor } for every
+            // packet, which piles up MainActor work and can stall the UI on
+            // a large download. 100 ms is below the human perception
+            // threshold for a progress bar, well above the per-chunk rate.
+            // Reference type so the var capture is Sendable; delegateQueue
+            // is .main so the mutation is single-threaded regardless.
+            let throttle = ProgressThrottle()
             let delegate = DownloadProgressDelegate { [weak self] received, total in
+                guard throttle.shouldPublish(received: received, total: total) else { return }
                 Task { @MainActor in
                     self?.statusByModelID[modelID] =
                         .downloading(bytesReceived: received, totalBytes: total)
@@ -126,7 +136,10 @@ public final class ModelDownloadManager: ObservableObject {
             let progressSession = URLSession(
                 configuration: .default,
                 delegate: delegate,
-                delegateQueue: nil
+                // Pin the delegate queue to main so we don't need a
+                // separate actor hop for every callback. Progress updates
+                // are idempotent scalar writes — main is fine.
+                delegateQueue: OperationQueue.main
             )
             let task = progressSession.downloadTask(with: url) { url, response, error in
                 if let error {
@@ -201,6 +214,29 @@ public enum ModelDownloadError: Error, LocalizedError {
         case .httpStatus(let status):
             return "Model download failed with HTTP \(status)."
         }
+    }
+}
+
+// MARK: - Progress throttle
+
+/// Rate-limits progress callbacks to ~10 Hz. `final` reference so closure
+/// captures are Sendable; `delegateQueue = .main` guarantees serial access,
+/// so no lock is needed.
+private final class ProgressThrottle: @unchecked Sendable {
+    private var lastPublished = Date.distantPast
+
+    func shouldPublish(received: Int64, total: Int64) -> Bool {
+        // Always publish the final "100%" update even if under the debounce.
+        if total > 0 && received >= total {
+            lastPublished = Date()
+            return true
+        }
+        let now = Date()
+        if now.timeIntervalSince(lastPublished) >= 0.1 {
+            lastPublished = now
+            return true
+        }
+        return false
     }
 }
 

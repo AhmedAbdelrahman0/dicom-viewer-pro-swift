@@ -276,7 +276,7 @@ public enum MarchingCubesMeshExporter {
             withUnsafeBytes(of: &attr) { data.append(contentsOf: $0) }
         }
 
-        try data.write(to: url)
+        try data.write(to: url, options: [.atomic])
     }
 
     private static func writeOBJ(mesh: Mesh, to url: URL, objectName: String) throws {

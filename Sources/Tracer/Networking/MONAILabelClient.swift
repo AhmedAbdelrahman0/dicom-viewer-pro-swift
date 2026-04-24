@@ -122,7 +122,7 @@ public final class MONAILabelClient: @unchecked Sendable {
         do {
             return try JSONDecoder().decode(ServerInfo.self, from: data)
         } catch {
-            throw ClientError.decodingFailed(String(describing: error))
+            throw ClientError.decodingFailed(Self.describeDecodingError(error))
         }
     }
 
@@ -170,7 +170,7 @@ public final class MONAILabelClient: @unchecked Sendable {
             guard let imagePart = parts.first(where: { $0.name == "image" }) else {
                 throw ClientError.decodingFailed("no 'image' part in multipart response")
             }
-            try imagePart.body.write(to: outputLabelURL)
+            try imagePart.body.write(to: outputLabelURL, options: [.atomic])
 
             if let paramsPart = parts.first(where: { $0.name == "params" }),
                let obj = try? JSONSerialization.jsonObject(with: paramsPart.body) {
@@ -180,7 +180,7 @@ public final class MONAILabelClient: @unchecked Sendable {
         }
 
         // Single-file responses (some models return just the NIfTI).
-        try data.write(to: outputLabelURL)
+        try data.write(to: outputLabelURL, options: [.atomic])
         return InferenceParams(raw: [:])
     }
 
@@ -232,14 +232,14 @@ public final class MONAILabelClient: @unchecked Sendable {
             guard let imagePart = parts.first(where: { $0.name == "image" }) else {
                 throw ClientError.decodingFailed("no 'image' part in interactive response")
             }
-            try imagePart.body.write(to: outputLabelURL)
+            try imagePart.body.write(to: outputLabelURL, options: [.atomic])
             if let paramsPart = parts.first(where: { $0.name == "params" }),
                let obj = try? JSONSerialization.jsonObject(with: paramsPart.body) {
                 return InferenceParams(raw: (obj as? [String: Any]) ?? [:])
             }
             return InferenceParams(raw: [:])
         }
-        try data.write(to: outputLabelURL)
+        try data.write(to: outputLabelURL, options: [.atomic])
         return InferenceParams(raw: [:])
     }
 
@@ -355,8 +355,35 @@ public final class MONAILabelClient: @unchecked Sendable {
         do {
             return try JSONDecoder().decode(type, from: data)
         } catch {
-            throw ClientError.decodingFailed(String(describing: error))
+            throw ClientError.decodingFailed(Self.describeDecodingError(error))
         }
+    }
+
+    /// `String(describing:)` on a `DecodingError` produces useless Swift
+    /// enum-like output ("keyNotFound(CodingKey(...), DecodingError.Context...)")
+    /// that leaks through to the user's error panel. This helper produces
+    /// a compact human-readable breadcrumb for each `DecodingError` case
+    /// and falls back to `localizedDescription` for everything else.
+    static func describeDecodingError(_ error: Swift.Error) -> String {
+        guard let decodingError = error as? DecodingError else {
+            return error.localizedDescription
+        }
+        switch decodingError {
+        case .dataCorrupted(let ctx):
+            return "data corrupted at \(pathString(ctx.codingPath)) — \(ctx.debugDescription)"
+        case .keyNotFound(let key, let ctx):
+            return "missing key '\(key.stringValue)' at \(pathString(ctx.codingPath))"
+        case .typeMismatch(let expected, let ctx):
+            return "expected \(expected) at \(pathString(ctx.codingPath)) — \(ctx.debugDescription)"
+        case .valueNotFound(let expected, let ctx):
+            return "missing \(expected) at \(pathString(ctx.codingPath))"
+        @unknown default:
+            return error.localizedDescription
+        }
+    }
+
+    private static func pathString(_ path: [CodingKey]) -> String {
+        path.map(\.stringValue).joined(separator: ".")
     }
 
     private func buildMultipartBody(boundary: String,

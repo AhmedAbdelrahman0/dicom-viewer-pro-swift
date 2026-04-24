@@ -195,7 +195,7 @@ public final class MONAIDeployClient: @unchecked Sendable {
 
     private func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
         do { return try JSONDecoder().decode(type, from: data) }
-        catch { throw ClientError.decodingFailed(String(describing: error)) }
+        catch { throw ClientError.decodingFailed(MONAILabelClient.describeDecodingError(error)) }
     }
 }
 

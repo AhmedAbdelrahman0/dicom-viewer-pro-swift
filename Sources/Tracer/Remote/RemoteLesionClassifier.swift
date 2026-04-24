@@ -103,7 +103,9 @@ public final class RemoteLesionClassifier: LesionClassifier, @unchecked Sendable
         let localPayload = FileManager.default.temporaryDirectory
             .appendingPathComponent("tracer-classify-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: localPayload) }
-        try jsonData.write(to: localPayload)
+        // Atomic so a SIGKILL mid-write never uploads a truncated payload
+        // to the DGX (the remote python would then fail JSON-parse).
+        try jsonData.write(to: localPayload, options: [.atomic])
         try executor.uploadFile(localPayload, toRemote: remotePayloadPath)
 
         // 3. Command. Optional env activation → pipe payload into python3 → redirect to result.json.

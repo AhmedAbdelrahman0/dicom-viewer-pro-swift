@@ -396,7 +396,7 @@ private struct ShareReportMenu: View {
             case .csv:
                 data = ClassificationReport.csvData(for: results)
             }
-            try data.write(to: url)
+            try data.write(to: url, options: [.atomic])
         } catch {
             NSLog("Classification export failed: \(error)")
         }

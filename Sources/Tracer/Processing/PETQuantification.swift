@@ -283,7 +283,11 @@ public enum PETQuantification {
                         tlg: (mm3 / 1000) * mean,
                         bounds: (minZ, maxZ, minY, maxY, minX, maxX)
                     ))
-                    lesionID &+= 1
+                    // Cap at UInt16.max: a pathologically fragmented
+                    // segmentation over a cohort could hit 65535 components;
+                    // we'd rather repeat the id than silently wrap to 0
+                    // (which would then collide with the pre-init value).
+                    if lesionID < UInt16.max { lesionID += 1 }
                 }
             }
         }

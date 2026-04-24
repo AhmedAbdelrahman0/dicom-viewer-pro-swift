@@ -167,18 +167,28 @@ public struct AssistantCommandInterpreter {
     }
 
     private func windowPresetName(in text: String) -> String? {
-        let pairs: [(String, [String])] = [
+        // Two-level match: phrases (multi-word) use substring match;
+        // single-word aliases use word-boundary match so the assistant
+        // doesn't fire "Brain" on "ahead of you" (contains "head") or
+        // "Standard" on "petroleum" (contains "pet").
+        let phrasePairs: [(String, [String])] = [
+            ("Soft Tissue", ["soft tissue", "soft-tissue"]),
+        ]
+        let wordPairs: [(String, [String])] = [
             ("Lung", ["lung", "lungs", "pulmonary"]),
             ("Bone", ["bone", "bones", "osseous"]),
             ("Brain", ["brain", "head"]),
             ("Liver", ["liver", "hepatic"]),
             ("Abdomen", ["abdomen", "abdominal"]),
             ("Mediastinum", ["mediastinum", "mediastinal"]),
-            ("Soft Tissue", ["soft tissue", "soft-tissue", "soft"]),
+            ("Soft Tissue", ["soft"]),
             ("Angio", ["angio", "angiography", "vessel", "vascular", "artery", "cta"]),
             ("Standard", ["pet", "suv", "fdg"])
         ]
-        return pairs.first { _, aliases in text.containsAny(aliases) }?.0
+        if let hit = phrasePairs.first(where: { _, aliases in text.containsAny(aliases) }) {
+            return hit.0
+        }
+        return wordPairs.first { _, aliases in text.containsAnyWord(aliases) }?.0
     }
 
     private func toolActions(in text: String) -> [AssistantAction] {
@@ -189,9 +199,9 @@ public struct AssistantCommandInterpreter {
             actions.append(.setViewerTool(.angle))
         } else if text.containsAny(["area", "roi", "region of interest"]) {
             actions.append(.setViewerTool(.area))
-        } else if text.contains("pan") {
+        } else if text.containsWord("pan") || text.containsWord("panning") {
             actions.append(.setViewerTool(.pan))
-        } else if text.contains("zoom") {
+        } else if text.containsWord("zoom") || text.containsWord("zooming") {
             actions.append(.setViewerTool(.zoom))
         } else if text.containsAny(["window level", "windowing", "wl tool"]) {
             actions.append(.setViewerTool(.wl))
@@ -200,7 +210,7 @@ public struct AssistantCommandInterpreter {
         if text.containsAny(["brush", "paint"]) {
             actions.append(.setLabelingTool(.brush))
         }
-        if text.contains("eraser") || text.contains("erase") {
+        if text.containsAnyWord(["erase", "eraser", "erased", "erasing"]) {
             actions.append(.setLabelingTool(.eraser))
         }
         if text.contains("threshold") {
@@ -450,6 +460,47 @@ private extension String {
 
     func containsAny(_ needles: [String]) -> Bool {
         needles.contains { contains($0) }
+    }
+
+    /// Word-boundary match — `"help me expand this".containsWord("pan")` is
+    /// `false`, while `"pan to the right".containsWord("pan")` is `true`.
+    /// Needed because the assistant parser's single-word triggers (`pan`,
+    /// `zoom`, `head`, `pet`) were matching unrelated substrings ("expand",
+    /// "competitive", "ahead", "petroleum") and firing viewer commands the
+    /// user didn't ask for.
+    func containsWord(_ needle: String) -> Bool {
+        guard !needle.isEmpty else { return false }
+        let lowerNeedle = needle.lowercased()
+        // Walk through characters. A word is a maximal run of letters or
+        // digits — everything else (whitespace, punctuation, hyphens after
+        // normalisation, etc.) is a word boundary.
+        var inWord = false
+        var wordStart = startIndex
+        var i = startIndex
+        while i < endIndex {
+            let ch = self[i]
+            let isWordChar = ch.isLetter || ch.isNumber
+            if isWordChar {
+                if !inWord {
+                    wordStart = i
+                    inWord = true
+                }
+            } else if inWord {
+                let word = self[wordStart..<i].lowercased()
+                if word == lowerNeedle { return true }
+                inWord = false
+            }
+            i = self.index(after: i)
+        }
+        if inWord {
+            let word = self[wordStart..<endIndex].lowercased()
+            if word == lowerNeedle { return true }
+        }
+        return false
+    }
+
+    func containsAnyWord(_ needles: [String]) -> Bool {
+        needles.contains { containsWord($0) }
     }
 }
 

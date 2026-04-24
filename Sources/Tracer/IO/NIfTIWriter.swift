@@ -52,7 +52,9 @@ public enum NIfTIWriter {
         volume.pixels.withUnsafeBufferPointer { buf in
             out.append(UnsafeBufferPointer(start: buf.baseAddress, count: buf.count))
         }
-        try out.write(to: url)
+        // Atomic so a crash mid-write never leaves a truncated NIfTI for the
+        // next run (or an external Python script) to read as garbage voxels.
+        try out.write(to: url, options: [.atomic])
     }
 
     // MARK: - Private
