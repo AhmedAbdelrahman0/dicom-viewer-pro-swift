@@ -10,9 +10,10 @@ struct AssistantPanel: View {
         AssistantChatMessage(role: .assistant, text: "Ready for workstation commands.")
     ]
     @State private var activeAssistantTasks = 0
+    @State private var isSubmittingRequest = false
 
     private let runner = AssistantCLIRunner()
-    private var isRunning: Bool { activeAssistantTasks > 0 }
+    private var isRunning: Bool { isSubmittingRequest || activeAssistantTasks > 0 }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -142,6 +143,8 @@ struct AssistantPanel: View {
     private func submit(_ text: String) {
         let request = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !request.isEmpty, !isRunning else { return }
+        isSubmittingRequest = true
+        defer { isSubmittingRequest = false }
 
         draft = ""
         messages.append(AssistantChatMessage(role: .user, text: request))
@@ -172,11 +175,7 @@ struct AssistantPanel: View {
         if let plan, plan.preferredEngine == .nnUNet {
             if let entry = nnunet.selectBestEntry(for: plan) {
                 summary += "\nSelected nnU-Net model \(entry.displayName) (\(entry.datasetID))."
-                if entry.multiChannel {
-                    summary += "\nThis model needs multiple input channels; one-click inference is blocked until channel pairing is wired."
-                } else if nnunet.mode == .subprocess, !nnunet.isSubprocessAvailable {
-                    summary += "\nInstall nnunetv2 or point the nnU-Net panel at a CoreML package before running inference."
-                } else if nnunet.mode == .coreML, let readinessMessage = nnunet.coreMLReadinessMessage {
+                if let readinessMessage = nnunet.assistantReadinessMessage(for: entry) {
                     nnunet.statusMessage = readinessMessage
                     summary += "\n\(readinessMessage)"
                 } else {
@@ -248,6 +247,21 @@ struct AssistantPanel: View {
     /// volume. Reports success / failure / unavailability back into the chat
     /// transcript so the user has closure on what happened.
     private func runNNUnetFromAssistant() {
+        guard let entry = nnunet.selectedEntry else {
+            messages.append(AssistantChatMessage(
+                role: .assistant,
+                text: "Pick an nnU-Net model first."
+            ))
+            return
+        }
+        if let readinessMessage = nnunet.assistantReadinessMessage(for: entry) {
+            nnunet.statusMessage = readinessMessage
+            messages.append(AssistantChatMessage(
+                role: .assistant,
+                text: readinessMessage
+            ))
+            return
+        }
         guard let volume = vm.currentVolume else {
             messages.append(AssistantChatMessage(
                 role: .assistant,
@@ -255,7 +269,7 @@ struct AssistantPanel: View {
             ))
             return
         }
-        let entryName = nnunet.selectedEntry?.displayName ?? "nnU-Net model"
+        let entryName = entry.displayName
         messages.append(AssistantChatMessage(
             role: .assistant,
             text: "Running \(entryName) on the current volume…"

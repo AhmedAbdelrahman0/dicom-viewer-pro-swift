@@ -133,7 +133,9 @@ public struct ContentView: View {
             isPresented: $showCohortPanel,
             inspectorWidth: (min: 600, ideal: 680, max: 820)
         ) {
-            CohortPanel(store: cohort, availableStudies: cohortStudies)
+            CohortPanel(store: cohort,
+                        classifier: classification,
+                        availableStudies: cohortStudies)
                 .overlay(alignment: .topTrailing) {
                     closeInspectorButton { showCohortPanel = false }
                 }

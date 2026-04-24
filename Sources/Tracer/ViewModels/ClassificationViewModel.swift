@@ -317,6 +317,18 @@ public final class ClassificationViewModel: ObservableObject {
             }
     }
 
+    func applyCohortConfiguration(to job: inout CohortJob) {
+        job.classifierModelPath = customModelPath
+        job.classifierBinaryPath = customBinaryPath
+        job.classifierProjectorPath = customProjectorPath
+        job.classifierEnvironment = customEnvironment
+        job.zeroShotPrompts = zeroShotPrompts
+        job.zeroShotLabels = zeroShotPromptLabels
+        job.zeroShotTokenIDs = zeroShotTokenIDs
+        job.candidateLabels = candidateLabels
+        job.runClassifierOnDGX = runOnDGX
+    }
+
     #if canImport(AppKit)
     public func pickModelPath() {
         let panel = NSOpenPanel()

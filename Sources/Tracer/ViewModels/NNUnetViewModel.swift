@@ -120,6 +120,26 @@ public final class NNUnetViewModel: ObservableObject {
         return nil
     }
 
+    /// Assistant-side preflight before we append a "Running…" chat message.
+    /// Mirrors the same readiness gates the dedicated nnU-Net panel uses.
+    public func assistantReadinessMessage(for entry: NNUnetCatalog.Entry) -> String? {
+        if entry.multiChannel {
+            return "This model needs multiple input channels; one-click inference is blocked until channel pairing is wired."
+        }
+
+        switch mode {
+        case .subprocess:
+            if !isSubprocessAvailable {
+                return "Install nnunetv2 or point the nnU-Net panel at a CoreML package before running inference."
+            }
+        case .coreML:
+            return coreMLReadinessMessage
+        case .dgxRemote:
+            return dgxReadinessMessage
+        }
+        return nil
+    }
+
     public func cancel() {
         subprocessRunner.cancel()
         remoteRunner?.cancel()

@@ -157,9 +157,7 @@ public actor CohortBatchProcessor {
         do {
             try FileManager.default.createDirectory(at: studyDir, withIntermediateDirectories: true)
             let t0 = Date()
-            labelMap = try await runSegmentation(job: checkpoint.job,
-                                                 primary: loaded.primary,
-                                                 auxiliary: loaded.auxiliary)
+            labelMap = try await runSegmentation(job: checkpoint.job, loaded: loaded)
             result.segmentationSeconds = Date().timeIntervalSince(t0)
             try LabelIO.saveNIfTIGz(labelMap,
                                     to: labelURL,
@@ -180,7 +178,7 @@ public actor CohortBatchProcessor {
                 ? nil
                 : checkpoint.job.classifyClassIDs
             let report = try PETQuantification.compute(
-                petVolume: loaded.primary,
+                petVolume: loaded.quantificationVolume,
                 labelMap: labelMap,
                 classes: classesToEnumerate,
                 connectedComponents: true
@@ -202,11 +200,15 @@ public actor CohortBatchProcessor {
         if let classifierID = checkpoint.job.classifierEntryID,
            let entry = LesionClassifierCatalog.byID(classifierID) {
             do {
+                guard let classificationVolume = loaded.classificationVolume(for: entry.modality) else {
+                    throw CohortError.classificationVolumeMissing(expected: entry.modality?.displayName ?? "selected")
+                }
                 let t0 = Date()
                 let report = try await runClassification(
+                    studyID: studyID,
                     job: checkpoint.job,
                     entry: entry,
-                    volume: loaded.primary,
+                    volume: classificationVolume,
                     labelMap: labelMap
                 )
                 result.classificationSeconds = Date().timeIntervalSince(t0)
@@ -239,13 +241,12 @@ public actor CohortBatchProcessor {
     // MARK: - Segmentation dispatch
 
     private func runSegmentation(job: CohortJob,
-                                 primary: ImageVolume,
-                                 auxiliary: [ImageVolume]) async throws -> LabelMap {
+                                 loaded: CohortStudyLoader.LoadedStudy) async throws -> LabelMap {
         guard let entryID = job.nnunetEntryID,
               let entry = NNUnetCatalog.byID(entryID) else {
             throw CohortError.noSegmenter
         }
-        let channels = [primary] + auxiliary
+        let channels = loaded.segmentationChannels(for: entry)
 
         switch job.segmentationMode {
         case .subprocess:
@@ -260,7 +261,7 @@ public actor CohortBatchProcessor {
             runner.update(configuration: cfg)
             let result = try await runner.runInference(
                 channels: channels,
-                referenceVolume: primary,
+                referenceVolume: loaded.primary,
                 datasetID: entry.datasetID
             )
             return result.labelMap
@@ -284,7 +285,7 @@ public actor CohortBatchProcessor {
             )
             let runner = RemoteNNUnetRunner(configuration: runnerCfg)
             let result = try await runner.runInference(channels: channels,
-                                                       referenceVolume: primary)
+                                                       referenceVolume: loaded.primary)
             return result.labelMap
         }
     }
@@ -316,7 +317,8 @@ public actor CohortBatchProcessor {
         var lesions: [LesionRow]
     }
 
-    private func runClassification(job: CohortJob,
+    private func runClassification(studyID: String,
+                                   job: CohortJob,
                                    entry: LesionClassifierCatalog.Entry,
                                    volume: ImageVolume,
                                    labelMap: LabelMap) async throws -> StudyClassificationReport {
@@ -367,7 +369,7 @@ public actor CohortBatchProcessor {
             ))
         }
         return StudyClassificationReport(
-            studyID: checkpoint.results.values.first { $0.status == .running }?.id ?? "",
+            studyID: studyID,
             classifierID: classifier.id,
             lesions: rows
         )
@@ -483,6 +485,7 @@ public enum CohortError: Swift.Error, LocalizedError, Sendable {
     case coreMLNotYetSupported
     case dgxUnavailable
     case worklistEntryMissing(id: String)
+    case classificationVolumeMissing(expected: String)
 
     public var errorDescription: String? {
         switch self {
@@ -494,6 +497,8 @@ public enum CohortError: Swift.Error, LocalizedError, Sendable {
             return "DGX Spark is not enabled / configured. Settings → DGX Spark."
         case .worklistEntryMissing(let id):
             return "Study \(id) isn't in the cohort's worklist cache. Call `CohortBatchProcessor.register(studies:)` before running."
+        case .classificationVolumeMissing(let expected):
+            return "Classifier expected a \(expected) volume for this study, but it isn't available in the cohort load set."
         }
     }
 }

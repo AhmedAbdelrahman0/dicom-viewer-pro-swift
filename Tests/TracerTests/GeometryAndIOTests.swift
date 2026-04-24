@@ -2585,6 +2585,55 @@ final class GeometryAndIOTests: XCTestCase {
 
     // MARK: - Cohort tests
 
+    func testCohortLoadedStudyUsesSUVScaledPETForPETWorkflows() {
+        let ct = ImageVolume(
+            pixels: [100, 200],
+            depth: 1, height: 1, width: 2,
+            modality: "CT",
+            seriesUID: "ct-series"
+        )
+        let pet = ImageVolume(
+            pixels: [10, 20],
+            depth: 1, height: 1, width: 2,
+            modality: "PT",
+            seriesUID: "pet-series",
+            suvScaleFactor: 0.5
+        )
+        let loaded = CohortStudyLoader.LoadedStudy(primary: ct, auxiliary: [pet])
+
+        XCTAssertEqual(loaded.quantificationVolume.seriesUID, "pet-series")
+        XCTAssertEqual(loaded.quantificationVolume.pixels, [5, 10])
+        XCTAssertNil(loaded.quantificationVolume.suvScaleFactor)
+
+        XCTAssertEqual(loaded.classificationVolume(for: .PT)?.pixels, [5, 10])
+        XCTAssertEqual(loaded.classificationVolume(for: .CT)?.seriesUID, "ct-series")
+        XCTAssertNil(loaded.classificationVolume(for: .MR))
+    }
+
+    func testCohortLoadedStudyScalesPETChannelsForPETSUVModels() throws {
+        let ct = ImageVolume(
+            pixels: [100, 200],
+            depth: 1, height: 1, width: 2,
+            modality: "CT",
+            seriesUID: "ct-series"
+        )
+        let pet = ImageVolume(
+            pixels: [10, 20],
+            depth: 1, height: 1, width: 2,
+            modality: "PT",
+            seriesUID: "pet-series",
+            suvScaleFactor: 0.5
+        )
+        let loaded = CohortStudyLoader.LoadedStudy(primary: ct, auxiliary: [pet])
+        let entry = try XCTUnwrap(NNUnetCatalog.byID("AutoPET-II-2023"))
+        let channels = loaded.segmentationChannels(for: entry)
+
+        XCTAssertEqual(channels.count, 2)
+        XCTAssertEqual(channels[0].pixels, [100, 200])
+        XCTAssertEqual(channels[1].pixels, [5, 10])
+        XCTAssertNil(channels[1].suvScaleFactor)
+    }
+
     func testCohortJobGeneratesDeterministicCheckpointPath() {
         let root = URL(fileURLWithPath: "/tmp/cohort-test")
         let job = CohortJob(id: "abc123", name: "run1", outputRoot: root)
@@ -2730,6 +2779,34 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertTrue(csv.contains("0.8760"))
     }
 
+    @MainActor
+    func testClassificationViewModelCopiesConfigIntoCohortJobs() {
+        let classifier = ClassificationViewModel()
+        classifier.customModelPath = "/tmp/model.json"
+        classifier.customBinaryPath = "/tmp/script.py"
+        classifier.customProjectorPath = "/tmp/projector.gguf"
+        classifier.customEnvironment = "FOO=bar\nactivate=source ~/venv/bin/activate"
+        classifier.zeroShotPrompts = "prompt-a\nprompt-b"
+        classifier.zeroShotPromptLabels = "label-a\nlabel-b"
+        classifier.zeroShotTokenIDs = "1 2 3\n4 5 6"
+        classifier.candidateLabels = "benign\nmalignant"
+        classifier.runOnDGX = true
+
+        var job = CohortJob(outputRoot: URL(fileURLWithPath: "/tmp"),
+                            classifierEntryID: "medsiglip-zero-shot")
+        classifier.applyCohortConfiguration(to: &job)
+
+        XCTAssertEqual(job.classifierModelPath, "/tmp/model.json")
+        XCTAssertEqual(job.classifierBinaryPath, "/tmp/script.py")
+        XCTAssertEqual(job.classifierProjectorPath, "/tmp/projector.gguf")
+        XCTAssertEqual(job.classifierEnvironment, "FOO=bar\nactivate=source ~/venv/bin/activate")
+        XCTAssertEqual(job.zeroShotPrompts, "prompt-a\nprompt-b")
+        XCTAssertEqual(job.zeroShotLabels, "label-a\nlabel-b")
+        XCTAssertEqual(job.zeroShotTokenIDs, "1 2 3\n4 5 6")
+        XCTAssertEqual(job.candidateLabels, "benign\nmalignant")
+        XCTAssertTrue(job.runClassifierOnDGX)
+    }
+
     // MARK: - Assistant chatbot extensions
 
     func testAssistantClassificationTriggersOnNaturalLanguage() {
@@ -2763,6 +2840,19 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertTrue(interpreter.actions(for: "run on all studies").contains(.openCohortPanel))
         XCTAssertTrue(interpreter.actions(for: "process the cohort").contains(.openCohortPanel))
         XCTAssertFalse(interpreter.actions(for: "open this study").contains(.openCohortPanel))
+    }
+
+    @MainActor
+    func testNNUnetAssistantReadinessPreflightsCoreMLPackages() throws {
+        let nnunet = NNUnetViewModel()
+        nnunet.mode = .coreML
+        nnunet.coreMLModelPath = ""
+        let entry = try XCTUnwrap(NNUnetCatalog.all.first(where: { !$0.multiChannel }))
+
+        XCTAssertEqual(
+            nnunet.assistantReadinessMessage(for: entry),
+            "Point the CoreML path at a .mlpackage or .mlmodelc first."
+        )
     }
 
     // MARK: - Segmentation mode round-trips

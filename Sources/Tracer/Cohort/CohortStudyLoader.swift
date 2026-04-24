@@ -18,6 +18,34 @@ enum CohortStudyLoader {
         /// single-channel inputs. Channel 0 here becomes nnU-Net's
         /// channel 1 (primary is always channel 0).
         var auxiliary: [ImageVolume]
+
+        var allVolumes: [ImageVolume] { [primary] + auxiliary }
+
+        /// PET-aware volume for TMTV / SUV stats. When a PET channel exists
+        /// we convert it to SUV once so both quantification and PET-based
+        /// classifiers see the same intensities.
+        var quantificationVolume: ImageVolume {
+            classificationVolume(for: .PT) ?? primary
+        }
+
+        func volume(for modality: Modality) -> ImageVolume? {
+            allVolumes.first { Modality.normalize($0.modality) == modality }
+        }
+
+        func classificationVolume(for modality: Modality?) -> ImageVolume? {
+            guard let modality else { return primary }
+            guard let match = volume(for: modality) else { return nil }
+            if modality == .PT {
+                return CohortStudyLoader.makePETSUVVolume(match)
+            }
+            return match
+        }
+
+        func segmentationChannels(for entry: NNUnetCatalog.Entry) -> [ImageVolume] {
+            let channels = allVolumes
+            guard case .petSUV = entry.preprocessing else { return channels }
+            return channels.map(CohortStudyLoader.makePETSUVVolume)
+        }
     }
 
     enum LoadError: Swift.Error, LocalizedError {
@@ -49,6 +77,35 @@ enum CohortStudyLoader {
             return try loadNIfTI(study: study, series: firstNifti)
         }
         throw LoadError.emptyStudy
+    }
+
+    static func makePETSUVVolume(_ volume: ImageVolume) -> ImageVolume {
+        guard Modality.normalize(volume.modality) == .PT,
+              let scale = volume.suvScaleFactor else {
+            return volume
+        }
+
+        let scaledPixels = volume.pixels.map { $0 * Float(scale) }
+        return ImageVolume(
+            pixels: scaledPixels,
+            depth: volume.depth,
+            height: volume.height,
+            width: volume.width,
+            spacing: volume.spacing,
+            origin: volume.origin,
+            direction: volume.direction,
+            modality: volume.modality,
+            seriesUID: volume.seriesUID,
+            studyUID: volume.studyUID,
+            patientID: volume.patientID,
+            patientName: volume.patientName,
+            seriesDescription: volume.seriesDescription.isEmpty
+                ? "PET SUV input"
+                : "\(volume.seriesDescription) (SUV input)",
+            studyDescription: volume.studyDescription,
+            suvScaleFactor: nil,
+            sourceFiles: volume.sourceFiles
+        )
     }
 
     // MARK: - DICOM

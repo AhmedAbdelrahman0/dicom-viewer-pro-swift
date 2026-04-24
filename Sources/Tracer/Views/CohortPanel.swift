@@ -14,6 +14,7 @@ import AppKit
 /// a run.
 public struct CohortPanel: View {
     @ObservedObject public var store: CohortResultsStore
+    @ObservedObject public var classifier: ClassificationViewModel
 
     /// Everything indexed under "Study Browser". The cohort panel shows
     /// this as the "available studies" count and lets the user filter
@@ -53,8 +54,10 @@ public struct CohortPanel: View {
     }
 
     public init(store: CohortResultsStore,
+                classifier: ClassificationViewModel,
                 availableStudies: [PACSWorklistStudy]) {
         self.store = store
+        self.classifier = classifier
         self.availableStudies = availableStudies
     }
 
@@ -412,7 +415,7 @@ public struct CohortPanel: View {
         var modalityAllow: [String] = []
         if modalityFilter != "All" { modalityAllow = [modalityFilter] }
 
-        let job = CohortJob(
+        var job = CohortJob(
             name: jobName.isEmpty ? "Cohort run" : jobName,
             outputRoot: outputURL,
             nnunetEntryID: nnunetEntryID,
@@ -424,6 +427,9 @@ public struct CohortPanel: View {
             skipIfResultsExist: skipIfResultsExist,
             modalityAllowList: modalityAllow
         )
+        if job.classifierEntryID != nil {
+            classifier.applyCohortConfiguration(to: &job)
+        }
         store.start(job: job, studies: filteredStudies)
     }
 
