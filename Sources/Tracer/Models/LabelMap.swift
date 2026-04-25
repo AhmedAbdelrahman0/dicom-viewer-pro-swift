@@ -17,19 +17,30 @@ public final class LabelMap: Identifiable, ObservableObject, @unchecked Sendable
     public let width: Int
 
     /// Dense 3D mask as UInt16 (supports up to 65k classes). Published so views redraw.
-    @Published public var voxels: [UInt16]
+    @Published public var voxels: [UInt16] {
+        didSet { markRenderContentChanged() }
+    }
 
     /// Class definitions for each non-zero value.
-    @Published public var classes: [LabelClass]
+    @Published public var classes: [LabelClass] {
+        didSet { markRenderContentChanged() }
+    }
 
     /// Overall display opacity for this label map.
-    @Published public var opacity: Double = 0.5
+    @Published public var opacity: Double = 0.5 {
+        didSet { markRenderContentChanged() }
+    }
 
     /// Whether this label map is visible in overlays.
-    @Published public var visible: Bool = true
+    @Published public var visible: Bool = true {
+        didSet { markRenderContentChanged() }
+    }
 
     /// Display name for the label map.
     @Published public var name: String
+
+    /// Monotonic revision used by render caches to detect voxel/style changes.
+    public private(set) var renderRevision: Int = 0
 
     public init(parentSeriesUID: String,
                 depth: Int,
@@ -58,7 +69,12 @@ public final class LabelMap: Identifiable, ObservableObject, @unchecked Sendable
         copy.voxels = voxels
         copy.opacity = opacity
         copy.visible = visible
+        copy.renderRevision = renderRevision
         return copy
+    }
+
+    public func markRenderContentChanged() {
+        renderRevision &+= 1
     }
 
     // MARK: - Voxel access

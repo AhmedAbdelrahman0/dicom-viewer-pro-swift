@@ -198,6 +198,60 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(vm.hangingPanes.map(\.kind), [.fused, .ctOnly])
     }
 
+    @MainActor
+    func testSliceRenderCacheReusesBaseImageForSameInputs() throws {
+        let vm = ViewerViewModel()
+        let volume = ImageVolume(
+            pixels: [0, 1, 2, 3],
+            depth: 1,
+            height: 2,
+            width: 2,
+            modality: "CT"
+        )
+        vm.displayVolume(volume)
+        vm.clearSliceRenderCache()
+
+        _ = try XCTUnwrap(vm.makeImage(for: 2, mode: .ctOnly))
+        let missesAfterFirstRender = vm.sliceRenderCacheMissCount
+        _ = try XCTUnwrap(vm.makeImage(for: 2, mode: .ctOnly))
+
+        XCTAssertEqual(vm.sliceRenderCacheMissCount, missesAfterFirstRender)
+        XCTAssertGreaterThan(vm.sliceRenderCacheHitCount, 0)
+
+        vm.setWindow(vm.window + 10)
+        _ = try XCTUnwrap(vm.makeImage(for: 2, mode: .ctOnly))
+
+        XCTAssertGreaterThan(vm.sliceRenderCacheMissCount, missesAfterFirstRender)
+    }
+
+    @MainActor
+    func testLabelRenderCacheInvalidatesWhenVoxelsChange() throws {
+        let vm = ViewerViewModel()
+        let volume = ImageVolume(
+            pixels: [0, 1, 2, 3],
+            depth: 1,
+            height: 2,
+            width: 2,
+            modality: "CT"
+        )
+        vm.displayVolume(volume)
+        let map = vm.labeling.createLabelMap(for: volume)
+        map.classes = [LabelClass(labelID: 1, name: "ROI", category: .organ, color: .green)]
+        vm.clearSliceRenderCache()
+
+        _ = try XCTUnwrap(vm.makeLabelImage(for: 2, mode: .ctOnly))
+        let missesAfterFirstRender = vm.sliceRenderCacheMissCount
+        _ = try XCTUnwrap(vm.makeLabelImage(for: 2, mode: .ctOnly))
+
+        XCTAssertEqual(vm.sliceRenderCacheMissCount, missesAfterFirstRender)
+        XCTAssertGreaterThan(vm.sliceRenderCacheHitCount, 0)
+
+        map.voxels[0] = 1
+        _ = try XCTUnwrap(vm.makeLabelImage(for: 2, mode: .ctOnly))
+
+        XCTAssertGreaterThan(vm.sliceRenderCacheMissCount, missesAfterFirstRender)
+    }
+
     func testNIfTILoaderPreservesSFormAsLPSGeometry() throws {
         var data = Data(count: 352)
         data.writeInt32LE(348, at: 0)

@@ -159,6 +159,35 @@ private struct PETMIPProjection: Sendable {
     }
 }
 
+private enum SliceRenderLayer: String, Hashable {
+    case base
+    case overlay
+    case label
+    case labelOutline
+}
+
+private struct SliceRenderCacheKey: Hashable {
+    let layer: SliceRenderLayer
+    let sourceVolumeID: UUID?
+    let referenceVolumeID: UUID?
+    let labelMapID: UUID?
+    let labelRevision: Int
+    let axis: Int
+    let sliceIndex: Int
+    let mode: String
+    let width: Int
+    let height: Int
+    let depth: Int
+    let window: Int
+    let level: Int
+    let invert: Bool
+    let colormap: String
+    let opacity: Int
+    let flipHorizontal: Bool
+    let flipVertical: Bool
+    let suvSignature: String
+}
+
 @MainActor
 public final class ViewerViewModel: ObservableObject {
 
@@ -261,6 +290,11 @@ public final class ViewerViewModel: ObservableObject {
     private var petMIPProjectionCache: [PETMIPProjectionKey: PETMIPProjection] = [:]
     private var petMIPProjectionCacheOrder: [PETMIPProjectionKey] = []
     private var petMIPProjectionTasks: [PETMIPProjectionKey: Task<Void, Never>] = [:]
+    private let maxSliceRenderCacheEntries = 96
+    private var sliceRenderCache: [SliceRenderCacheKey: CGImage] = [:]
+    private var sliceRenderCacheOrder: [SliceRenderCacheKey] = []
+    public private(set) var sliceRenderCacheHitCount: Int = 0
+    public private(set) var sliceRenderCacheMissCount: Int = 0
 
     // DICOM study browser
     @Published public var loadedSeries: [DICOMSeries] = []
@@ -2231,68 +2265,249 @@ public final class ViewerViewModel: ObservableObject {
 
     // MARK: - Slice images
 
+    public func clearSliceRenderCache() {
+        sliceRenderCache.removeAll(keepingCapacity: true)
+        sliceRenderCacheOrder.removeAll(keepingCapacity: true)
+        sliceRenderCacheHitCount = 0
+        sliceRenderCacheMissCount = 0
+    }
+
     public func makeImage(for axis: Int, mode: SliceDisplayMode = .fused) -> CGImage? {
+        guard sliceIndices.indices.contains(axis) else { return nil }
         guard let v = volumeForDisplayMode(mode) else { return nil }
-        let slice = v.slice(axis: axis, index: sliceIndices[axis])
-        var pixels = slice.pixels
-        let w = slice.width, h = slice.height
+        let index = sliceIndex(axis: axis, volume: v)
+        let dimensions = sliceDimensions(axis: axis, volume: v)
+        let transform = displayTransform(for: axis, volume: v)
+        let renderPETColor = mode == .petOnly && Modality.normalize(v.modality) == .PT
+        let key = SliceRenderCacheKey(
+            layer: .base,
+            sourceVolumeID: v.id,
+            referenceVolumeID: v.id,
+            labelMapID: nil,
+            labelRevision: 0,
+            axis: axis,
+            sliceIndex: index,
+            mode: mode.rawValue,
+            width: dimensions.width,
+            height: dimensions.height,
+            depth: v.depth,
+            window: renderKey(renderPETColor ? overlayWindow : window),
+            level: renderKey(renderPETColor ? overlayLevel : level),
+            invert: renderPETColor ? false : invertColors,
+            colormap: renderPETColor ? overlayColormap.rawValue : "gray",
+            opacity: renderKey(1),
+            flipHorizontal: transform.flipHorizontal,
+            flipVertical: transform.flipVertical,
+            suvSignature: renderPETColor ? suvRenderSignature(for: v) : "none"
+        )
 
-        pixels = SliceTransform.apply(pixels, width: w, height: h,
-                                      transform: displayTransform(for: axis, volume: v))
+        return cachedSliceImage(for: key) {
+            let slice = v.slice(axis: axis, index: index)
+            var pixels = slice.pixels
+            let w = slice.width, h = slice.height
 
-        if mode == .petOnly, Modality.normalize(v.modality) == .PT {
-            pixels = petDisplayPixels(pixels, volume: v)
-            return PixelRenderer.makeColorImage(
+            pixels = SliceTransform.apply(pixels, width: w, height: h,
+                                          transform: transform)
+
+            if renderPETColor {
+                pixels = petDisplayPixels(pixels, volume: v)
+                return PixelRenderer.makeColorImage(
+                    pixels: pixels, width: w, height: h,
+                    window: overlayWindow, level: overlayLevel,
+                    colormap: overlayColormap,
+                    baseAlpha: 1.0
+                )
+            }
+
+            return PixelRenderer.makeGrayImage(
                 pixels: pixels, width: w, height: h,
-                window: overlayWindow, level: overlayLevel,
-                colormap: overlayColormap,
-                baseAlpha: 1.0
+                window: window, level: level, invert: invertColors
             )
         }
-
-        return PixelRenderer.makeGrayImage(
-            pixels: pixels, width: w, height: h,
-            window: window, level: level, invert: invertColors
-        )
     }
 
     public func makeLabelImage(for axis: Int,
                                mode: SliceDisplayMode = .fused,
                                outlineOnly: Bool = false) -> CGImage? {
+        guard sliceIndices.indices.contains(axis) else { return nil }
         guard let map = labeling.activeLabelMap else { return nil }
         guard map.visible else { return nil }
-        let slice = map.slice(axis: axis, index: sliceIndices[axis])
-        var values = slice.values
-        let w = slice.width, h = slice.height
         let displayVolume = volumeForDisplayMode(mode) ?? currentVolume
-        values = SliceTransform.apply(values, width: w, height: h,
-                                      transform: displayTransform(for: axis, volume: displayVolume))
-        if outlineOnly {
-            return LabelRenderer.makeOutlineImage(values: values, width: w, height: h,
-                                                    classes: map.classes,
-                                                    baseAlpha: map.opacity)
+        let index = sliceIndex(axis: axis, labelMap: map)
+        let dimensions = sliceDimensions(axis: axis, labelMap: map)
+        let transform = displayTransform(for: axis, volume: displayVolume)
+        let key = SliceRenderCacheKey(
+            layer: outlineOnly ? .labelOutline : .label,
+            sourceVolumeID: nil,
+            referenceVolumeID: displayVolume?.id,
+            labelMapID: map.id,
+            labelRevision: map.renderRevision,
+            axis: axis,
+            sliceIndex: index,
+            mode: mode.rawValue,
+            width: dimensions.width,
+            height: dimensions.height,
+            depth: map.depth,
+            window: 0,
+            level: 0,
+            invert: false,
+            colormap: "labels",
+            opacity: renderKey(map.opacity),
+            flipHorizontal: transform.flipHorizontal,
+            flipVertical: transform.flipVertical,
+            suvSignature: "none"
+        )
+
+        return cachedSliceImage(for: key) {
+            let slice = map.slice(axis: axis, index: index)
+            var values = slice.values
+            let w = slice.width, h = slice.height
+            values = SliceTransform.apply(values, width: w, height: h,
+                                          transform: transform)
+            if outlineOnly {
+                return LabelRenderer.makeOutlineImage(values: values, width: w, height: h,
+                                                        classes: map.classes,
+                                                        baseAlpha: map.opacity)
+            }
+            return LabelRenderer.makeImage(values: values, width: w, height: h,
+                                             classes: map.classes,
+                                             baseAlpha: map.opacity)
         }
-        return LabelRenderer.makeImage(values: values, width: w, height: h,
-                                         classes: map.classes,
-                                         baseAlpha: map.opacity)
     }
 
     public func makeOverlayImage(for axis: Int, mode: SliceDisplayMode = .fused) -> CGImage? {
+        guard sliceIndices.indices.contains(axis) else { return nil }
         guard mode == .fused else { return nil }
         guard let pair = fusion else { return nil }
         guard pair.overlayVisible else { return nil }
         let ov = pair.displayedOverlay
-        let slice = ov.slice(axis: axis, index: sliceIndices[axis])
-        var pixels = petDisplayPixels(slice.pixels, volume: ov)
-        let w = slice.width, h = slice.height
-        pixels = SliceTransform.apply(pixels, width: w, height: h,
-                                      transform: displayTransform(for: axis, volume: pair.baseVolume))
-        return PixelRenderer.makeColorImage(
-            pixels: pixels, width: w, height: h,
-            window: pair.overlayWindow, level: pair.overlayLevel,
-            colormap: pair.colormap,
-            baseAlpha: pair.opacity
+        let index = sliceIndex(axis: axis, volume: ov)
+        let dimensions = sliceDimensions(axis: axis, volume: ov)
+        let transform = displayTransform(for: axis, volume: pair.baseVolume)
+        let key = SliceRenderCacheKey(
+            layer: .overlay,
+            sourceVolumeID: ov.id,
+            referenceVolumeID: pair.baseVolume.id,
+            labelMapID: nil,
+            labelRevision: 0,
+            axis: axis,
+            sliceIndex: index,
+            mode: mode.rawValue,
+            width: dimensions.width,
+            height: dimensions.height,
+            depth: ov.depth,
+            window: renderKey(pair.overlayWindow),
+            level: renderKey(pair.overlayLevel),
+            invert: false,
+            colormap: pair.colormap.rawValue,
+            opacity: renderKey(pair.opacity),
+            flipHorizontal: transform.flipHorizontal,
+            flipVertical: transform.flipVertical,
+            suvSignature: suvRenderSignature(for: ov)
         )
+
+        return cachedSliceImage(for: key) {
+            let slice = ov.slice(axis: axis, index: index)
+            var pixels = petDisplayPixels(slice.pixels, volume: ov)
+            let w = slice.width, h = slice.height
+            pixels = SliceTransform.apply(pixels, width: w, height: h,
+                                          transform: transform)
+            return PixelRenderer.makeColorImage(
+                pixels: pixels, width: w, height: h,
+                window: pair.overlayWindow, level: pair.overlayLevel,
+                colormap: pair.colormap,
+                baseAlpha: pair.opacity
+            )
+        }
+    }
+
+    private func cachedSliceImage(for key: SliceRenderCacheKey,
+                                  build: () -> CGImage?) -> CGImage? {
+        if let image = sliceRenderCache[key] {
+            sliceRenderCacheHitCount &+= 1
+            sliceRenderCacheOrder.removeAll { $0 == key }
+            sliceRenderCacheOrder.append(key)
+            return image
+        }
+
+        guard let image = build() else { return nil }
+        sliceRenderCacheMissCount &+= 1
+        sliceRenderCache[key] = image
+        sliceRenderCacheOrder.removeAll { $0 == key }
+        sliceRenderCacheOrder.append(key)
+        while sliceRenderCacheOrder.count > maxSliceRenderCacheEntries {
+            let evicted = sliceRenderCacheOrder.removeFirst()
+            sliceRenderCache.removeValue(forKey: evicted)
+        }
+        return image
+    }
+
+    private func sliceIndex(axis: Int, volume: ImageVolume) -> Int {
+        let maxIndex: Int
+        switch axis {
+        case 0: maxIndex = volume.width - 1
+        case 1: maxIndex = volume.height - 1
+        default: maxIndex = volume.depth - 1
+        }
+        return Swift.max(0, Swift.min(maxIndex, sliceIndices[axis]))
+    }
+
+    private func sliceIndex(axis: Int, labelMap: LabelMap) -> Int {
+        let maxIndex: Int
+        switch axis {
+        case 0: maxIndex = labelMap.width - 1
+        case 1: maxIndex = labelMap.height - 1
+        default: maxIndex = labelMap.depth - 1
+        }
+        return Swift.max(0, Swift.min(maxIndex, sliceIndices[axis]))
+    }
+
+    private func sliceDimensions(axis: Int, volume: ImageVolume) -> (width: Int, height: Int) {
+        switch axis {
+        case 0: return (volume.height, volume.depth)
+        case 1: return (volume.width, volume.depth)
+        default: return (volume.width, volume.height)
+        }
+    }
+
+    private func sliceDimensions(axis: Int, labelMap: LabelMap) -> (width: Int, height: Int) {
+        switch axis {
+        case 0: return (labelMap.height, labelMap.depth)
+        case 1: return (labelMap.width, labelMap.depth)
+        default: return (labelMap.width, labelMap.height)
+        }
+    }
+
+    private func renderKey(_ value: Double, scale: Double = 1_000) -> Int {
+        guard value.isFinite else { return 0 }
+        let scaled = (value * scale).rounded()
+        if scaled >= Double(Int.max) { return Int.max }
+        if scaled <= Double(Int.min) { return Int.min }
+        return Int(scaled)
+    }
+
+    private func optionalRenderKey(_ value: Double?) -> Int {
+        guard let value else { return Int.min }
+        return renderKey(value)
+    }
+
+    private func suvRenderSignature(for volume: ImageVolume?) -> String {
+        guard let volume, Modality.normalize(volume.modality) == .PT else {
+            return "none"
+        }
+        let settings = suvSettings
+        return [
+            settings.mode.rawValue,
+            settings.activityUnit.rawValue,
+            "\(renderKey(settings.customBqPerMLPerStoredUnit))",
+            "\(renderKey(settings.manualScaleFactor))",
+            "\(renderKey(settings.patientWeightKg))",
+            "\(renderKey(settings.patientHeightCm))",
+            "\(renderKey(settings.injectedDoseMBq))",
+            "\(renderKey(settings.residualDoseMBq))",
+            settings.sex.rawValue,
+            "\(optionalRenderKey(volume.suvScaleFactor))"
+        ].joined(separator: "|")
     }
 
     public func makePETMIPImage(for axis: Int) -> CGImage? {
