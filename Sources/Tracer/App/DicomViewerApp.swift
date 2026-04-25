@@ -28,7 +28,6 @@ public struct DicomViewerApp: App {
         return scene
             .defaultSize(width: 1440, height: 960)
             .windowStyle(.hiddenTitleBar)
-            .windowResizability(.contentSize)
             .commands {
                 CommandGroup(replacing: .newItem) {
                     Button("Open DICOM Directory…") {
