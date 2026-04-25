@@ -212,6 +212,39 @@ public final class LabelingViewModel: ObservableObject {
         refreshHistoryDepths()
     }
 
+    @discardableResult
+    public func resetActiveClass() -> Int {
+        applyMutation(named: "Reset active class") { map in
+            var changed = 0
+            for i in 0..<map.voxels.count where map.voxels[i] == activeClassID {
+                map.voxels[i] = 0
+                changed += 1
+            }
+            return changed
+        } ?? 0
+    }
+
+    @discardableResult
+    public func resetActiveLabelMap() -> Int {
+        applyMutation(named: "Reset label map") { map in
+            let changed = map.voxels.reduce(0) { $0 + ($1 == 0 ? 0 : 1) }
+            map.voxels = [UInt16](repeating: 0, count: map.voxels.count)
+            return changed
+        } ?? 0
+    }
+
+    @discardableResult
+    public func resetAllLabelMaps() -> Int {
+        let originalID = activeLabelMap?.id
+        var total = 0
+        for map in labelMaps {
+            activeLabelMap = map
+            total += resetActiveLabelMap()
+        }
+        activeLabelMap = labelMaps.first { $0.id == originalID } ?? labelMaps.first
+        return total
+    }
+
     // MARK: - Brush painting
 
     public func paint(axis: Int, sliceIndex: Int, pixelX: Int, pixelY: Int,

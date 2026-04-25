@@ -15,9 +15,10 @@ public struct SliceView: View {
     let displayMode: SliceDisplayMode
     let paneIndex: Int?
 
-    // Per-view display transform state
-    @State private var zoom: CGFloat = 1.0
-    @State private var pan: CGSize = .zero
+    // Per-view interaction state. Persistent zoom/pan lives in ViewerViewModel
+    // so it can be linked across the full hanging protocol when requested.
+    @State private var dragStartPan: CGSize?
+    @State private var gestureStartZoom: CGFloat?
     @State private var measurementPoints: [CGPoint] = []
     @State private var activeMeasurement: Annotation?
     @State private var dragStart: CGPoint?
@@ -148,6 +149,27 @@ public struct SliceView: View {
         .background(TracerTheme.panelBackground)
     }
 
+    private var viewportKey: Int {
+        paneIndex ?? (100 + axis)
+    }
+
+    private var zoom: CGFloat {
+        CGFloat(vm.viewportTransform(for: viewportKey).zoom)
+    }
+
+    private var pan: CGSize {
+        let state = vm.viewportTransform(for: viewportKey)
+        return CGSize(width: state.panX, height: state.panY)
+    }
+
+    private func setZoom(_ value: CGFloat) {
+        vm.setViewportZoom(Double(value), for: viewportKey)
+    }
+
+    private func setPan(_ value: CGSize) {
+        vm.setViewportPan(x: Double(value.width), y: Double(value.height), for: viewportKey)
+    }
+
     // MARK: - Header
 
     private var header: some View {
@@ -175,9 +197,9 @@ public struct SliceView: View {
 
             HoverIconButton(
                 systemImage: "rectangle.on.rectangle.angled",
-                tooltip: "Reset view (zoom + pan)\nDouble-click the view also resets."
+                tooltip: "Reset view (zoom + pan)\nDouble-click the view also resets.\nWhen linked, resets all panes."
             ) {
-                zoom = 1.0; pan = .zero
+                resetView()
             }
 
             sliceScrubber
@@ -559,7 +581,14 @@ public struct SliceView: View {
         // Magnification for pinch-to-zoom
         MagnificationGesture()
             .onChanged { scale in
-                zoom = max(0.25, min(10.0, scale))
+                if gestureStartZoom == nil {
+                    gestureStartZoom = zoom
+                }
+                let start = gestureStartZoom ?? 1.0
+                setZoom(max(0.25, min(10.0, start * scale)))
+            }
+            .onEnded { _ in
+                gestureStartZoom = nil
             }
     }
 
@@ -571,7 +600,7 @@ public struct SliceView: View {
         if event.modifierFlags.contains(.shift) || event.modifierFlags.contains(.command) {
             let sensitivity = event.hasPreciseScrollingDeltas ? 0.0025 : 0.08
             let factor = max(0.2, 1.0 + Double(rawDelta) * sensitivity)
-            zoom = CGFloat(max(0.25, min(10.0, Double(zoom) * factor)))
+            setZoom(CGFloat(max(0.25, min(10.0, Double(zoom) * factor))))
             return
         }
 
@@ -606,10 +635,21 @@ public struct SliceView: View {
                         vm.adjustWindowLevel(dw: Double(dx) * 2, dl: -Double(dy) * 2)
                     }
                 case .pan:
-                    pan = translation
+                    if dragStartPan == nil {
+                        dragStartPan = pan
+                    }
+                    let start = dragStartPan ?? .zero
+                    setPan(CGSize(
+                        width: start.width + translation.width,
+                        height: start.height + translation.height
+                    ))
                 case .zoom:
+                    if gestureStartZoom == nil {
+                        gestureStartZoom = zoom
+                    }
+                    let start = gestureStartZoom ?? 1.0
                     let factor = 1.0 + Double(-translation.height) * 0.005
-                    zoom = CGFloat(max(0.25, min(10.0, Double(zoom) * factor)))
+                    setZoom(CGFloat(max(0.25, min(10.0, Double(start) * factor))))
                 case .distance, .angle, .area:
                     break
                 }
@@ -625,6 +665,8 @@ public struct SliceView: View {
                     handleMeasurementTap(at: value.location, volume: volume, geo: geo)
                 }
                 dragStart = nil
+                dragStartPan = nil
+                gestureStartZoom = nil
                 lastPaintPoint = nil
             }
     }
@@ -665,6 +707,11 @@ public struct SliceView: View {
                     volume: volume,
                     seed: (z: z, y: y, x: x),
                     tolerance: vm.labeling.regionGrowTolerance
+                )
+                vm.refreshActiveVolumeMeasurement(
+                    method: .regionGrow,
+                    thresholdSummary: String(format: "Region grow ±%.1f", vm.labeling.regionGrowTolerance),
+                    preferPET: Modality.normalize(volume.modality) == .PT
                 )
                 lastPaintPoint = p
             }
@@ -925,8 +972,7 @@ public struct SliceView: View {
     // MARK: - Reset
 
     private func resetView() {
-        zoom = 1.0
-        pan = .zero
+        vm.resetViewportTransform(for: viewportKey)
     }
 }
 

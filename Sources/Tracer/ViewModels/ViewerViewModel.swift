@@ -106,7 +106,11 @@ public final class ViewerViewModel: ObservableObject {
 
     // Display transforms
     @Published public var invertColors: Bool = false
+    @Published public var invertPETMIP: Bool = false
     @Published public var correctAnteriorPosteriorDisplay: Bool = true
+    @Published public var linkZoomPanAcrossPanes: Bool = false
+    @Published public var sharedViewportTransform: ViewportTransformState = .identity
+    @Published public var paneViewportTransforms: [Int: ViewportTransformState] = [:]
 
     // Overlay display settings
     @Published public var overlayOpacity: Double = 0.5
@@ -115,6 +119,7 @@ public final class ViewerViewModel: ObservableObject {
     @Published public var overlayLevel: Double = 3
     @Published public var suvSettings = SUVCalculationSettings()
     @Published public var hangingPanes: [HangingPaneConfiguration] = HangingPaneConfiguration.defaultPETCT
+    @Published public var lastVolumeMeasurementReport: VolumeMeasurementReport?
 
     // Annotations per view
     @Published public var annotations: [Annotation] = []
@@ -223,6 +228,84 @@ public final class ViewerViewModel: ObservableObject {
 
     public func resetPETHangingProtocol() {
         hangingPanes = HangingPaneConfiguration.defaultPETCT
+    }
+
+    public func viewportTransform(for paneKey: Int) -> ViewportTransformState {
+        if linkZoomPanAcrossPanes {
+            return sharedViewportTransform
+        }
+        return paneViewportTransforms[paneKey] ?? .identity
+    }
+
+    public func setViewportZoom(_ zoom: Double, for paneKey: Int) {
+        let clamped = max(0.25, min(10.0, zoom))
+        if linkZoomPanAcrossPanes {
+            sharedViewportTransform.zoom = clamped
+        } else {
+            var state = paneViewportTransforms[paneKey] ?? .identity
+            state.zoom = clamped
+            paneViewportTransforms[paneKey] = state
+        }
+    }
+
+    public func setViewportPan(x: Double, y: Double, for paneKey: Int) {
+        if linkZoomPanAcrossPanes {
+            sharedViewportTransform.panX = x
+            sharedViewportTransform.panY = y
+        } else {
+            var state = paneViewportTransforms[paneKey] ?? .identity
+            state.panX = x
+            state.panY = y
+            paneViewportTransforms[paneKey] = state
+        }
+    }
+
+    public func resetViewportTransform(for paneKey: Int) {
+        if linkZoomPanAcrossPanes {
+            sharedViewportTransform = .identity
+        } else {
+            paneViewportTransforms[paneKey] = .identity
+        }
+    }
+
+    public func resetAllViewportTransforms() {
+        sharedViewportTransform = .identity
+        paneViewportTransforms = [:]
+    }
+
+    public func undoLastEdit() {
+        guard labeling.undoDepth > 0 else {
+            statusMessage = "Nothing to undo"
+            return
+        }
+        labeling.undo()
+        refreshActiveVolumeMeasurement(method: .activeLabel, thresholdSummary: "Undo")
+        statusMessage = "Undo label edit"
+    }
+
+    public func redoLastEdit() {
+        guard labeling.redoDepth > 0 else {
+            statusMessage = "Nothing to redo"
+            return
+        }
+        labeling.redo()
+        refreshActiveVolumeMeasurement(method: .activeLabel, thresholdSummary: "Redo")
+        statusMessage = "Redo label edit"
+    }
+
+    public func resetEditableChanges() {
+        let resetVoxels = labeling.resetAllLabelMaps()
+        annotations.removeAll()
+        lastVolumeMeasurementReport = nil
+        resetAllViewportTransforms()
+        invertColors = false
+        invertPETMIP = false
+        if let currentVolume {
+            let (w, l) = autoWindowLevel(pixels: currentVolume.pixels)
+            window = w
+            level = l
+        }
+        statusMessage = "Reset editable labels, measurements, zoom/pan, and display overrides (\(resetVoxels) voxels cleared)"
     }
 
     // MARK: - Loading
@@ -1025,6 +1108,46 @@ public final class ViewerViewModel: ObservableObject {
 
         let unit = source.usesSUV ? "SUV" : "intensity"
         statusMessage = "Segmented \(count) voxels at \(unit) >= \(String(format: "%.2f", threshold))"
+        refreshActiveVolumeMeasurement(
+            method: .fixedThreshold,
+            thresholdSummary: "\(unit) >= \(String(format: "%.2f", threshold))",
+            preferPET: source.usesSUV
+        )
+    }
+
+    public func percentOfMaxActiveLabelWholeVolume(percent: Double) {
+        guard let map = labeling.activeLabelMap else {
+            statusMessage = "Create or select a label map before percent-of-max segmentation"
+            return
+        }
+        guard let source = activeSegmentationSource(matching: map) else {
+            statusMessage = "No current image or PET overlay matches the active label map grid"
+            return
+        }
+
+        labeling.percentOfMax = percent
+        let transform: ((Double) -> Double)? = source.usesSUV ? suvTransform(for: source.volume) : nil
+        let box = VoxelBox.all(in: source.volume)
+        var count = 0
+        labeling.recordVoxelEdit(named: "Percent of max") {
+            count = PETSegmentation.percentOfMax(
+                volume: source.volume,
+                label: map,
+                percent: percent,
+                classID: labeling.activeClassID,
+                boundingBox: box,
+                valueTransform: transform
+            )
+        }
+        map.objectWillChange.send()
+
+        let unit = source.usesSUV ? "SUVmax" : "intensity max"
+        statusMessage = "Segmented \(count) voxels at \(Int(percent * 100))% of \(unit)"
+        refreshActiveVolumeMeasurement(
+            method: .percentOfMax,
+            thresholdSummary: "\(Int(percent * 100))% of \(unit)",
+            preferPET: source.usesSUV
+        )
     }
 
     public func percentOfMaxActiveLabelAroundSeed(seed: (z: Int, y: Int, x: Int),
@@ -1057,6 +1180,11 @@ public final class ViewerViewModel: ObservableObject {
 
         let unit = source.usesSUV ? "SUVmax" : "intensity max"
         statusMessage = "Segmented \(count) voxels at \(Int(percent * 100))% of \(unit)"
+        refreshActiveVolumeMeasurement(
+            method: .percentOfMax,
+            thresholdSummary: "\(Int(percent * 100))% of local \(unit)",
+            preferPET: source.usesSUV
+        )
     }
 
     public func gradientActiveLabelAroundSeed(seed: (z: Int, y: Int, x: Int),
@@ -1087,6 +1215,68 @@ public final class ViewerViewModel: ObservableObject {
 
         let unit = source.usesSUV ? "SUV" : "intensity"
         statusMessage = "SUV gradient segmented \(result.voxelCount) voxels | floor \(unit) \(String(format: "%.2f", minimumValue)), peak \(String(format: "%.2f", result.maxValue)), edge \(String(format: "%.3f", result.gradientCutoff))/mm"
+        refreshActiveVolumeMeasurement(
+            method: .gradientEdge,
+            thresholdSummary: "Gradient edge, floor \(unit) \(String(format: "%.2f", minimumValue))",
+            preferPET: source.usesSUV
+        )
+    }
+
+    public func thresholdActiveCTLabel(lowerHU: Double, upperHU: Double) {
+        guard let map = labeling.activeLabelMap else {
+            statusMessage = "Create or select a label map before CT HU thresholding"
+            return
+        }
+        guard let ct = activeCTVolumeMatching(map) else {
+            statusMessage = "No CT volume matches the active label map grid"
+            return
+        }
+
+        let lower = min(lowerHU, upperHU)
+        let upper = max(lowerHU, upperHU)
+        var count = 0
+        labeling.recordVoxelEdit(named: "CT HU range") {
+            count = PETSegmentation.thresholdRange(
+                volume: ct,
+                label: map,
+                lower: lower,
+                upper: upper,
+                classID: labeling.activeClassID
+            )
+        }
+        map.objectWillChange.send()
+        statusMessage = "Segmented \(count) CT voxels from \(Int(lower)) to \(Int(upper)) HU"
+        refreshActiveVolumeMeasurement(
+            method: .huRange,
+            thresholdSummary: "\(Int(lower))...\(Int(upper)) HU",
+            preferPET: false
+        )
+    }
+
+    @discardableResult
+    public func refreshActiveVolumeMeasurement(method: VolumeMeasurementMethod = .activeLabel,
+                                               thresholdSummary: String = "Active label",
+                                               preferPET: Bool = true) -> VolumeMeasurementReport? {
+        guard let map = labeling.activeLabelMap else {
+            lastVolumeMeasurementReport = nil
+            return nil
+        }
+        guard let source = activeMeasurementSource(matching: map, preferPET: preferPET) else {
+            lastVolumeMeasurementReport = nil
+            return nil
+        }
+        let transform = source.source == .petSUV ? suvTransform(for: source.volume) : nil
+        let report = VolumeMeasurementReport.compute(
+            volume: source.volume,
+            labelMap: map,
+            classID: labeling.activeClassID,
+            source: source.source,
+            method: method,
+            thresholdSummary: thresholdSummary,
+            valueTransform: transform
+        )
+        lastVolumeMeasurementReport = report
+        return report
     }
 
     private func suvTransform(for volume: ImageVolume) -> (Double) -> Double {
@@ -1105,6 +1295,48 @@ public final class ViewerViewModel: ObservableObject {
             return currentVolume
         }
         return nil
+    }
+
+    private func activeCTVolumeMatching(_ labelMap: LabelMap) -> ImageVolume? {
+        if let fusion,
+           Modality.normalize(fusion.baseVolume.modality) == .CT,
+           sameGrid(fusion.baseVolume, labelMap) {
+            return fusion.baseVolume
+        }
+        if let currentVolume,
+           Modality.normalize(currentVolume.modality) == .CT,
+           sameGrid(currentVolume, labelMap) {
+            return currentVolume
+        }
+        return loadedCTVolumes.first { sameGrid($0, labelMap) }
+    }
+
+    private func activeMeasurementSource(
+        matching labelMap: LabelMap,
+        preferPET: Bool
+    ) -> (volume: ImageVolume, source: VolumeMeasurementSource)? {
+        if preferPET, let pet = activePETVolumeMatching(labelMap) {
+            return (pet, .petSUV)
+        }
+        if let ct = activeCTVolumeMatching(labelMap) {
+            return (ct, .ctHU)
+        }
+        if let pet = activePETVolumeMatching(labelMap) {
+            return (pet, .petSUV)
+        }
+        if let currentVolume, sameGrid(currentVolume, labelMap) {
+            let normalized = Modality.normalize(currentVolume.modality)
+            if normalized == .PT { return (currentVolume, .petSUV) }
+            if normalized == .CT { return (currentVolume, .ctHU) }
+            return (currentVolume, .intensity)
+        }
+        return loadedVolumes.first(where: { sameGrid($0, labelMap) }).map { volume in
+            let normalized = Modality.normalize(volume.modality)
+            let source: VolumeMeasurementSource = normalized == .PT
+                ? .petSUV
+                : (normalized == .CT ? .ctHU : .intensity)
+            return (volume, source)
+        }
     }
 
     private func activeSegmentationSource(matching labelMap: LabelMap) -> (volume: ImageVolume, usesSUV: Bool)? {
@@ -1206,7 +1438,8 @@ public final class ViewerViewModel: ObservableObject {
             window: overlayWindow,
             level: overlayLevel,
             colormap: overlayColormap,
-            baseAlpha: 1.0
+            baseAlpha: 1.0,
+            invert: invertPETMIP
         )
     }
 

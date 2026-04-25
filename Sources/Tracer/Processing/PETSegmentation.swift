@@ -46,6 +46,49 @@ public enum PETSegmentation {
         return count
     }
 
+    /// Segment all voxels whose transformed value lies inside a closed range.
+    /// This is used for CT HU masks (e.g. lung, fat, bone) and for custom
+    /// PET/intensity windows when a reader wants a bounded contour.
+    @discardableResult
+    public static func thresholdRange(volume: ImageVolume,
+                                      label: LabelMap,
+                                      lower: Double,
+                                      upper: Double,
+                                      classID: UInt16,
+                                      mode: BrushTool.Mode = .paint,
+                                      boundingBox: VoxelBox? = nil,
+                                      valueTransform: ((Double) -> Double)? = nil) -> Int {
+        guard volume.depth == label.depth,
+              volume.height == label.height,
+              volume.width == label.width else { return 0 }
+
+        let lo = min(lower, upper)
+        let hi = max(lower, upper)
+        let bb = boundingBox ?? VoxelBox.all(in: volume)
+        var count = 0
+        for z in bb.minZ...bb.maxZ {
+            for y in bb.minY...bb.maxY {
+                let rowStart = z * label.height * label.width + y * label.width
+                for x in bb.minX...bb.maxX {
+                    let raw = Double(volume.pixels[rowStart + x])
+                    let value = valueTransform?(raw) ?? raw
+                    guard value >= lo, value <= hi else { continue }
+                    let idx = rowStart + x
+                    switch mode {
+                    case .paint: label.voxels[idx] = classID
+                    case .erase: label.voxels[idx] = 0
+                    case .eraseClass:
+                        if label.voxels[idx] == classID {
+                            label.voxels[idx] = 0
+                        }
+                    }
+                    count += 1
+                }
+            }
+        }
+        return count
+    }
+
     // MARK: - Percentage of max SUV
 
     /// Segment voxels above `percent * SUV_max_in_box` (e.g. 0.4 = 40% of max).
@@ -159,6 +202,56 @@ public enum PETSegmentation {
                     visited[nidx] = true
                     queue.append(n)
                 }
+            }
+        }
+        return count
+    }
+
+    /// Connected flood-fill from a seed while enforcing a transformed-value
+    /// range. Useful for HU-bounded CT volumes where whole-volume thresholding
+    /// would otherwise pick up every similar structure in the scan.
+    @discardableResult
+    public static func regionGrowInRange(volume: ImageVolume,
+                                         label: LabelMap,
+                                         seed: (z: Int, y: Int, x: Int),
+                                         lower: Double,
+                                         upper: Double,
+                                         classID: UInt16,
+                                         maxVoxels: Int = 10_000_000,
+                                         valueTransform: ((Double) -> Double)? = nil) -> Int {
+        guard volume.depth == label.depth,
+              volume.height == label.height,
+              volume.width == label.width else { return 0 }
+        guard seed.z >= 0, seed.z < volume.depth,
+              seed.y >= 0, seed.y < volume.height,
+              seed.x >= 0, seed.x < volume.width else { return 0 }
+
+        let lo = min(lower, upper)
+        let hi = max(lower, upper)
+        var queue: [(Int, Int, Int)] = [seed]
+        var visited = [Bool](repeating: false, count: volume.pixels.count)
+        visited[label.index(z: seed.z, y: seed.y, x: seed.x)] = true
+        var count = 0
+
+        while !queue.isEmpty && count < maxVoxels {
+            let (z, y, x) = queue.removeLast()
+            let idx = label.index(z: z, y: y, x: x)
+            let raw = Double(volume.pixels[idx])
+            let value = valueTransform?(raw) ?? raw
+            guard value >= lo, value <= hi else { continue }
+            label.voxels[idx] = classID
+            count += 1
+
+            for n in [(z+1, y, x), (z-1, y, x),
+                      (z, y+1, x), (z, y-1, x),
+                      (z, y, x+1), (z, y, x-1)] {
+                guard n.0 >= 0, n.0 < volume.depth,
+                      n.1 >= 0, n.1 < volume.height,
+                      n.2 >= 0, n.2 < volume.width else { continue }
+                let nidx = label.index(z: n.0, y: n.1, x: n.2)
+                guard !visited[nidx] else { continue }
+                visited[nidx] = true
+                queue.append(n)
             }
         }
         return count

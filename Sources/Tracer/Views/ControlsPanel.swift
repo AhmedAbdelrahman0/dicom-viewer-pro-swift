@@ -276,6 +276,9 @@ private struct FusionTab: View {
                     }
                 }
 
+                Toggle("Invert PET MIP window", isOn: $vm.invertPETMIP)
+                    .help("Reverses the PET MIP color mapping, useful when a black-hot or white-hot projection makes low uptake easier to read.")
+
                 petSUVRangePanel
 
                 Divider()
@@ -740,6 +743,25 @@ private struct DisplayTab: View {
 
             Toggle("Correct A/P Display Flip", isOn: $vm.correctAnteriorPosteriorDisplay)
                 .help("Swaps the displayed anterior/posterior axis for studies that load reversed. This affects display, hover sampling, measurements, PET overlay, and labels together.")
+
+            Divider()
+
+            Text("Zoom / Pan")
+                .font(.subheadline)
+
+            Toggle("Link Zoom + Pan Across Panes", isOn: $vm.linkZoomPanAcrossPanes)
+                .help("When enabled, zooming or panning one viewport applies the same transform to every PET/CT hanging pane.")
+
+            HStack {
+                Button {
+                    vm.resetAllViewportTransforms()
+                } label: {
+                    Label("Reset All Views", systemImage: "rectangle.on.rectangle.angled")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
 
             Divider()
 

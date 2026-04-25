@@ -14,6 +14,9 @@ struct LabelingPanel: View {
     @State private var marginIterations: Int = 1
     @State private var islandMinimumVoxels: Int = 10
     @State private var logicalSourceClassID: UInt16 = 0
+    @State private var selectedHUPresetID: String = HUThresholdPreset.presets[1].id
+    @State private var ctLowerHU: Double = HUThresholdPreset.presets[1].lower
+    @State private var ctUpperHU: Double = HUThresholdPreset.presets[1].upper
 
     var body: some View {
         ScrollView {
@@ -320,6 +323,10 @@ struct LabelingPanel: View {
 
                 Divider()
 
+                volumeMeasurementTools
+
+                Divider()
+
                 // ── Morphology shortcuts ──
                 Group {
                     Text("Morphology").font(.headline)
@@ -535,6 +542,165 @@ struct LabelingPanel: View {
         }
     }
 
+    private var volumeMeasurementTools: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Volume Measurement")
+                    .font(.headline)
+                Spacer()
+                Menu {
+                    Button {
+                        vm.refreshActiveVolumeMeasurement(
+                            method: .activeLabel,
+                            thresholdSummary: "Active PET label",
+                            preferPET: true
+                        )
+                    } label: {
+                        Label("Measure PET / SUV", systemImage: "flame")
+                    }
+                    Button {
+                        vm.refreshActiveVolumeMeasurement(
+                            method: .activeLabel,
+                            thresholdSummary: "Active CT label",
+                            preferPET: false
+                        )
+                    } label: {
+                        Label("Measure CT / HU", systemImage: "cube")
+                    }
+                } label: {
+                    Label("Measure", systemImage: "chart.bar.doc.horizontal")
+                        .font(.system(size: 11))
+                }
+                .menuStyle(.borderlessButton)
+                .controlSize(.small)
+                .disabled(vm.labeling.activeLabelMap == nil)
+            }
+
+            Text("PET tools write SUV-derived MTV/TLG into the active label. CT tools write HU-derived volume masks into the same editable label map.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Label("PET MTV / TLG", systemImage: "flame")
+                    .font(.system(size: 12, weight: .semibold))
+
+                HStack {
+                    Text("SUV ≥")
+                    Slider(value: $vm.labeling.thresholdValue, in: 0...50, step: 0.1)
+                    Text(String(format: "%.1f", vm.labeling.thresholdValue))
+                        .font(.system(size: 11, design: .monospaced))
+                        .frame(width: 42, alignment: .trailing)
+                }
+
+                HStack {
+                    Button {
+                        vm.thresholdActiveLabel(atOrAbove: vm.labeling.thresholdValue)
+                    } label: {
+                        Label("Fixed SUV", systemImage: "greaterthan.circle")
+                            .frame(maxWidth: .infinity)
+                    }
+
+                    Button {
+                        vm.percentOfMaxActiveLabelWholeVolume(percent: vm.labeling.percentOfMax)
+                    } label: {
+                        Label("% SUVmax", systemImage: "percent")
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                HStack {
+                    Text("% max")
+                    Slider(value: $vm.labeling.percentOfMax, in: 0.1...0.9, step: 0.01)
+                    Text(String(format: "%.0f%%", vm.labeling.percentOfMax * 100))
+                        .font(.system(size: 11, design: .monospaced))
+                        .frame(width: 42, alignment: .trailing)
+                }
+
+                Text("For focal lesions, choose SUV Gradient and click a seed; the report updates after the contour is written.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .padding(8)
+            .background(Color.orange.opacity(0.08))
+            .cornerRadius(6)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Label("CT HU Volumetry", systemImage: "cube")
+                    .font(.system(size: 12, weight: .semibold))
+
+                Picker("Preset", selection: $selectedHUPresetID) {
+                    ForEach(HUThresholdPreset.presets) { preset in
+                        Text(preset.name).tag(preset.id)
+                    }
+                }
+                .onChange(of: selectedHUPresetID) { _, id in
+                    guard let preset = HUThresholdPreset.presets.first(where: { $0.id == id }) else { return }
+                    ctLowerHU = preset.lower
+                    ctUpperHU = preset.upper
+                }
+
+                if let preset = HUThresholdPreset.presets.first(where: { $0.id == selectedHUPresetID }) {
+                    Text(preset.note)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                SmallNumberRow("Lower HU", value: $ctLowerHU)
+                SmallNumberRow("Upper HU", value: $ctUpperHU)
+
+                HStack {
+                    Button {
+                        vm.thresholdActiveCTLabel(lowerHU: ctLowerHU, upperHU: ctUpperHU)
+                    } label: {
+                        Label("Apply HU Range", systemImage: "ruler")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+
+                    Button {
+                        let preset = HUThresholdPreset.presets.first(where: { $0.id == selectedHUPresetID }) ?? HUThresholdPreset.presets[1]
+                        ctLowerHU = preset.lower
+                        ctUpperHU = preset.upper
+                    } label: {
+                        Label("Reset", systemImage: "arrow.counterclockwise")
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .controlSize(.small)
+            }
+            .padding(8)
+            .background(Color.cyan.opacity(0.07))
+            .cornerRadius(6)
+
+            if let report = vm.lastVolumeMeasurementReport {
+                VolumeMeasurementReportView(report: report)
+            }
+
+            HStack {
+                Button(role: .destructive) {
+                    let cleared = vm.labeling.resetActiveClass()
+                    vm.refreshActiveVolumeMeasurement()
+                    vm.statusMessage = "Reset active class (\(cleared) voxels cleared)"
+                } label: {
+                    Label("Reset Class", systemImage: "xmark.circle")
+                        .frame(maxWidth: .infinity)
+                }
+                .disabled(vm.labeling.activeLabelMap == nil)
+
+                Button(role: .destructive) {
+                    vm.resetEditableChanges()
+                } label: {
+                    Label("Reset Edits", systemImage: "arrow.counterclockwise.circle")
+                        .frame(maxWidth: .infinity)
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+    }
+
     private var defaultExportFilename: String {
         let ext = exportFormat.fileExtensions.first ?? "dat"
         return "labels.\(ext)"
@@ -703,6 +869,77 @@ private struct StatRow: View {
             Spacer()
             Text(value).font(.system(size: 11, design: .monospaced))
         }
+    }
+}
+
+private struct SmallNumberRow: View {
+    let label: String
+    @Binding var value: Double
+
+    init(_ label: String, value: Binding<Double>) {
+        self.label = label
+        self._value = value
+    }
+
+    var body: some View {
+        HStack {
+            Text(label)
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+            Spacer()
+            TextField("", value: $value, formatter: Self.formatter)
+                .font(.system(size: 11, design: .monospaced))
+                .multilineTextAlignment(.trailing)
+                .frame(width: 86)
+                .textFieldStyle(.roundedBorder)
+        }
+    }
+
+    private static let formatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.maximumFractionDigits = 2
+        formatter.minimumFractionDigits = 0
+        return formatter
+    }()
+}
+
+private struct VolumeMeasurementReportView: View {
+    let report: VolumeMeasurementReport
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Label(report.source.rawValue, systemImage: report.source == .petSUV ? "flame" : "cube")
+                    .font(.system(size: 12, weight: .semibold))
+                Spacer()
+                Text(report.method.rawValue)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+            Text(report.className)
+                .font(.system(size: 11, weight: .medium))
+            Text(report.thresholdSummary)
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+
+            StatRow("Voxels", "\(report.voxelCount)")
+            StatRow("Volume", String(format: "%.2f mL", report.volumeML))
+            StatRow(report.source == .ctHU ? "Mean HU" : "Mean", String(format: "%.2f", report.mean))
+            StatRow("Range", String(format: "%.1f…%.1f", report.min, report.max))
+            if let suvMax = report.suvMax {
+                StatRow("SUVmax", String(format: "%.2f", suvMax))
+            }
+            if let suvMean = report.suvMean {
+                StatRow("SUVmean", String(format: "%.2f", suvMean))
+            }
+            if let tlg = report.tlg {
+                StatRow("TLG", String(format: "%.1f", tlg))
+            }
+        }
+        .padding(8)
+        .background(Color.secondary.opacity(0.08))
+        .cornerRadius(6)
     }
 }
 

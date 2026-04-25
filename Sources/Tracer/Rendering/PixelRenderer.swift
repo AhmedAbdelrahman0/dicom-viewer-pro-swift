@@ -32,7 +32,8 @@ public enum PixelRenderer {
         pixels: [Float], width: Int, height: Int,
         window: Double, level: Double,
         colormap: Colormap,
-        baseAlpha: Double = 1.0
+        baseAlpha: Double = 1.0,
+        invert: Bool = false
     ) -> CGImage? {
         guard pixels.count == width * height else { return nil }
 
@@ -43,7 +44,9 @@ public enum PixelRenderer {
 
         for i in 0..<pixels.count {
             let v = (Double(pixels[i]) - minVal) / range
-            let idx = Int(max(0, min(1, v)) * 255)
+            let normalized = max(0, min(1, v))
+            let mapped = invert ? (1 - normalized) : normalized
+            let idx = Int(mapped * 255)
             let (r, g, b, a) = lut[idx]
             rgba[i * 4]     = r
             rgba[i * 4 + 1] = g

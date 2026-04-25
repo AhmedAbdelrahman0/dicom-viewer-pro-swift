@@ -3131,6 +3131,119 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(vm.mode, .dgxRemote,
                        "NNUnetViewModel should honour the persisted DGX toggle on init")
     }
+
+    // MARK: - Workstation editing and volumetry
+
+    @MainActor
+    func testLinkedViewportTransformCanApplyToAllPanes() {
+        let vm = ViewerViewModel()
+
+        vm.setViewportZoom(2.0, for: 0)
+        XCTAssertEqual(vm.viewportTransform(for: 0).zoom, 2.0, accuracy: 1e-9)
+        XCTAssertEqual(vm.viewportTransform(for: 1).zoom, 1.0, accuracy: 1e-9)
+
+        vm.linkZoomPanAcrossPanes = true
+        vm.setViewportPan(x: 18, y: -7, for: 1)
+        XCTAssertEqual(vm.viewportTransform(for: 0).panX, 18, accuracy: 1e-9)
+        XCTAssertEqual(vm.viewportTransform(for: 2).panY, -7, accuracy: 1e-9)
+
+        vm.resetAllViewportTransforms()
+        XCTAssertTrue(vm.viewportTransform(for: 0).isIdentity)
+        XCTAssertTrue(vm.viewportTransform(for: 2).isIdentity)
+    }
+
+    @MainActor
+    func testCTHURangeVolumetryWritesActiveLabelAndReport() throws {
+        let ct = ImageVolume(
+            pixels: [-900, -700, 20, 180],
+            depth: 1, height: 2, width: 2,
+            spacing: (2, 2, 5),
+            modality: "CT",
+            seriesDescription: "CT"
+        )
+        let vm = ViewerViewModel()
+        vm.displayVolume(ct)
+        let map = vm.labeling.createLabelMap(
+            for: ct,
+            presetSet: LabelPresetSet(
+                name: "Test",
+                description: "",
+                classes: [LabelClass(labelID: 1, name: "Lung", category: .organ, color: .green)]
+            )
+        )
+
+        vm.thresholdActiveCTLabel(lowerHU: -1000, upperHU: -400)
+
+        XCTAssertEqual(map.voxels.filter { $0 == 1 }.count, 2)
+        let report = try XCTUnwrap(vm.lastVolumeMeasurementReport)
+        XCTAssertEqual(report.source, .ctHU)
+        XCTAssertEqual(report.method, .huRange)
+        XCTAssertEqual(report.voxelCount, 2)
+        XCTAssertEqual(report.volumeML, 0.04, accuracy: 1e-9)
+        XCTAssertEqual(report.min, -900, accuracy: 1e-9)
+        XCTAssertEqual(report.max, -700, accuracy: 1e-9)
+    }
+
+    @MainActor
+    func testPETPercentOfMaxVolumetryUsesSUVScaling() throws {
+        let pet = ImageVolume(
+            pixels: [0, 5, 10, 20],
+            depth: 1, height: 2, width: 2,
+            spacing: (2, 2, 2),
+            modality: "PT",
+            seriesDescription: "PET",
+            suvScaleFactor: 0.5
+        )
+        let vm = ViewerViewModel()
+        vm.displayVolume(pet)
+        let map = vm.labeling.createLabelMap(
+            for: pet,
+            presetSet: LabelPresetSet(
+                name: "Test",
+                description: "",
+                classes: [LabelClass(labelID: 1, name: "Lesion", category: .lesion, color: .orange)]
+            )
+        )
+
+        vm.percentOfMaxActiveLabelWholeVolume(percent: 0.4)
+
+        XCTAssertEqual(map.voxels.filter { $0 == 1 }.count, 2)
+        let report = try XCTUnwrap(vm.lastVolumeMeasurementReport)
+        XCTAssertEqual(report.source, .petSUV)
+        XCTAssertEqual(report.method, .percentOfMax)
+        XCTAssertEqual(report.volumeML, 0.016, accuracy: 1e-9)
+        XCTAssertEqual(report.suvMax ?? 0, 10, accuracy: 1e-9)
+        XCTAssertEqual(report.suvMean ?? 0, 7.5, accuracy: 1e-9)
+        XCTAssertEqual(report.tlg ?? 0, 0.12, accuracy: 1e-9)
+    }
+
+    func testColorRendererCanInvertMIPWindowMapping() throws {
+        let normal = try XCTUnwrap(PixelRenderer.makeColorImage(
+            pixels: [0, 1],
+            width: 2,
+            height: 1,
+            window: 1,
+            level: 0.5,
+            colormap: .grayscale,
+            invert: false
+        ))
+        let inverted = try XCTUnwrap(PixelRenderer.makeColorImage(
+            pixels: [0, 1],
+            width: 2,
+            height: 1,
+            window: 1,
+            level: 0.5,
+            colormap: .grayscale,
+            invert: true
+        ))
+        let normalData = try XCTUnwrap(normal.dataProvider?.data as Data?)
+        let invertedData = try XCTUnwrap(inverted.dataProvider?.data as Data?)
+
+        XCTAssertEqual(normalData[0], 0)
+        XCTAssertEqual(normalData[4], 255)
+        XCTAssertEqual(invertedData[0], 255)
+        XCTAssertEqual(invertedData[4], 0)
+    }
 }
 
 /// Simple thread-safe counter used by tests that interact with the indexer's

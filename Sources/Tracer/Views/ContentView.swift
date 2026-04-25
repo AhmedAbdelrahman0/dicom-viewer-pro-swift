@@ -321,6 +321,31 @@ public struct ContentView: View {
             .padding(.horizontal, 4)
 
         HoverIconButton(
+            systemImage: "arrow.uturn.backward",
+            tooltip: "Undo label edit (⌘Z)\nReverts the last paint, threshold, morphology, or reset operation."
+        ) {
+            vm.undoLastEdit()
+        }
+        .disabled(vm.labeling.undoDepth == 0)
+        .keyboardShortcut("z", modifiers: [.command])
+
+        HoverIconButton(
+            systemImage: "arrow.uturn.forward",
+            tooltip: "Redo label edit (⌘⇧Z)\nReapplies an undone label operation."
+        ) {
+            vm.redoLastEdit()
+        }
+        .disabled(vm.labeling.redoDepth == 0)
+        .keyboardShortcut("z", modifiers: [.command, .shift])
+
+        HoverIconButton(
+            systemImage: "arrow.counterclockwise.circle",
+            tooltip: "Reset editable changes\nClears label voxels, measurements, zoom/pan, and display overrides while keeping loaded studies."
+        ) {
+            vm.resetEditableChanges()
+        }
+
+        HoverIconButton(
             systemImage: "wand.and.stars",
             tooltip: "Auto Window / Level  (⌘R or ⌘4)\n"
                    + "Automatically compute window/level from the\n"
