@@ -86,6 +86,46 @@ public enum HangingPaneKind: String, CaseIterable, Identifiable, Codable, Sendab
     }
 }
 
+/// Workstation viewport grid. Stored as columns × rows because that is how
+/// radiology hanging protocols are usually described: 2×1, 2×2, 4×4, etc.
+public struct HangingGridLayout: Equatable, Codable, Sendable {
+    public var columns: Int
+    public var rows: Int
+
+    public init(columns: Int, rows: Int) {
+        self.columns = max(1, min(8, columns))
+        self.rows = max(1, min(8, rows))
+    }
+
+    public var paneCount: Int {
+        rows * columns
+    }
+
+    public var displayName: String {
+        paneCount == 1 ? "1 viewport" : "\(columns)x\(rows)"
+    }
+
+    public static let one = HangingGridLayout(columns: 1, rows: 1)
+    public static let twoByOne = HangingGridLayout(columns: 2, rows: 1)
+    public static let oneByTwo = HangingGridLayout(columns: 1, rows: 2)
+    public static let twoByTwo = HangingGridLayout(columns: 2, rows: 2)
+    public static let threeByTwo = HangingGridLayout(columns: 3, rows: 2)
+    public static let fourByFour = HangingGridLayout(columns: 4, rows: 4)
+    public static let eightByEight = HangingGridLayout(columns: 8, rows: 8)
+
+    public static let defaultPETCT = twoByTwo
+
+    public static let presets: [HangingGridLayout] = [
+        .one,
+        .twoByOne,
+        .oneByTwo,
+        .twoByTwo,
+        .threeByTwo,
+        .fourByFour,
+        .eightByEight
+    ]
+}
+
 public struct HangingPaneConfiguration: Identifiable, Equatable, Codable, Sendable {
     public var id: UUID
     public var kind: HangingPaneKind
@@ -103,4 +143,16 @@ public struct HangingPaneConfiguration: Identifiable, Equatable, Codable, Sendab
         HangingPaneConfiguration(kind: .petOnly, plane: .axial),
         HangingPaneConfiguration(kind: .petMIP, plane: .coronal)
     ]
+
+    public static func defaultPane(at index: Int) -> HangingPaneConfiguration {
+        let defaults = defaultPETCT
+        if defaults.indices.contains(index) {
+            return defaults[index]
+        }
+        let planes = SlicePlane.allCases
+        return HangingPaneConfiguration(
+            kind: .ctOnly,
+            plane: planes[index % planes.count]
+        )
+    }
 }

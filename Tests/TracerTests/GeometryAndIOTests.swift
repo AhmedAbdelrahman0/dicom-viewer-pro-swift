@@ -181,6 +181,23 @@ final class GeometryAndIOTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testHangingGridCanExpandAndShrinkViewportCount() {
+        let vm = ViewerViewModel()
+
+        vm.setHangingGrid(columns: 4, rows: 4)
+
+        XCTAssertEqual(vm.hangingGrid, HangingGridLayout(columns: 4, rows: 4))
+        XCTAssertEqual(vm.hangingPanes.count, 16)
+        XCTAssertEqual(vm.hangingPanes.prefix(4).map(\.kind), [.fused, .ctOnly, .petOnly, .petMIP])
+
+        vm.setHangingGrid(columns: 2, rows: 1)
+
+        XCTAssertEqual(vm.hangingGrid, HangingGridLayout(columns: 2, rows: 1))
+        XCTAssertEqual(vm.hangingPanes.count, 2)
+        XCTAssertEqual(vm.hangingPanes.map(\.kind), [.fused, .ctOnly])
+    }
+
     func testNIfTILoaderPreservesSFormAsLPSGeometry() throws {
         var data = Data(count: 352)
         data.writeInt32LE(348, at: 0)

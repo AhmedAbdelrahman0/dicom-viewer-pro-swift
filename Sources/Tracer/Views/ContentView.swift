@@ -358,6 +358,8 @@ public struct ContentView: View {
 
         orientationMenu
 
+        hangingLayoutMenu
+
         petDisplayMenu
 
         HoverIconButton(
@@ -571,6 +573,30 @@ public struct ContentView: View {
         .menuStyle(.borderlessButton)
         .fixedSize()
         .help("PET Coloring\nFusion and PET-only panes can use heat maps while MIP uses a separate black/white or custom map.")
+    }
+
+    private var hangingLayoutMenu: some View {
+        Menu {
+            ForEach(HangingGridLayout.presets, id: \.displayName) { layout in
+                Button {
+                    vm.setHangingGrid(layout)
+                } label: {
+                    Label(layout.displayName, systemImage: layout == vm.hangingGrid ? "checkmark.rectangle" : "rectangle.grid.2x2")
+                }
+            }
+            Divider()
+            Button {
+                vm.resetPETHangingProtocol()
+            } label: {
+                Label("PET/CT Default", systemImage: "square.2.layers.3d")
+            }
+        } label: {
+            Label(vm.hangingGrid.displayName, systemImage: "rectangle.grid.2x2")
+                .font(.system(size: 12, weight: .medium))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Viewport Layout\nChoose 1, 2x1, 2x2, 4x4, 8x8, or use the Controls panel for custom rows and columns.")
     }
 
     private var volumetryMenu: some View {
@@ -1129,20 +1155,17 @@ struct MPRLayoutView: View {
         } else {
             GeometryReader { geo in
                 let gap: CGFloat = 2
-                let w = max(0, (geo.size.width - gap) / 2)
-                let h = max(0, (geo.size.height - gap) / 2)
+                let layout = vm.hangingGrid
+                let w = max(0, (geo.size.width - gap * CGFloat(layout.columns - 1)) / CGFloat(layout.columns))
+                let h = max(0, (geo.size.height - gap * CGFloat(layout.rows - 1)) / CGFloat(layout.rows))
                 VStack(spacing: gap) {
-                    HStack(spacing: gap) {
-                        HangingPaneView(index: 0)
-                            .frame(width: w, height: h)
-                        HangingPaneView(index: 1)
-                            .frame(width: w, height: h)
-                    }
-                    HStack(spacing: gap) {
-                        HangingPaneView(index: 2)
-                            .frame(width: w, height: h)
-                        HangingPaneView(index: 3)
-                            .frame(width: w, height: h)
+                    ForEach(0..<layout.rows, id: \.self) { row in
+                        HStack(spacing: gap) {
+                            ForEach(0..<layout.columns, id: \.self) { column in
+                                HangingPaneView(index: row * layout.columns + column)
+                                    .frame(width: w, height: h)
+                            }
+                        }
                     }
                 }
             }
@@ -1173,7 +1196,7 @@ private struct HangingPaneView: View {
         if vm.hangingPanes.indices.contains(index) {
             return vm.hangingPanes[index]
         }
-        return HangingPaneConfiguration.defaultPETCT[index % HangingPaneConfiguration.defaultPETCT.count]
+        return HangingPaneConfiguration.defaultPane(at: index)
     }
 }
 
@@ -1270,70 +1293,102 @@ private struct PETMIPPane: View {
                 .font(.system(size: 11, weight: .bold))
                 .foregroundColor(TracerTheme.pet)
 
-            Picker("", selection: Binding(
-                get: { vm.hangingPanes.indices.contains(index) ? vm.hangingPanes[index].kind : .petMIP },
-                set: { vm.setHangingPaneKind(index: index, kind: $0) }
-            )) {
-                ForEach(HangingPaneKind.allCases) { kind in
-                    Label(kind.displayName, systemImage: kind.systemImage).tag(kind)
-                }
+            if vm.hangingGrid.paneCount > 16 {
+                compactPaneMenu
+            } else {
+                rolePicker
+                    .frame(width: 88)
+                planePicker
+                    .frame(width: 58)
             }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .frame(width: 88)
-            .controlSize(.mini)
-
-            Picker("", selection: Binding(
-                get: { vm.hangingPanes.indices.contains(index) ? vm.hangingPanes[index].plane : .coronal },
-                set: { vm.setHangingPanePlane(index: index, plane: $0) }
-            )) {
-                ForEach(SlicePlane.allCases) { plane in
-                    Text(plane.shortName).tag(plane)
-                }
-            }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .frame(width: 58)
-            .controlSize(.mini)
 
             Spacer()
 
-            Picker("", selection: Binding(
-                get: { vm.mipColormap },
-                set: { vm.setPETMIPColormap($0) }
-            )) {
-                ForEach(Colormap.allCases) { color in
-                    Text(color.displayName).tag(color)
+            if vm.hangingGrid.paneCount <= 16 {
+                mipColorPicker
+
+                HoverIconButton(
+                    systemImage: "circle.righthalf.filled",
+                    tooltip: "Invert PET MIP\nReverses only the MIP color window.",
+                    isActive: vm.invertPETMIP
+                ) {
+                    vm.setInvertPETMIP(!vm.invertPETMIP)
                 }
-            }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .frame(width: 92)
-            .controlSize(.mini)
-            .help("PET MIP colormap. This is independent from fused PET coloring.")
 
-            HoverIconButton(
-                systemImage: "circle.righthalf.filled",
-                tooltip: "Invert PET MIP\nReverses only the MIP color window.",
-                isActive: vm.invertPETMIP
-            ) {
-                vm.setInvertPETMIP(!vm.invertPETMIP)
-            }
+                HoverIconButton(
+                    systemImage: "rectangle.on.rectangle.angled",
+                    tooltip: "Reset MIP zoom/pan"
+                ) {
+                    vm.resetViewportTransform(for: index)
+                }
 
-            HoverIconButton(
-                systemImage: "rectangle.on.rectangle.angled",
-                tooltip: "Reset MIP zoom/pan"
-            ) {
-                vm.resetViewportTransform(for: index)
+                Text(String(format: "SUV %.1f–%.1f", vm.petOverlayRangeMin, vm.petOverlayRangeMax))
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.secondary)
             }
-
-            Text(String(format: "SUV %.1f–%.1f", vm.petOverlayRangeMin, vm.petOverlayRangeMax))
-                .font(.system(size: 10, design: .monospaced))
-                .foregroundColor(.secondary)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(TracerTheme.headerBackground)
+    }
+
+    private var rolePicker: some View {
+        Picker("", selection: Binding(
+            get: { vm.hangingPanes.indices.contains(index) ? vm.hangingPanes[index].kind : .petMIP },
+            set: { vm.setHangingPaneKind(index: index, kind: $0) }
+        )) {
+            ForEach(HangingPaneKind.allCases) { kind in
+                Label(kind.displayName, systemImage: kind.systemImage).tag(kind)
+            }
+        }
+        .labelsHidden()
+        .pickerStyle(.menu)
+        .controlSize(.mini)
+    }
+
+    private var planePicker: some View {
+        Picker("", selection: Binding(
+            get: { vm.hangingPanes.indices.contains(index) ? vm.hangingPanes[index].plane : .coronal },
+            set: { vm.setHangingPanePlane(index: index, plane: $0) }
+        )) {
+            ForEach(SlicePlane.allCases) { plane in
+                Text(plane.shortName).tag(plane)
+            }
+        }
+        .labelsHidden()
+        .pickerStyle(.menu)
+        .controlSize(.mini)
+    }
+
+    private var compactPaneMenu: some View {
+        let pane = vm.hangingPanes.indices.contains(index)
+            ? vm.hangingPanes[index]
+            : HangingPaneConfiguration.defaultPane(at: index)
+        return Menu {
+            rolePicker
+            planePicker
+        } label: {
+            Text("\(pane.kind.shortName) \(pane.plane.shortName)")
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+        }
+        .menuStyle(.borderlessButton)
+        .controlSize(.mini)
+    }
+
+    private var mipColorPicker: some View {
+        Picker("", selection: Binding(
+            get: { vm.mipColormap },
+            set: { vm.setPETMIPColormap($0) }
+        )) {
+            ForEach(Colormap.allCases) { color in
+                Text(color.displayName).tag(color)
+            }
+        }
+        .labelsHidden()
+        .pickerStyle(.menu)
+        .frame(width: 92)
+        .controlSize(.mini)
+        .help("PET MIP colormap. This is independent from fused PET coloring.")
     }
 
     private var mipBadge: some View {

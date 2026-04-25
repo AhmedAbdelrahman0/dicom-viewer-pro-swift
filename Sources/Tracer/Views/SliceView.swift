@@ -268,33 +268,75 @@ public struct SliceView: View {
     }
 
     private func paneControls(index: Int) -> some View {
-        HStack(spacing: 3) {
-            Picker("", selection: Binding(
-                get: { vm.hangingPanes.indices.contains(index) ? vm.hangingPanes[index].kind : .fused },
+        Group {
+            if vm.hangingGrid.paneCount > 16 {
+                compactPaneMenu(index: index)
+            } else {
+                HStack(spacing: 3) {
+                    rolePicker(index: index)
+                        .frame(width: 88)
+                    planePicker(index: index)
+                        .frame(width: 58)
+                }
+            }
+        }
+    }
+
+    private func compactPaneMenu(index: Int) -> some View {
+        let pane = vm.hangingPanes.indices.contains(index)
+            ? vm.hangingPanes[index]
+            : HangingPaneConfiguration.defaultPane(at: index)
+        return Menu {
+            Picker("Role", selection: Binding(
+                get: { pane.kind },
                 set: { vm.setHangingPaneKind(index: index, kind: $0) }
             )) {
                 ForEach(HangingPaneKind.allCases) { kind in
                     Label(kind.displayName, systemImage: kind.systemImage).tag(kind)
                 }
             }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .frame(width: 88)
-            .controlSize(.mini)
-
-            Picker("", selection: Binding(
-                get: { vm.hangingPanes.indices.contains(index) ? vm.hangingPanes[index].plane : .axial },
+            Picker("Plane", selection: Binding(
+                get: { pane.plane },
                 set: { vm.setHangingPanePlane(index: index, plane: $0) }
             )) {
                 ForEach(SlicePlane.allCases) { plane in
                     Text(plane.shortName).tag(plane)
                 }
             }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .frame(width: 58)
-            .controlSize(.mini)
+        } label: {
+            Text("\(pane.kind.shortName) \(pane.plane.shortName)")
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
         }
+        .menuStyle(.borderlessButton)
+        .controlSize(.mini)
+    }
+
+    private func rolePicker(index: Int) -> some View {
+        Picker("", selection: Binding(
+            get: { vm.hangingPanes.indices.contains(index) ? vm.hangingPanes[index].kind : .fused },
+            set: { vm.setHangingPaneKind(index: index, kind: $0) }
+        )) {
+            ForEach(HangingPaneKind.allCases) { kind in
+                Label(kind.displayName, systemImage: kind.systemImage).tag(kind)
+            }
+        }
+        .labelsHidden()
+        .pickerStyle(.menu)
+        .controlSize(.mini)
+    }
+
+    private func planePicker(index: Int) -> some View {
+        Picker("", selection: Binding(
+            get: { vm.hangingPanes.indices.contains(index) ? vm.hangingPanes[index].plane : .axial },
+            set: { vm.setHangingPanePlane(index: index, plane: $0) }
+        )) {
+            ForEach(SlicePlane.allCases) { plane in
+                Text(plane.shortName).tag(plane)
+            }
+        }
+        .labelsHidden()
+        .pickerStyle(.menu)
+        .controlSize(.mini)
     }
 
     private func windowLevelInfo(for volume: ImageVolume) -> String {

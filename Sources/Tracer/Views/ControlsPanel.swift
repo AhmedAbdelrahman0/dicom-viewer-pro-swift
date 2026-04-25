@@ -547,6 +547,35 @@ private struct FusionTab: View {
                 .help("Restore PET/CT default: fused, CT, PET, and PET MIP panes.")
             }
 
+            HStack(spacing: 8) {
+                Stepper(value: Binding(
+                    get: { vm.hangingGrid.columns },
+                    set: { vm.setHangingGrid(columns: $0, rows: vm.hangingGrid.rows) }
+                ), in: 1...8) {
+                    Text("Cols \(vm.hangingGrid.columns)")
+                        .font(.system(size: 11, design: .monospaced))
+                }
+                Stepper(value: Binding(
+                    get: { vm.hangingGrid.rows },
+                    set: { vm.setHangingGrid(columns: vm.hangingGrid.columns, rows: $0) }
+                ), in: 1...8) {
+                    Text("Rows \(vm.hangingGrid.rows)")
+                        .font(.system(size: 11, design: .monospaced))
+                }
+            }
+            .controlSize(.small)
+
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 52), spacing: 6)], spacing: 6) {
+                ForEach(HangingGridLayout.presets, id: \.displayName) { layout in
+                    Button(layout.displayName) {
+                        vm.setHangingGrid(layout)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(layout == vm.hangingGrid ? TracerTheme.accent : .secondary)
+                    .controlSize(.mini)
+                }
+            }
+
             ForEach(Array(vm.hangingPanes.enumerated()), id: \.element.id) { index, pane in
                 HStack(spacing: 6) {
                     Text("\(index + 1)")

@@ -199,6 +199,7 @@ public final class ViewerViewModel: ObservableObject {
     @Published public var mipColormap: Colormap = .grayscale
     @Published public var overlayWindow: Double = 6
     @Published public var overlayLevel: Double = 3
+    @Published public var hangingGrid: HangingGridLayout = .defaultPETCT
     @Published public var suvSettings = SUVCalculationSettings()
     @Published public var hangingPanes: [HangingPaneConfiguration] = HangingPaneConfiguration.defaultPETCT
     @Published public var lastVolumeMeasurementReport: VolumeMeasurementReport?
@@ -243,6 +244,7 @@ public final class ViewerViewModel: ObservableObject {
         var mipColormap: Colormap
         var overlayWindow: Double
         var overlayLevel: Double
+        var hangingGrid: HangingGridLayout
         var hangingPanes: [HangingPaneConfiguration]
         var annotations: [Annotation]
         var labelVoxels: [UUID: [UInt16]]
@@ -471,12 +473,63 @@ public final class ViewerViewModel: ObservableObject {
         }
     }
 
-    public func resetPETHangingProtocol() {
-        let before = hangingPanes
-        hangingPanes = HangingPaneConfiguration.defaultPETCT
-        recordValueChange(name: "Reset hanging protocol", before: before, after: hangingPanes) { vm, value in
-            vm.hangingPanes = value
+    public func setHangingGrid(columns: Int, rows: Int) {
+        let beforeGrid = hangingGrid
+        let beforePanes = hangingPanes
+        let nextGrid = HangingGridLayout(columns: columns, rows: rows)
+        applyHangingProtocol(grid: nextGrid, panes: resizedHangingPanes(hangingPanes, count: nextGrid.paneCount))
+        let afterGrid = hangingGrid
+        let afterPanes = hangingPanes
+        recordHistoryIfNeeded(
+            name: "Hanging layout \(nextGrid.displayName)",
+            changed: beforeGrid != afterGrid || beforePanes != afterPanes
+        ) { [weak self] in
+            self?.applyHangingProtocol(grid: beforeGrid, panes: beforePanes)
+        } redo: { [weak self] in
+            self?.applyHangingProtocol(grid: afterGrid, panes: afterPanes)
         }
+    }
+
+    public func setHangingGrid(_ layout: HangingGridLayout) {
+        setHangingGrid(columns: layout.columns, rows: layout.rows)
+    }
+
+    public func resetPETHangingProtocol() {
+        let beforeGrid = hangingGrid
+        let beforePanes = hangingPanes
+        applyHangingProtocol(grid: .defaultPETCT, panes: HangingPaneConfiguration.defaultPETCT)
+        let afterGrid = hangingGrid
+        let afterPanes = hangingPanes
+        recordHistoryIfNeeded(
+            name: "Reset hanging protocol",
+            changed: beforeGrid != afterGrid || beforePanes != afterPanes
+        ) { [weak self] in
+            self?.applyHangingProtocol(grid: beforeGrid, panes: beforePanes)
+        } redo: { [weak self] in
+            self?.applyHangingProtocol(grid: afterGrid, panes: afterPanes)
+        }
+    }
+
+    private func applyHangingProtocol(grid: HangingGridLayout,
+                                      panes: [HangingPaneConfiguration]) {
+        hangingGrid = grid
+        hangingPanes = resizedHangingPanes(panes, count: grid.paneCount)
+    }
+
+    private func resizedHangingPanes(_ panes: [HangingPaneConfiguration],
+                                     count: Int) -> [HangingPaneConfiguration] {
+        let target = max(1, min(64, count))
+        if panes.count == target {
+            return panes
+        }
+        if panes.count > target {
+            return Array(panes.prefix(target))
+        }
+        var resized = panes
+        for index in panes.count..<target {
+            resized.append(HangingPaneConfiguration.defaultPane(at: index))
+        }
+        return resized
     }
 
     public func viewportTransform(for paneKey: Int) -> ViewportTransformState {
@@ -718,6 +771,7 @@ public final class ViewerViewModel: ObservableObject {
             mipColormap: mipColormap,
             overlayWindow: overlayWindow,
             overlayLevel: overlayLevel,
+            hangingGrid: hangingGrid,
             hangingPanes: hangingPanes,
             annotations: annotations,
             labelVoxels: labeling.labelMaps.reduce(into: [:]) { voxelsByMapID, map in
@@ -743,7 +797,7 @@ public final class ViewerViewModel: ObservableObject {
         fusion?.opacity = snapshot.overlayOpacity
         fusion?.colormap = snapshot.overlayColormap
         fusion?.objectWillChange.send()
-        hangingPanes = snapshot.hangingPanes
+        applyHangingProtocol(grid: snapshot.hangingGrid, panes: snapshot.hangingPanes)
         annotations = snapshot.annotations
         for map in labeling.labelMaps {
             if let voxels = snapshot.labelVoxels[map.id], voxels.count == map.voxels.count {
@@ -799,6 +853,15 @@ public final class ViewerViewModel: ObservableObject {
         let merge = mergeScannedSeries(series)
         statusMessage = "Found \(series.count) series | added \(merge.added.count), updated \(merge.updated), skipped \(merge.skipped) duplicates"
 
+        if let pair = bestPETCTSeriesPair(in: series) {
+            await openSeries(pair.ct)
+            await openSeries(pair.pet)
+            await autoFusePETCT()
+            applyHangingProtocol(grid: .defaultPETCT, panes: HangingPaneConfiguration.defaultPETCT)
+            statusMessage = "Opened PET/CT study: \(pair.ct.displayName) + \(pair.pet.displayName)"
+            return
+        }
+
         // Open the first new series automatically; if everything was already
         // known, select the existing match instead of loading a duplicate.
         if let first = merge.added.first ?? series.first.flatMap({ loadedSeriesMatch(for: $0) }) {
@@ -827,6 +890,12 @@ public final class ViewerViewModel: ObservableObject {
             statusMessage = result.inserted
                 ? "Loaded: \(volume.seriesDescription) | \(Modality.normalize(volume.modality).displayName) | \(volume.width)×\(volume.height)×\(volume.depth)"
                 : "Already loaded: \(series.displayName)"
+
+            if result.inserted, shouldAutoFusePETCT(afterLoading: result.volume) {
+                await autoFusePETCT()
+                applyHangingProtocol(grid: .defaultPETCT, panes: HangingPaneConfiguration.defaultPETCT)
+                statusMessage = "Loaded and fused PET/CT: \(result.volume.seriesDescription.isEmpty ? series.displayName : result.volume.seriesDescription)"
+            }
         } catch {
             statusMessage = "Error: \(error.localizedDescription)"
         }
@@ -1174,6 +1243,41 @@ public final class ViewerViewModel: ObservableObject {
 
     private func loadedSeriesMatch(for series: DICOMSeries) -> DICOMSeries? {
         loadedSeries.first { $0.uid == series.uid }
+    }
+
+    private func bestPETCTSeriesPair(in series: [DICOMSeries]) -> (ct: DICOMSeries, pet: DICOMSeries)? {
+        let ctSeries = series
+            .filter { Modality.normalize($0.modality) == .CT }
+            .sorted { $0.instanceCount > $1.instanceCount }
+        let petSeries = series
+            .filter { Modality.normalize($0.modality) == .PT }
+            .sorted { $0.instanceCount > $1.instanceCount }
+        guard !ctSeries.isEmpty, !petSeries.isEmpty else { return nil }
+
+        var best: (ct: DICOMSeries, pet: DICOMSeries, score: Int)?
+        for ct in ctSeries {
+            for pet in petSeries {
+                var score = min(ct.instanceCount, pet.instanceCount)
+                if !ct.studyUID.isEmpty, ct.studyUID == pet.studyUID { score += 10_000 }
+                if !ct.patientID.isEmpty, ct.patientID == pet.patientID { score += 1_000 }
+                if !ct.patientName.isEmpty, ct.patientName == pet.patientName { score += 250 }
+                if !ct.accessionNumber.isEmpty, ct.accessionNumber == pet.accessionNumber { score += 250 }
+                if best == nil || score > best!.score {
+                    best = (ct, pet, score)
+                }
+            }
+        }
+        return best.map { ($0.ct, $0.pet) }
+    }
+
+    private func shouldAutoFusePETCT(afterLoading volume: ImageVolume) -> Bool {
+        let modality = Modality.normalize(volume.modality)
+        guard modality == .CT || modality == .PT else { return false }
+        guard !loadedCTVolumes.isEmpty, !loadedPETVolumes.isEmpty else { return false }
+        if let fusion {
+            return fusion.baseVolume.id != volume.id && fusion.overlayVolume.id != volume.id
+        }
+        return true
     }
 
     private func uniqueIndexSnapshots(_ records: [PACSIndexedSeriesSnapshot]) -> [PACSIndexedSeriesSnapshot] {
