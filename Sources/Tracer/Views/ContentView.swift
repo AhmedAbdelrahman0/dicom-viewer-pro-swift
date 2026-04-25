@@ -71,6 +71,7 @@ public struct ContentView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .tint(TracerTheme.accent)
         .environmentObject(vm)
         .environmentObject(monai)
         .environmentObject(nnunet)
@@ -213,6 +214,7 @@ public struct ContentView: View {
             }
         }
         .tooltipHost()  // must wrap the whole window so tooltips escape any clipping
+        .background(TracerTheme.windowBackground)
     }
 
     @ViewBuilder
@@ -264,7 +266,7 @@ public struct ContentView: View {
                 .layoutPriority(1)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.black)
+        .background(TracerTheme.viewportBackground)
     }
 
     // MARK: - Custom toolbar (in-content so hover + tooltips work reliably)
@@ -294,8 +296,8 @@ public struct ContentView: View {
             .lineLimit(1)
             .padding(.trailing, 8)
         }
-        .background(Color(.displayP3, white: 0.115))
-        .overlay(Divider(), alignment: .bottom)
+        .background(TracerTheme.toolbarBackground)
+        .overlay(Rectangle().fill(TracerTheme.hairline).frame(height: 1), alignment: .bottom)
     }
 
     @ViewBuilder
@@ -444,21 +446,42 @@ public struct ContentView: View {
 
     private var toolbarBrand: some View {
         ViewThatFits(in: .horizontal) {
-            VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 8) {
+                tracerMark
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Tracer")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.primary)
+                    Text("oncology AI workstation")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundColor(TracerTheme.mutedText)
+                }
+            }
+            .frame(width: 164, alignment: .leading)
+
+            HStack(spacing: 6) {
+                tracerMark
                 Text("Tracer")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundColor(.primary)
-                Text("diagnostic workstation")
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundColor(.secondary)
             }
-            .frame(width: 132, alignment: .leading)
-
-            Text("Tracer")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(.primary)
-                .frame(width: 54, alignment: .leading)
+            .frame(width: 84, alignment: .leading)
         }
+    }
+
+    private var tracerMark: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(TracerTheme.activeGradient)
+            Image(systemName: "waveform.path.ecg")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.black.opacity(0.72))
+        }
+        .frame(width: 24, height: 22)
+        .overlay(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .stroke(Color.white.opacity(0.20), lineWidth: 1)
+        )
     }
 
     private var workstationHeader: some View {
@@ -488,17 +511,21 @@ public struct ContentView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
-        .background(Color(.displayP3, white: 0.075))
-        .overlay(Divider(), alignment: .bottom)
+        .background(TracerTheme.headerBackground)
+        .overlay(Rectangle().fill(TracerTheme.hairline).frame(height: 1), alignment: .bottom)
     }
 
     private var workstationStateBadges: some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 8) {
-                Label("Mini-PACS", systemImage: "server.rack")
-                Label(vm.fusion == nil ? "Fusion idle" : "Fusion active", systemImage: "square.2.stack.3d")
-                Label(vm.labeling.activeLabelMap == nil ? "Labels idle" : "Labels active", systemImage: "list.bullet.rectangle")
-                Label("AI control", systemImage: "sparkles")
+                WorkstationBadge("Mini-PACS", systemImage: "server.rack", color: TracerTheme.accent)
+                WorkstationBadge(vm.fusion == nil ? "Fusion idle" : "Fusion active",
+                                 systemImage: "square.2.stack.3d",
+                                 color: vm.fusion == nil ? .secondary : TracerTheme.pet)
+                WorkstationBadge(vm.labeling.activeLabelMap == nil ? "Labels idle" : "Labels active",
+                                 systemImage: "list.bullet.rectangle",
+                                 color: vm.labeling.activeLabelMap == nil ? .secondary : TracerTheme.label)
+                WorkstationBadge("AI control", systemImage: "sparkles", color: TracerTheme.accentBright)
             }
 
             HStack(spacing: 7) {
@@ -511,7 +538,6 @@ public struct ContentView: View {
             EmptyView()
         }
         .font(.system(size: 10, weight: .medium))
-        .foregroundColor(.secondary)
         .lineLimit(1)
         .fixedSize(horizontal: true, vertical: false)
     }
@@ -529,8 +555,8 @@ public struct ContentView: View {
                 .padding(.vertical, 4)
             Spacer()
         }
-        .background(.regularMaterial)
-        .overlay(Divider(), alignment: .top)
+        .background(TracerTheme.panelBackground)
+        .overlay(Rectangle().fill(TracerTheme.hairline).frame(height: 1), alignment: .top)
     }
 
     private var loadingIndicator: some View {
@@ -545,8 +571,8 @@ public struct ContentView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 5)
-        .background(.regularMaterial)
-        .overlay(Divider(), alignment: .top)
+        .background(TracerTheme.panelBackground)
+        .overlay(Rectangle().fill(TracerTheme.hairline).frame(height: 1), alignment: .top)
     }
 
     // MARK: - File handlers
@@ -753,6 +779,33 @@ private struct StudyMetric: View {
     }
 }
 
+private struct WorkstationBadge: View {
+    let title: String
+    let systemImage: String
+    let color: Color
+
+    init(_ title: String, systemImage: String, color: Color) {
+        self.title = title
+        self.systemImage = systemImage
+        self.color = color
+    }
+
+    var body: some View {
+        Label(title, systemImage: systemImage)
+            .foregroundStyle(color, TracerTheme.mutedText)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(color.opacity(0.10))
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(color.opacity(0.22), lineWidth: 1)
+            )
+    }
+}
+
 // MARK: - Toolbar button with hover tooltip + keyboard shortcut
 
 private struct ToolButton: View {
@@ -767,12 +820,17 @@ private struct ToolButton: View {
             Label(tool.displayName, systemImage: tool.systemImage)
                 .labelStyle(.iconOnly)
                 .font(.system(size: 14))
-                .foregroundColor(isActive ? .white : (isHovering ? .primary : .secondary))
+                .foregroundColor(isActive ? .black.opacity(0.82) : (isHovering ? .primary : .secondary))
                 .frame(width: 28, height: 24)
                 .background(
                     RoundedRectangle(cornerRadius: 5)
-                        .fill(isActive ? Color.accentColor :
-                              (isHovering ? Color.secondary.opacity(0.15) : Color.clear))
+                        .fill(isActive ? AnyShapeStyle(TracerTheme.activeGradient) :
+                              AnyShapeStyle(isHovering ? TracerTheme.accent.opacity(0.16) : Color.clear))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5)
+                        .stroke(isActive ? TracerTheme.accentBright.opacity(0.65) : Color.clear,
+                                lineWidth: 1)
                 )
         }
         .buttonStyle(.plain)
@@ -819,12 +877,12 @@ public struct HoverIconButton: View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .font(.system(size: 11))
-                .foregroundColor(isActive ? .white : (isHovering ? .primary : .secondary))
+                .foregroundColor(isActive ? .black.opacity(0.82) : (isHovering ? .primary : .secondary))
                 .frame(width: 20, height: 20)
                 .background(
                     RoundedRectangle(cornerRadius: 3)
-                        .fill(isActive ? Color.accentColor :
-                              (isHovering ? Color.secondary.opacity(0.25) : Color.clear))
+                        .fill(isActive ? AnyShapeStyle(TracerTheme.activeGradient) :
+                              AnyShapeStyle(isHovering ? TracerTheme.accent.opacity(0.18) : Color.clear))
                 )
         }
         .buttonStyle(.plain)
@@ -866,7 +924,7 @@ struct MPRLayoutView: View {
                     }
                 }
             }
-            .background(Color.black)
+            .background(TracerTheme.viewportBackground)
         }
     }
 }
@@ -874,9 +932,18 @@ struct MPRLayoutView: View {
 private struct EmptyWorkstationView: View {
     var body: some View {
         VStack(spacing: 18) {
-            Image(systemName: "rectangle.grid.2x2")
-                .font(.system(size: 44, weight: .light))
-                .foregroundColor(.secondary)
+            ZStack {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(TracerTheme.panelRaised.opacity(0.85))
+                    .frame(width: 76, height: 76)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(TracerTheme.hairline, lineWidth: 1)
+                    )
+                Image(systemName: "rectangle.grid.2x2")
+                    .font(.system(size: 34, weight: .light))
+                    .foregroundStyle(TracerTheme.accentBright, TracerTheme.mutedText)
+            }
 
             VStack(spacing: 4) {
                 Text("No study loaded")
@@ -894,7 +961,18 @@ private struct EmptyWorkstationView: View {
             .controlSize(.regular)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.black)
+        .background(
+            ZStack {
+                TracerTheme.viewportBackground
+                LinearGradient(colors: [
+                    TracerTheme.accent.opacity(0.12),
+                    Color.clear,
+                    TracerTheme.pet.opacity(0.06)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing)
+            }
+        )
     }
 
     @ViewBuilder

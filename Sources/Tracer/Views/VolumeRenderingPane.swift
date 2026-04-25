@@ -21,7 +21,7 @@ struct VolumeRenderingPane: View {
             header
 
             ZStack {
-                Color.black
+                TracerTheme.viewportBackground
 
                 if let volume = renderedVolume {
                     #if canImport(MetalKit)
@@ -62,14 +62,15 @@ struct VolumeRenderingPane: View {
                 }
             }
         }
-        .background(Color(.displayP3, white: 0.08))
+        .background(TracerTheme.panelBackground)
+        .overlay(Rectangle().stroke(TracerTheme.hairline, lineWidth: 1))
     }
 
     private var header: some View {
         HStack(spacing: 8) {
             Text(renderTitle)
                 .font(.system(size: 11, weight: .bold))
-                .foregroundColor(.blue)
+                .foregroundColor(vm.fusion?.isPETCT == true ? TracerTheme.pet : TracerTheme.accentBright)
             if let v = renderedVolume {
                 Text("\(v.width)x\(v.height)x\(v.depth)")
                     .font(.system(size: 10, design: .monospaced))
@@ -87,7 +88,7 @@ struct VolumeRenderingPane: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .background(Color(.displayP3, white: 0.1))
+        .background(TracerTheme.headerBackground)
     }
 
     private var renderedVolume: ImageVolume? {

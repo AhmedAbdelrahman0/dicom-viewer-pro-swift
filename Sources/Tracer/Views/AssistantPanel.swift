@@ -18,15 +18,17 @@ struct AssistantPanel: View {
     var body: some View {
         VStack(spacing: 0) {
             providerStrip
-            Divider()
+            Rectangle().fill(TracerTheme.hairline).frame(height: 1)
             quickCommands
-            Divider()
+            Rectangle().fill(TracerTheme.hairline).frame(height: 1)
             transcript
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            Divider()
+            Rectangle().fill(TracerTheme.hairline).frame(height: 1)
             composer
-                .background(Color(.displayP3, white: 0.09))
+                .background(TracerTheme.panelRaised)
         }
+        .background(TracerTheme.panelBackground)
+        .tint(TracerTheme.accent)
     }
 
     private var providerStrip: some View {
@@ -34,6 +36,7 @@ struct AssistantPanel: View {
             HStack {
                 Label("Assistant", systemImage: "sparkles")
                     .font(.headline)
+                    .foregroundStyle(TracerTheme.accentBright, .primary)
                 Spacer()
                 if isRunning {
                     ProgressView()
@@ -49,10 +52,11 @@ struct AssistantPanel: View {
 
             Text(runner.availabilityText(for: provider))
                 .font(.system(size: 10, design: .monospaced))
-                .foregroundColor(runner.isAvailable(provider) ? .secondary : .orange)
+                .foregroundColor(runner.isAvailable(provider) ? TracerTheme.mutedText : TracerTheme.warning)
                 .lineLimit(1)
         }
         .padding(12)
+        .background(TracerTheme.headerBackground)
     }
 
     private var transcript: some View {
@@ -80,7 +84,7 @@ struct AssistantPanel: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Command Deck")
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(.secondary)
+                .foregroundColor(TracerTheme.mutedText)
 
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 6) {
                 QuickCommandButton(title: "Lung", icon: "lungs") {
@@ -95,19 +99,19 @@ struct AssistantPanel: View {
                 QuickCommandButton(title: "Center", icon: "scope") {
                     submit("Center slices")
                 }
-                QuickCommandButton(title: "Anatomy", icon: "list.bullet.rectangle") {
+                QuickCommandButton(title: "Anatomy", icon: "list.bullet.rectangle", color: TracerTheme.label) {
                     submit("Create label map and load TotalSegmentator full anatomy preset")
                 }
-                QuickCommandButton(title: "SUV 2.5", icon: "flame") {
+                QuickCommandButton(title: "SUV 2.5", icon: "flame", color: TracerTheme.pet) {
                     submit("Threshold SUV 2.5")
                 }
-                QuickCommandButton(title: "PET Lesion", icon: "flame.fill") {
+                QuickCommandButton(title: "PET Lesion", icon: "flame.fill", color: TracerTheme.pet) {
                     submit("Segment FDG avid disease on PET/CT with the best lesion model")
                 }
-                QuickCommandButton(title: "RT GTV", icon: "scope") {
+                QuickCommandButton(title: "RT GTV", icon: "scope", color: TracerTheme.label) {
                     submit("Contour gross tumor volume for radiotherapy")
                 }
-                QuickCommandButton(title: "Liver", icon: "target") {
+                QuickCommandButton(title: "Liver", icon: "target", color: TracerTheme.label) {
                     submit("Select and view liver")
                 }
                 QuickCommandButton(title: "Measure", icon: "ruler") {
@@ -116,6 +120,7 @@ struct AssistantPanel: View {
             }
         }
         .padding(12)
+        .background(TracerTheme.panelBackground)
     }
 
     private var composer: some View {
@@ -345,7 +350,7 @@ private struct MessageRow: View {
 
             Text(message.text)
                 .font(.system(size: 12))
-                .foregroundColor(message.role == .user ? .white : .primary)
+                .foregroundColor(message.role == .user ? .black.opacity(0.86) : .primary)
                 .textSelection(.enabled)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
@@ -360,23 +365,37 @@ private struct MessageRow: View {
     }
 
     private var background: some ShapeStyle {
-        message.role == .user ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(Color.secondary.opacity(0.12))
+        message.role == .user
+            ? AnyShapeStyle(TracerTheme.activeGradient)
+            : AnyShapeStyle(TracerTheme.panelRaised)
     }
 }
 
 private struct QuickCommandButton: View {
     let title: String
     let icon: String
+    var color: Color = TracerTheme.accent
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             Label(title, systemImage: icon)
                 .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(color, .primary)
                 .lineLimit(1)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 7)
                 .frame(maxWidth: .infinity)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(color.opacity(0.075))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(color.opacity(0.16), lineWidth: 1)
+                )
         }
-        .buttonStyle(.bordered)
+        .buttonStyle(.plain)
         .controlSize(.small)
     }
 }

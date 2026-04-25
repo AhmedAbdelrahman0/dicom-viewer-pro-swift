@@ -36,7 +36,7 @@ public struct SliceView: View {
             header
             GeometryReader { geo in
                 ZStack {
-                    Color.black
+                    TracerTheme.viewportBackground
 
                     if let cg = vm.makeImage(for: axis) {
                         let imgW = CGFloat(cg.width)
@@ -115,13 +115,13 @@ public struct SliceView: View {
                 .onAppear { NSCursor.setHiddenUntilMouseMoves(false) }
                 #endif
             }
-            .background(Color.black)
+            .background(TracerTheme.viewportBackground)
             .overlay(
                 Rectangle()
-                    .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                    .stroke(TracerTheme.hairline, lineWidth: 1)
             )
         }
-        .background(Color(.displayP3, white: 0.08))
+        .background(TracerTheme.panelBackground)
     }
 
     // MARK: - Header
@@ -130,7 +130,7 @@ public struct SliceView: View {
         HStack(spacing: 4) {
             Text(title)
                 .font(.system(size: 11, weight: .bold))
-                .foregroundColor(.blue)
+                .foregroundColor(TracerTheme.accentBright)
                 .help("\(title) view\nScroll wheel or slider to navigate slices")
 
             Spacer()
@@ -156,7 +156,7 @@ public struct SliceView: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .background(Color(.displayP3, white: 0.1))
+        .background(TracerTheme.headerBackground)
     }
 
     private var sliceScrubber: some View {

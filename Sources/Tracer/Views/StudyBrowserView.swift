@@ -50,11 +50,11 @@ struct StudyBrowserView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider()
+            Rectangle().fill(TracerTheme.hairline).frame(height: 1)
 
             if !vm.recentVolumes.isEmpty {
                 recentVolumesStrip
-                Divider()
+                Rectangle().fill(TracerTheme.hairline).frame(height: 1)
             }
 
             Group {
@@ -68,6 +68,8 @@ struct StudyBrowserView: View {
             .searchable(text: $searchText, prompt: browserMode == .worklist ? "Search worklist..." : "Search viewer session...")
         }
         .navigationTitle(browserMode.displayName)
+        .tint(TracerTheme.accent)
+        .background(TracerTheme.worklistGradient)
         .task {
             loadStatusOverrides()
             reloadIndexResults()
@@ -94,8 +96,8 @@ struct StudyBrowserView: View {
 
     private var dropHighlightOverlay: some View {
         RoundedRectangle(cornerRadius: 12)
-            .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 2, dash: [6]))
-            .background(Color.accentColor.opacity(0.08))
+            .strokeBorder(TracerTheme.accentBright, style: StrokeStyle(lineWidth: 2, dash: [6]))
+            .background(TracerTheme.accent.opacity(0.08))
             .padding(6)
             .overlay(
                 VStack(spacing: 4) {
@@ -104,7 +106,7 @@ struct StudyBrowserView: View {
                     Text("Drop DICOM folder or NIfTI file")
                         .font(.system(size: 11, weight: .medium))
                 }
-                .foregroundColor(.accentColor)
+                .foregroundColor(TracerTheme.accentBright)
             )
             .allowsHitTesting(false)
             .transition(.opacity)
@@ -234,11 +236,11 @@ struct StudyBrowserView: View {
         .padding(.vertical, 5)
         .background(
             RoundedRectangle(cornerRadius: 6)
-                .fill(Color.secondary.opacity(0.12))
+                .fill(TracerTheme.panelRaised)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 6)
-                .stroke(Color.secondary.opacity(0.25), lineWidth: 0.5)
+                .stroke(TracerTheme.hairline, lineWidth: 1)
         )
         .contentShape(Rectangle())
         .onTapGesture {
@@ -256,10 +258,10 @@ struct StudyBrowserView: View {
 
     private func colorForRecent(_ recent: RecentVolume) -> Color {
         switch Modality.normalize(recent.modality) {
-        case .CT:  return .blue
-        case .MR:  return .purple
-        case .PT:  return .orange
-        case .SEG: return .green
+        case .CT:  return TracerTheme.accent
+        case .MR:  return Color(red: 0.56, green: 0.58, blue: 0.82)
+        case .PT:  return TracerTheme.pet
+        case .SEG: return TracerTheme.label
         default:   return .secondary
         }
     }
@@ -329,6 +331,7 @@ struct StudyBrowserView: View {
             }
         }
         .padding(8)
+        .background(TracerTheme.worklistGradient)
     }
 
     private var headerCountText: String {
@@ -505,6 +508,8 @@ struct StudyBrowserView: View {
                 )
             }
         }
+        .scrollContentBackground(.hidden)
+        .background(TracerTheme.sidebarBackground)
     }
 
     private var viewerContent: some View {
@@ -543,6 +548,8 @@ struct StudyBrowserView: View {
                 )
             }
         }
+        .scrollContentBackground(.hidden)
+        .background(TracerTheme.sidebarBackground)
     }
 
     private var worklistStudies: [PACSWorklistStudy] {
@@ -785,9 +792,9 @@ private struct WorklistStatusBadge: View {
 
     private var color: Color {
         switch status {
-        case .unread: return .blue
-        case .inProgress: return .orange
-        case .complete: return .green
+        case .unread: return TracerTheme.accent
+        case .inProgress: return TracerTheme.warning
+        case .complete: return TracerTheme.label
         case .flagged: return .red
         }
     }
@@ -834,10 +841,10 @@ private struct WorklistSeriesRow: View {
 
     private var badgeColor: Color {
         switch Modality.normalize(entry.modality) {
-        case .CT: return .blue
-        case .MR: return .purple
-        case .PT: return .orange
-        case .SEG: return .green
+        case .CT: return TracerTheme.accent
+        case .MR: return Color(red: 0.56, green: 0.58, blue: 0.82)
+        case .PT: return TracerTheme.pet
+        case .SEG: return TracerTheme.label
         default: return .gray
         }
     }
@@ -910,10 +917,10 @@ private struct SeriesRow: View {
 
     private var badgeColor: Color {
         switch Modality.normalize(series.modality) {
-        case .CT: return .blue
-        case .MR: return .purple
-        case .PT: return .orange
-        case .SEG: return .green
+        case .CT: return TracerTheme.accent
+        case .MR: return Color(red: 0.56, green: 0.58, blue: 0.82)
+        case .PT: return TracerTheme.pet
+        case .SEG: return TracerTheme.label
         default: return .gray
         }
     }
@@ -950,10 +957,10 @@ private struct VolumeRow: View {
 
     private var badgeColor: Color {
         switch Modality.normalize(volume.modality) {
-        case .CT: return .blue
-        case .MR: return .purple
-        case .PT: return .orange
-        case .SEG: return .green
+        case .CT: return TracerTheme.accent
+        case .MR: return Color(red: 0.56, green: 0.58, blue: 0.82)
+        case .PT: return TracerTheme.pet
+        case .SEG: return TracerTheme.label
         default: return .gray
         }
     }

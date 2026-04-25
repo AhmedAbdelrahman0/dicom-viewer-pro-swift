@@ -26,6 +26,7 @@ struct ResponsivePicker<Selection: Hashable, Content: View>: View {
                     content()
                 }
                 .pickerStyle(.menu)
+                .tint(TracerTheme.accent)
                 .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 Picker(title, selection: $selection) {
@@ -33,6 +34,7 @@ struct ResponsivePicker<Selection: Hashable, Content: View>: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
+                .tint(TracerTheme.accent)
             }
         }
         .frame(height: height)

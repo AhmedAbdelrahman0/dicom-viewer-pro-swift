@@ -61,7 +61,7 @@ struct ControlsPanel: View {
                 .padding(.bottom, 4)
             }
 
-            Divider()
+            Rectangle().fill(TracerTheme.hairline).frame(height: 1)
 
             // The Assistant tab manages its own layout (fixed composer at the
             // bottom, scrollable transcript in the middle). Wrapping it in an
@@ -91,6 +91,8 @@ struct ControlsPanel: View {
             }
         }
         .navigationTitle("Controls")
+        .tint(TracerTheme.accent)
+        .background(TracerTheme.panelBackground)
         .environmentObject(vm)
         .onReceive(NotificationCenter.default.publisher(for: .focusAssistantTab)) { _ in
             group = .assistant
