@@ -71,9 +71,6 @@ public struct ContentView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        #if os(macOS)
-        .background(WorkstationWindowConfigurator())
-        #endif
         .environmentObject(vm)
         .environmentObject(monai)
         .environmentObject(nnunet)
@@ -901,78 +898,6 @@ private struct EmptyWorkstationView: View {
         .background(Color.black)
     }
 }
-
-#if os(macOS)
-private struct WorkstationWindowConfigurator: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView {
-        WorkstationWindowProbe(frame: .zero)
-    }
-
-    func updateNSView(_ view: NSView, context: Context) {
-        DispatchQueue.main.async {
-            WorkstationWindowCoordinator.configure(view.window)
-        }
-    }
-}
-
-private final class WorkstationWindowProbe: NSView {
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        DispatchQueue.main.async { [weak self] in
-            WorkstationWindowCoordinator.configure(self?.window)
-        }
-    }
-}
-
-@MainActor
-private enum WorkstationWindowCoordinator {
-    private static var configuredWindowNumbers = Set<Int>()
-
-    static func configure(_ window: NSWindow?) {
-        guard let window else { return }
-
-        window.title = "Tracer"
-        window.minSize = NSSize(width: 1180, height: 760)
-        window.styleMask = [.borderless, .resizable]
-        window.titleVisibility = .hidden
-        window.titlebarAppearsTransparent = true
-        window.hasShadow = false
-        window.backgroundColor = .black
-        window.collectionBehavior = [.managed]
-        enableWorkstationPresentationMode()
-
-        if !configuredWindowNumbers.contains(window.windowNumber) {
-            configuredWindowNumbers.insert(window.windowNumber)
-            fillScreen(with: window)
-        }
-
-        requestScreenFillFallback(for: window, after: 0.3)
-        requestScreenFillFallback(for: window, after: 1.0)
-        requestScreenFillFallback(for: window, after: 2.5)
-    }
-
-    private static func requestScreenFillFallback(for window: NSWindow, after delay: TimeInterval) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-            guard window.isVisible else { return }
-            NSApp.activate(ignoringOtherApps: true)
-            window.makeKeyAndOrderFront(nil)
-            fillScreen(with: window)
-        }
-    }
-
-    private static func fillScreen(with window: NSWindow) {
-        guard let screen = window.screen ?? NSScreen.main else { return }
-        window.setFrame(screen.frame, display: true, animate: false)
-    }
-
-    private static func enableWorkstationPresentationMode() {
-        var options = NSApp.presentationOptions
-        options.insert(.autoHideDock)
-        options.insert(.autoHideMenuBar)
-        NSApp.presentationOptions = options
-    }
-}
-#endif
 
 // MARK: - Compact-aware engine presentation
 
