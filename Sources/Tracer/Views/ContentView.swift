@@ -59,14 +59,18 @@ public struct ContentView: View {
     public init() {}
 
     public var body: some View {
-        rootLayout
-        .overlay(alignment: .bottom) {
+        VStack(spacing: 0) {
+            rootLayout
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
             if vm.isLoading {
                 loadingIndicator
+                    .transition(.opacity)
             } else {
                 statusBar
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .environmentObject(vm)
         .environmentObject(monai)
         .environmentObject(nnunet)
@@ -198,11 +202,9 @@ public struct ContentView: View {
         }
         #endif
         .onAppear {
-            // Honour the persisted focus preference on launch so users who
-            // quit while in Focus Mode come back into Focus Mode. Using
-            // `.detailOnly` keeps the viewport dominant; exiting Focus Mode
-            // later re-expands via the `.onChange` handler above.
-            browserVisibility = focusModeEnabled ? .detailOnly : .all
+            // Focus mode renders a different root layout, so keep the split
+            // view in a predictable state for the next time panels are shown.
+            browserVisibility = .all
             // Show the onboarding card set once per install, before the
             // user loads any data.
             if !hasSeenOnboarding {
@@ -241,14 +243,14 @@ public struct ContentView: View {
                                  fileImporterMode = .overlay
                                  showingFileImporter = true
                              })
-                .navigationSplitViewColumnWidth(min: 300, ideal: 380, max: 520)
+                .navigationSplitViewColumnWidth(min: 280, ideal: 340, max: 420)
         } content: {
             workstationScaffold
-                .navigationSplitViewColumnWidth(min: 400, ideal: 900)
+                .navigationSplitViewColumnWidth(min: 560, ideal: 1100)
         } detail: {
             ControlsPanel()
                 .environmentObject(vm)
-                .navigationSplitViewColumnWidth(min: 260, ideal: 320, max: 400)
+                .navigationSplitViewColumnWidth(min: 260, ideal: 320, max: 360)
         }
     }
 
@@ -258,23 +260,18 @@ public struct ContentView: View {
             workstationHeader
             MPRLayoutView()
                 .environmentObject(vm)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .layoutPriority(1)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black)
     }
 
     // MARK: - Custom toolbar (in-content so hover + tooltips work reliably)
 
     private var customToolbar: some View {
         HStack(spacing: 6) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Tracer")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(.primary)
-                Text("diagnostic workstation")
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundColor(.secondary)
-            }
-            .frame(width: 132, alignment: .leading)
+            toolbarBrand
 
             Divider()
                 .frame(height: 20)
@@ -417,13 +414,17 @@ public struct ContentView: View {
 
             Spacer()
 
-            HStack(spacing: 10) {
-                Label("MPR + VR", systemImage: "rectangle.grid.2x2")
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) {
+                    Label("MPR + VR", systemImage: "rectangle.grid.2x2")
+                    Label(vm.activeTool.displayName, systemImage: vm.activeTool.systemImage)
+                }
                 Label(vm.activeTool.displayName, systemImage: vm.activeTool.systemImage)
+                EmptyView()
             }
-                .font(.system(size: 11, weight: .medium))
-                .foregroundColor(.secondary)
-                .padding(.horizontal, 8)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundColor(.secondary)
+            .padding(.horizontal, 8)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
@@ -431,37 +432,78 @@ public struct ContentView: View {
         .overlay(Divider(), alignment: .bottom)
     }
 
-    private var workstationHeader: some View {
-        HStack(spacing: 10) {
-            if let volume = vm.currentVolume {
-                StudyMetric(label: "Patient", value: volume.patientName.isEmpty ? "Unknown" : volume.patientName)
-                StudyMetric(label: "Study", value: volume.studyDescription.isEmpty ? "Untitled" : volume.studyDescription)
-                StudyMetric(label: "Series", value: volume.seriesDescription.isEmpty ? "Untitled" : volume.seriesDescription)
-                StudyMetric(label: "Modality", value: Modality.normalize(volume.modality).displayName)
-                StudyMetric(label: "W/L", value: "\(Int(vm.window)) / \(Int(vm.level))")
-                StudyMetric(label: "Slices", value: "\(vm.sliceIndices[0]) · \(vm.sliceIndices[1]) · \(vm.sliceIndices[2])")
-            } else {
-                Label("No study loaded", systemImage: "tray")
-                    .font(.system(size: 12, weight: .medium))
+    private var toolbarBrand: some View {
+        ViewThatFits(in: .horizontal) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Tracer")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.primary)
+                Text("diagnostic workstation")
+                    .font(.system(size: 9, weight: .medium))
                     .foregroundColor(.secondary)
             }
+            .frame(width: 132, alignment: .leading)
+
+            Text("Tracer")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(.primary)
+                .frame(width: 54, alignment: .leading)
+        }
+    }
+
+    private var workstationHeader: some View {
+        HStack(spacing: 10) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    if let volume = vm.currentVolume {
+                        StudyMetric(label: "Patient", value: volume.patientName.isEmpty ? "Unknown" : volume.patientName)
+                        StudyMetric(label: "Study", value: volume.studyDescription.isEmpty ? "Untitled" : volume.studyDescription)
+                        StudyMetric(label: "Series", value: volume.seriesDescription.isEmpty ? "Untitled" : volume.seriesDescription)
+                        StudyMetric(label: "Modality", value: Modality.normalize(volume.modality).displayName)
+                        StudyMetric(label: "W/L", value: "\(Int(vm.window)) / \(Int(vm.level))")
+                        StudyMetric(label: "Slices", value: "\(vm.sliceIndices[0]) · \(vm.sliceIndices[1]) · \(vm.sliceIndices[2])")
+                    } else {
+                        Label("No study loaded", systemImage: "tray")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(.secondary)
+                            .padding(.vertical, 5)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             Spacer(minLength: 12)
 
+            workstationStateBadges
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Color(.displayP3, white: 0.075))
+        .overlay(Divider(), alignment: .bottom)
+    }
+
+    private var workstationStateBadges: some View {
+        ViewThatFits(in: .horizontal) {
             HStack(spacing: 8) {
                 Label("Mini-PACS", systemImage: "server.rack")
                 Label(vm.fusion == nil ? "Fusion idle" : "Fusion active", systemImage: "square.2.stack.3d")
                 Label(vm.labeling.activeLabelMap == nil ? "Labels idle" : "Labels active", systemImage: "list.bullet.rectangle")
                 Label("AI control", systemImage: "sparkles")
             }
-            .font(.system(size: 10, weight: .medium))
-            .foregroundColor(.secondary)
-            .lineLimit(1)
+
+            HStack(spacing: 7) {
+                Image(systemName: "server.rack")
+                Image(systemName: vm.fusion == nil ? "square.2.stack.3d" : "square.2.stack.3d.top.filled")
+                Image(systemName: vm.labeling.activeLabelMap == nil ? "list.bullet.rectangle" : "list.bullet.rectangle.fill")
+                Image(systemName: "sparkles")
+            }
+
+            EmptyView()
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .background(Color(.displayP3, white: 0.075))
-        .overlay(Divider(), alignment: .bottom)
+        .font(.system(size: 10, weight: .medium))
+        .foregroundColor(.secondary)
+        .lineLimit(1)
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     // MARK: - Status bar
@@ -471,11 +513,14 @@ public struct ContentView: View {
             Text(vm.statusMessage)
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundColor(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 4)
             Spacer()
         }
         .background(.regularMaterial)
+        .overlay(Divider(), alignment: .top)
     }
 
     private var loadingIndicator: some View {
@@ -485,12 +530,13 @@ public struct ContentView: View {
             Text(vm.statusMessage)
                 .font(.system(size: 11))
                 .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer()
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 5)
         .background(.regularMaterial)
-        .cornerRadius(6)
-        .padding(.bottom, 16)
+        .overlay(Divider(), alignment: .top)
     }
 
     // MARK: - File handlers
@@ -788,24 +834,67 @@ struct MPRLayoutView: View {
     @EnvironmentObject var vm: ViewerViewModel
 
     var body: some View {
-        GeometryReader { geo in
-            let w = geo.size.width / 2
-            let h = geo.size.height / 2
-            VStack(spacing: 2) {
-                HStack(spacing: 2) {
-                    SliceView(axis: 2, title: "Axial")
-                        .frame(width: w, height: h)
-                    SliceView(axis: 0, title: "Sagittal")
-                        .frame(width: w, height: h)
-                }
-                HStack(spacing: 2) {
-                    SliceView(axis: 1, title: "Coronal")
-                        .frame(width: w, height: h)
-                    VolumeRenderingPane()
-                        .frame(width: w, height: h)
+        if vm.currentVolume == nil {
+            EmptyWorkstationView()
+        } else {
+            GeometryReader { geo in
+                let gap: CGFloat = 2
+                let w = max(0, (geo.size.width - gap) / 2)
+                let h = max(0, (geo.size.height - gap) / 2)
+                VStack(spacing: gap) {
+                    HStack(spacing: gap) {
+                        SliceView(axis: 2, title: "Axial")
+                            .frame(width: w, height: h)
+                        SliceView(axis: 0, title: "Sagittal")
+                            .frame(width: w, height: h)
+                    }
+                    HStack(spacing: gap) {
+                        SliceView(axis: 1, title: "Coronal")
+                            .frame(width: w, height: h)
+                        VolumeRenderingPane()
+                            .frame(width: w, height: h)
+                    }
                 }
             }
+            .background(Color.black)
         }
+    }
+}
+
+private struct EmptyWorkstationView: View {
+    var body: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "rectangle.grid.2x2")
+                .font(.system(size: 44, weight: .light))
+                .foregroundColor(.secondary)
+
+            VStack(spacing: 4) {
+                Text("No study loaded")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(.primary)
+                Text("Open a DICOM folder or NIfTI volume to begin.")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.secondary)
+            }
+
+            HStack(spacing: 10) {
+                Button {
+                    NotificationCenter.default.post(name: .openDICOMDirectory, object: nil)
+                } label: {
+                    Label("DICOM Folder", systemImage: "folder")
+                }
+                .buttonStyle(.borderedProminent)
+
+                Button {
+                    NotificationCenter.default.post(name: .openNIfTIFile, object: nil)
+                } label: {
+                    Label("NIfTI File", systemImage: "doc")
+                }
+                .buttonStyle(.bordered)
+            }
+            .controlSize(.regular)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black)
     }
 }

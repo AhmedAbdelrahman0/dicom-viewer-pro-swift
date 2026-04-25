@@ -26,6 +26,7 @@ public struct DicomViewerApp: App {
         .modelContainer(for: PACSIndexedSeries.self)
         #if os(macOS)
         return scene
+            .defaultSize(width: 1440, height: 960)
             .windowStyle(.hiddenTitleBar)
             .windowResizability(.contentSize)
             .commands {

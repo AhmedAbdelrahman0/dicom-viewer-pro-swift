@@ -19,10 +19,10 @@ struct AssistantPanel: View {
         VStack(spacing: 0) {
             providerStrip
             Divider()
+            quickCommands
+            Divider()
             transcript
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            Divider()
-            quickCommands
             Divider()
             composer
                 .background(Color(.displayP3, white: 0.09))
