@@ -82,6 +82,14 @@ public struct SliceView: View {
                                 .offset(pan)
                         }
 
+                        // Orthogonal slice cross-reference lines. These are
+                        // the useful part of linked MPR navigation: scrolling
+                        // one plane updates its own slice, while the other
+                        // planes show exactly where that slice intersects.
+                        crossReferenceCanvas(scale: fit, imageSize: CGSize(width: imgW, height: imgH))
+                            .frame(width: imgW * fit, height: imgH * fit)
+                            .offset(pan)
+
                         // Measurements overlay
                         measurementCanvas(scale: fit, imageSize: CGSize(width: imgW, height: imgH))
                             .frame(width: imgW * fit, height: imgH * fit)
@@ -603,8 +611,8 @@ public struct SliceView: View {
     }
 
     #if os(macOS)
-    private func handleScrollWheel(_ event: NSEvent) {
-        let rawDelta = event.scrollingDeltaY != 0 ? event.scrollingDeltaY : event.deltaY
+    private func handleScrollWheel(_ event: SliceScrollWheelEvent) {
+        let rawDelta = event.rawDeltaY
         guard abs(rawDelta) > 0.01 else { return }
 
         if event.modifierFlags.contains(.shift) || event.modifierFlags.contains(.command) {
@@ -623,7 +631,7 @@ public struct SliceView: View {
         let steps = Int(wheelAccumulator / threshold)
         guard steps != 0 else { return }
         wheelAccumulator -= CGFloat(steps) * threshold
-        vm.scrollAllSlices(delta: steps)
+        vm.scroll(axis: axis, delta: steps)
     }
     #endif
 
@@ -933,6 +941,123 @@ public struct SliceView: View {
         }
     }
 
+    private struct CrossReferenceOverlayLine: Identifiable {
+        let id: String
+        let isVertical: Bool
+        let position: CGFloat
+        let color: Color
+        let label: String
+    }
+
+    private func crossReferenceCanvas(scale: CGFloat, imageSize: CGSize) -> some View {
+        Canvas { context, size in
+            guard vm.labeling.crosshair.enabled else { return }
+            let lines = crossReferenceLines(imageSize: imageSize)
+            let style = StrokeStyle(lineWidth: 1.2, lineCap: .round, dash: [6, 4])
+
+            for line in lines {
+                let position = line.position * scale
+                var path = Path()
+                if line.isVertical {
+                    path.move(to: CGPoint(x: position, y: 0))
+                    path.addLine(to: CGPoint(x: position, y: size.height))
+                } else {
+                    path.move(to: CGPoint(x: 0, y: position))
+                    path.addLine(to: CGPoint(x: size.width, y: position))
+                }
+                context.stroke(path, with: .color(line.color.opacity(0.78)), style: style)
+
+                let labelPoint = line.isVertical
+                    ? CGPoint(x: min(max(position + 18, 20), max(20, size.width - 24)), y: 14)
+                    : CGPoint(x: 24, y: min(max(position - 10, 14), max(14, size.height - 14)))
+                context.draw(
+                    Text(line.label)
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundColor(line.color),
+                    at: labelPoint
+                )
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func crossReferenceLines(imageSize: CGSize) -> [CrossReferenceOverlayLine] {
+        guard vm.volumeForDisplayMode(displayMode) != nil else { return [] }
+        let width = max(1, Int(imageSize.width.rounded(.down)))
+        let height = max(1, Int(imageSize.height.rounded(.down)))
+        let transform = vm.displayTransform(for: axis, volume: vm.volumeForDisplayMode(displayMode))
+
+        func clamped(_ value: Int, max upperBound: Int) -> Int {
+            max(0, min(upperBound - 1, value))
+        }
+
+        func displayX(_ voxelIndex: Int) -> CGFloat {
+            let raw = clamped(voxelIndex, max: width)
+            let displayed = transform.flipHorizontal ? width - 1 - raw : raw
+            return CGFloat(displayed) + 0.5
+        }
+
+        func displayY(_ voxelIndex: Int) -> CGFloat {
+            let raw = clamped(voxelIndex, max: height)
+            let displayed = transform.flipVertical ? height - 1 - raw : raw
+            return CGFloat(displayed) + 0.5
+        }
+
+        func color(for planeAxis: Int) -> Color {
+            switch planeAxis {
+            case 0: return .cyan
+            case 1: return .green
+            default: return .orange
+            }
+        }
+
+        func label(for planeAxis: Int) -> String {
+            switch planeAxis {
+            case 0: return "SAG"
+            case 1: return "COR"
+            default: return "AX"
+            }
+        }
+
+        func vertical(axis planeAxis: Int, at index: Int) -> CrossReferenceOverlayLine {
+            CrossReferenceOverlayLine(
+                id: "v-\(planeAxis)",
+                isVertical: true,
+                position: displayX(index),
+                color: color(for: planeAxis),
+                label: label(for: planeAxis)
+            )
+        }
+
+        func horizontal(axis planeAxis: Int, at index: Int) -> CrossReferenceOverlayLine {
+            CrossReferenceOverlayLine(
+                id: "h-\(planeAxis)",
+                isVertical: false,
+                position: displayY(index),
+                color: color(for: planeAxis),
+                label: label(for: planeAxis)
+            )
+        }
+
+        switch axis {
+        case 0:
+            return [
+                vertical(axis: 1, at: vm.sliceIndices[1]),
+                horizontal(axis: 2, at: vm.sliceIndices[2])
+            ]
+        case 1:
+            return [
+                vertical(axis: 0, at: vm.sliceIndices[0]),
+                horizontal(axis: 2, at: vm.sliceIndices[2])
+            ]
+        default:
+            return [
+                vertical(axis: 0, at: vm.sliceIndices[0]),
+                horizontal(axis: 1, at: vm.sliceIndices[1])
+            ]
+        }
+    }
+
     private func drawAnnotation(_ ann: Annotation, in context: GraphicsContext,
                                  scale: CGFloat, imageSize: CGSize) {
         let points = ann.points
@@ -1012,8 +1137,20 @@ public struct SliceView: View {
 }
 
 #if os(macOS)
+private struct SliceScrollWheelEvent {
+    let rawDeltaY: CGFloat
+    let hasPreciseScrollingDeltas: Bool
+    let modifierFlags: NSEvent.ModifierFlags
+
+    init(_ event: NSEvent) {
+        self.rawDeltaY = event.scrollingDeltaY != 0 ? event.scrollingDeltaY : event.deltaY
+        self.hasPreciseScrollingDeltas = event.hasPreciseScrollingDeltas
+        self.modifierFlags = event.modifierFlags
+    }
+}
+
 private struct SliceScrollWheelBridge: NSViewRepresentable {
-    var onScroll: (NSEvent) -> Void
+    var onScroll: (SliceScrollWheelEvent) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onScroll: onScroll)
@@ -1035,9 +1172,9 @@ private struct SliceScrollWheelBridge: NSViewRepresentable {
     }
 
     final class Coordinator {
-        var onScroll: (NSEvent) -> Void
+        var onScroll: (SliceScrollWheelEvent) -> Void
 
-        init(onScroll: @escaping (NSEvent) -> Void) {
+        init(onScroll: @escaping (SliceScrollWheelEvent) -> Void) {
             self.onScroll = onScroll
         }
     }
@@ -1070,7 +1207,10 @@ private struct SliceScrollWheelBridge: NSViewRepresentable {
                 }
                 let point = convert(event.locationInWindow, from: nil)
                 guard bounds.contains(point) else { return event }
-                coordinator?.onScroll(event)
+                let capturedEvent = SliceScrollWheelEvent(event)
+                DispatchQueue.main.async { [weak self] in
+                    self?.coordinator?.onScroll(capturedEvent)
+                }
                 return nil
             }
         }

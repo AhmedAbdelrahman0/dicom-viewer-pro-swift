@@ -3238,6 +3238,30 @@ final class GeometryAndIOTests: XCTestCase {
     }
 
     @MainActor
+    func testPlaneScrollKeepsOrthogonalReferenceIndicesStable() {
+        let vm = ViewerViewModel()
+        let volume = ImageVolume(
+            pixels: [Float](repeating: 0, count: 20 * 30 * 40),
+            depth: 40,
+            height: 30,
+            width: 20
+        )
+        vm.displayVolume(volume)
+        vm.sliceIndices = [4, 5, 6]
+
+        vm.scroll(axis: 2, delta: 7)
+
+        XCTAssertEqual(vm.sliceIndices[0], 4)
+        XCTAssertEqual(vm.sliceIndices[1], 5)
+        XCTAssertEqual(vm.sliceIndices[2], 13)
+
+        vm.scroll(axis: 0, delta: -99)
+        XCTAssertEqual(vm.sliceIndices[0], 0)
+        XCTAssertEqual(vm.sliceIndices[1], 5)
+        XCTAssertEqual(vm.sliceIndices[2], 13)
+    }
+
+    @MainActor
     func testAppUndoRedoTracksWindowLevelChanges() {
         let vm = ViewerViewModel()
         let before = (window: vm.window, level: vm.level)

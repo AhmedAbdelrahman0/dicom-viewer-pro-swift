@@ -725,22 +725,34 @@ private struct FusionTab: View {
                 ControlStatRow(vm.suvSettings.mode.displayName, String(format: "%.3f", probe.suv))
             }
 
-            if let map = vm.labeling.activeLabelMap,
-               let cls = map.classInfo(id: vm.labeling.activeClassID),
-               let stats = vm.activePETRegionStats(for: map, classID: cls.labelID),
-               stats.count > 0 {
+            if let report = vm.lastVolumeMeasurementReport,
+               report.source == .petSUV,
+               report.voxelCount > 0 {
                 Divider()
-                Text("Active Label: \(cls.name)")
+                Text("Active Label: \(report.className)")
                     .font(.system(size: 11, weight: .semibold))
-                if let suvMax = stats.suvMax {
+                ControlStatRow("Volume", String(format: "%.2f mL", report.volumeML))
+                if let suvMax = report.suvMax {
                     ControlStatRow("SUVmax", String(format: "%.3f", suvMax))
                 }
-                if let suvMean = stats.suvMean {
+                if let suvMean = report.suvMean {
                     ControlStatRow("SUVmean", String(format: "%.3f", suvMean))
                 }
-                if let tlg = stats.tlg {
+                if let tlg = report.tlg {
                     ControlStatRow("TLG", String(format: "%.1f", tlg))
                 }
+            } else if vm.labeling.activeLabelMap != nil {
+                Button {
+                    vm.refreshActiveVolumeMeasurement(
+                        method: .activeLabel,
+                        thresholdSummary: "Active PET label",
+                        preferPET: true
+                    )
+                } label: {
+                    Label("Measure Active PET Label", systemImage: "flame")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
         }
     }

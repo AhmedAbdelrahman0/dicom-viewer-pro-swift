@@ -419,41 +419,48 @@ struct LabelingPanel: View {
 
                 // ── Region statistics ──
                 if let map = vm.labeling.activeLabelMap,
-                   let v = vm.currentVolume,
                    let cls = map.classInfo(id: vm.labeling.activeClassID) {
                     Group {
-                        let petStats = vm.activePETRegionStats(for: map, classID: cls.labelID)
-                        let currentSUVTransform: ((Double) -> Double)? = Modality.normalize(v.modality) == .PT
-                            ? { raw in vm.suvValue(rawStoredValue: raw, volume: v) }
-                            : nil
-                        let stats = petStats ?? RegionStats.compute(
-                            v,
-                            map,
-                            classID: cls.labelID,
-                            suvTransform: currentSUVTransform
-                        )
-                        Text(petStats == nil ? "Statistics: \(cls.name)" : "PET Statistics: \(cls.name)")
+                        Text("Statistics: \(cls.name)")
                             .font(.headline)
-                        if stats.count == 0 {
-                            Text("No voxels in this class")
-                                .font(.caption).foregroundColor(.secondary)
+
+                        if let report = vm.lastVolumeMeasurementReport,
+                           report.className == cls.name {
+                            if report.voxelCount == 0 {
+                                Text("No voxels in this class")
+                                    .font(.caption).foregroundColor(.secondary)
+                            } else {
+                                StatRow("Voxels", "\(report.voxelCount)")
+                                StatRow("Volume", String(format: "%.1f cm³", report.volumeMM3 / 1000))
+                                StatRow("Mean", String(format: "%.1f", report.mean))
+                                StatRow("Max",  String(format: "%.1f", report.max))
+                                StatRow("Min",  String(format: "%.1f", report.min))
+                                StatRow("Std",  String(format: "%.1f", report.std))
+                                if let suvMax = report.suvMax {
+                                    StatRow("SUV max", String(format: "%.2f", suvMax))
+                                }
+                                if let suvMean = report.suvMean {
+                                    StatRow("SUV mean", String(format: "%.2f", suvMean))
+                                }
+                                if let tlg = report.tlg {
+                                    StatRow("TLG", String(format: "%.1f g·mL⁻¹·mL", tlg))
+                                }
+                            }
                         } else {
-                            StatRow("Voxels", "\(stats.count)")
-                            StatRow("Volume", String(format: "%.1f cm³", stats.volumeMM3 / 1000))
-                            StatRow("Mean", String(format: "%.1f", stats.mean))
-                            StatRow("Max",  String(format: "%.1f", stats.max))
-                            StatRow("Min",  String(format: "%.1f", stats.min))
-                            StatRow("Std",  String(format: "%.1f", stats.std))
-                            if let suvMax = stats.suvMax {
-                                StatRow("SUV max", String(format: "%.2f", suvMax))
-                            }
-                            if let suvMean = stats.suvMean {
-                                StatRow("SUV mean", String(format: "%.2f", suvMean))
-                            }
-                            if let tlg = stats.tlg {
-                                StatRow("TLG", String(format: "%.1f g·mL⁻¹·mL", tlg))
-                            }
+                            Text("Not measured yet.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
                         }
+
+                        Button {
+                            vm.refreshActiveVolumeMeasurement(method: .activeLabel,
+                                                              thresholdSummary: "Active label")
+                        } label: {
+                            Label("Refresh Stats", systemImage: "chart.bar")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
                     }
                 }
 
