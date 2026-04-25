@@ -743,7 +743,7 @@ private struct FusionTab: View {
                 }
             } else if vm.labeling.activeLabelMap != nil {
                 Button {
-                    vm.refreshActiveVolumeMeasurement(
+                    vm.startActiveVolumeMeasurement(
                         method: .activeLabel,
                         thresholdSummary: "Active PET label",
                         preferPET: true
@@ -753,6 +753,7 @@ private struct FusionTab: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .disabled(vm.isVolumeOperationRunning)
             }
         }
     }

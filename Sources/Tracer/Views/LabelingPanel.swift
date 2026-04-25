@@ -228,10 +228,11 @@ struct LabelingPanel: View {
 
                             HStack {
                                 Button("Apply (whole volume)") {
-                                    vm.thresholdActiveLabel(atOrAbove: vm.labeling.thresholdValue)
+                                    vm.startThresholdActiveLabel(atOrAbove: vm.labeling.thresholdValue)
                                 }
                                 .buttonStyle(.borderedProminent)
                                 .controlSize(.small)
+                                .disabled(vm.isVolumeOperationRunning)
                             }
 
                             Divider()
@@ -453,14 +454,15 @@ struct LabelingPanel: View {
                         }
 
                         Button {
-                            vm.refreshActiveVolumeMeasurement(method: .activeLabel,
-                                                              thresholdSummary: "Active label")
+                            vm.startActiveVolumeMeasurement(method: .activeLabel,
+                                                            thresholdSummary: "Active label")
                         } label: {
                             Label("Refresh Stats", systemImage: "chart.bar")
                                 .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
+                        .disabled(vm.isVolumeOperationRunning)
                     }
                 }
 
@@ -565,7 +567,7 @@ struct LabelingPanel: View {
                 Spacer()
                 Menu {
                     Button {
-                        vm.refreshActiveVolumeMeasurement(
+                        vm.startActiveVolumeMeasurement(
                             method: .activeLabel,
                             thresholdSummary: "Active PET label",
                             preferPET: true
@@ -574,7 +576,7 @@ struct LabelingPanel: View {
                         Label("Measure PET / SUV", systemImage: "flame")
                     }
                     Button {
-                        vm.refreshActiveVolumeMeasurement(
+                        vm.startActiveVolumeMeasurement(
                             method: .activeLabel,
                             thresholdSummary: "Active CT label",
                             preferPET: false
@@ -588,7 +590,7 @@ struct LabelingPanel: View {
                 }
                 .menuStyle(.borderlessButton)
                 .controlSize(.small)
-                .disabled(vm.labeling.activeLabelMap == nil)
+                .disabled(vm.labeling.activeLabelMap == nil || vm.isVolumeOperationRunning)
             }
 
             Text("PET tools write SUV-derived MTV/TLG into the active label. CT tools write HU-derived volume masks into the same editable label map.")
@@ -609,14 +611,14 @@ struct LabelingPanel: View {
 
                 HStack {
                     Button {
-                        vm.thresholdActiveLabel(atOrAbove: vm.labeling.thresholdValue)
+                        vm.startThresholdActiveLabel(atOrAbove: vm.labeling.thresholdValue)
                     } label: {
                         Label("Fixed SUV", systemImage: "greaterthan.circle")
                             .frame(maxWidth: .infinity)
                     }
 
                     Button {
-                        vm.percentOfMaxActiveLabelWholeVolume(percent: vm.labeling.percentOfMax)
+                        vm.startPercentOfMaxActiveLabelWholeVolume(percent: vm.labeling.percentOfMax)
                     } label: {
                         Label("% SUVmax", systemImage: "percent")
                             .frame(maxWidth: .infinity)
@@ -624,6 +626,7 @@ struct LabelingPanel: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .disabled(vm.isVolumeOperationRunning)
 
                 HStack {
                     Text("% max")
@@ -667,12 +670,13 @@ struct LabelingPanel: View {
 
                 HStack {
                     Button {
-                        vm.thresholdActiveCTLabel(lowerHU: ctLowerHU, upperHU: ctUpperHU)
+                        vm.startThresholdActiveCTLabel(lowerHU: ctLowerHU, upperHU: ctUpperHU)
                     } label: {
                         Label("Apply HU Range", systemImage: "ruler")
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
+                    .disabled(vm.isVolumeOperationRunning)
 
                     Button {
                         let preset = HUThresholdPreset.presets.first(where: { $0.id == selectedHUPresetID }) ?? HUThresholdPreset.presets[1]
@@ -698,13 +702,13 @@ struct LabelingPanel: View {
                     let before = vm.labeling.undoDepth
                     let cleared = vm.labeling.resetActiveClass()
                     vm.recordLabelEditIfChanged(named: "Reset active class", beforeUndoDepth: before)
-                    vm.refreshActiveVolumeMeasurement()
+                    vm.startActiveVolumeMeasurement()
                     vm.statusMessage = "Reset active class (\(cleared) voxels cleared)"
                 } label: {
                     Label("Reset Class", systemImage: "xmark.circle")
                         .frame(maxWidth: .infinity)
                 }
-                .disabled(vm.labeling.activeLabelMap == nil)
+                .disabled(vm.labeling.activeLabelMap == nil || vm.isVolumeOperationRunning)
 
                 Button(role: .destructive) {
                     vm.resetEditableChanges()
@@ -712,6 +716,7 @@ struct LabelingPanel: View {
                     Label("Reset Edits", systemImage: "arrow.counterclockwise.circle")
                         .frame(maxWidth: .infinity)
                 }
+                .disabled(vm.isVolumeOperationRunning)
             }
             .buttonStyle(.bordered)
             .controlSize(.small)

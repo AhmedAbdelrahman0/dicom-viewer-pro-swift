@@ -79,6 +79,13 @@ public enum ViewerTool: String, CaseIterable, Identifiable {
     }
 }
 
+public struct VolumeOperationStatus: Identifiable, Equatable, Sendable {
+    public let id: UUID
+    public let title: String
+    public let detail: String
+    public let startedAt: Date
+}
+
 @MainActor
 public final class ViewerViewModel: ObservableObject {
 
@@ -122,6 +129,7 @@ public final class ViewerViewModel: ObservableObject {
     @Published public var suvSettings = SUVCalculationSettings()
     @Published public var hangingPanes: [HangingPaneConfiguration] = HangingPaneConfiguration.defaultPETCT
     @Published public var lastVolumeMeasurementReport: VolumeMeasurementReport?
+    @Published public private(set) var volumeOperationStatus: VolumeOperationStatus?
     @Published public private(set) var appUndoDepth: Int = 0
     @Published public private(set) var appRedoDepth: Int = 0
 
@@ -170,6 +178,8 @@ public final class ViewerViewModel: ObservableObject {
     private var appRedoStack: [AppHistoryRecord] = []
     private var isReplayingAppHistory = false
     private let maxAppHistoryRecords = 120
+    private let maxBackgroundTrackedChangedVoxels = 5_000_000
+    private var volumeOperationTask: Task<Void, Never>?
 
     // DICOM study browser
     @Published public var loadedSeries: [DICOMSeries] = []
@@ -220,6 +230,19 @@ public final class ViewerViewModel: ObservableObject {
 
     public var canRedo: Bool {
         appRedoDepth > 0 || labeling.redoDepth > 0
+    }
+
+    public var isVolumeOperationRunning: Bool {
+        volumeOperationStatus != nil
+    }
+
+    public func cancelVolumeOperation() {
+        volumeOperationTask?.cancel()
+        volumeOperationTask = nil
+        if let operation = volumeOperationStatus {
+            statusMessage = "Cancelled \(operation.title)"
+        }
+        volumeOperationStatus = nil
     }
 
     public func volumeForDisplayMode(_ mode: SliceDisplayMode) -> ImageVolume? {
@@ -430,7 +453,7 @@ public final class ViewerViewModel: ObservableObject {
             statusMessage = "Undo: \(record.name)"
         } else if labeling.undoDepth > 0 {
             labeling.undo()
-            refreshActiveVolumeMeasurement(method: .activeLabel, thresholdSummary: "Undo")
+            startActiveVolumeMeasurement(method: .activeLabel, thresholdSummary: "Undo")
             statusMessage = "Undo label edit"
         } else {
             statusMessage = "Nothing to undo"
@@ -447,7 +470,7 @@ public final class ViewerViewModel: ObservableObject {
             statusMessage = "Redo: \(record.name)"
         } else if labeling.redoDepth > 0 {
             labeling.redo()
-            refreshActiveVolumeMeasurement(method: .activeLabel, thresholdSummary: "Redo")
+            startActiveVolumeMeasurement(method: .activeLabel, thresholdSummary: "Redo")
             statusMessage = "Redo label edit"
         } else {
             statusMessage = "Nothing to redo"
@@ -514,10 +537,10 @@ public final class ViewerViewModel: ObservableObject {
         guard let beforeUndoDepth, labeling.undoDepth > beforeUndoDepth else { return }
         recordHistoryIfNeeded(name: name, changed: true) { [weak self] in
             self?.labeling.undo()
-            self?.refreshActiveVolumeMeasurement(method: .activeLabel, thresholdSummary: "Undo")
+            self?.startActiveVolumeMeasurement(method: .activeLabel, thresholdSummary: "Undo")
         } redo: { [weak self] in
             self?.labeling.redo()
-            self?.refreshActiveVolumeMeasurement(method: .activeLabel, thresholdSummary: "Redo")
+            self?.startActiveVolumeMeasurement(method: .activeLabel, thresholdSummary: "Redo")
         }
     }
 
@@ -1451,6 +1474,139 @@ public final class ViewerViewModel: ObservableObject {
         )
     }
 
+    public func startThresholdActiveLabel(atOrAbove threshold: Double) {
+        labeling.thresholdValue = threshold
+        runBackgroundLabelOperation(
+            .petThreshold(threshold: threshold),
+            defaultName: "PET/CT Volumes",
+            className: "Lesion",
+            category: .lesion,
+            color: .orange
+        )
+    }
+
+    public func startPercentOfMaxActiveLabelWholeVolume(percent: Double) {
+        labeling.percentOfMax = percent
+        runBackgroundLabelOperation(
+            .petPercentOfMax(percent: percent),
+            defaultName: "PET/CT Volumes",
+            className: "Lesion",
+            category: .lesion,
+            color: .orange
+        )
+    }
+
+    public func startPercentOfMaxActiveLabelAroundSeed(seed: (z: Int, y: Int, x: Int),
+                                                       boxRadius: Int = 30,
+                                                       percent: Double) {
+        labeling.percentOfMax = percent
+        runBackgroundLabelOperation(
+            .petSeededPercentOfMax(seed: seed, boxRadius: boxRadius, percent: percent),
+            defaultName: "PET/CT Volumes",
+            className: "Lesion",
+            category: .lesion,
+            color: .orange
+        )
+    }
+
+    public func startGradientActiveLabelAroundSeed(seed: (z: Int, y: Int, x: Int),
+                                                   minimumValue: Double,
+                                                   gradientCutoffFraction: Double,
+                                                   searchRadius: Int) {
+        labeling.thresholdValue = minimumValue
+        labeling.gradientCutoffFraction = gradientCutoffFraction
+        labeling.gradientSearchRadius = searchRadius
+        runBackgroundLabelOperation(
+            .petGradient(seed: seed,
+                         minimumValue: minimumValue,
+                         gradientCutoffFraction: gradientCutoffFraction,
+                         searchRadius: searchRadius),
+            defaultName: "PET/CT Volumes",
+            className: "Lesion",
+            category: .lesion,
+            color: .orange
+        )
+    }
+
+    public func startRegionGrowActiveLabelAroundSeed(seed: (z: Int, y: Int, x: Int),
+                                                     tolerance: Double,
+                                                     preferredVolume: ImageVolume? = nil) {
+        runBackgroundLabelOperation(
+            .regionGrow(seed: seed, tolerance: tolerance),
+            defaultName: "PET/CT Volumes",
+            className: "Region",
+            category: .lesion,
+            color: .yellow,
+            preferredVolume: preferredVolume
+        )
+    }
+
+    public func startThresholdActiveCTLabel(lowerHU: Double, upperHU: Double) {
+        runBackgroundLabelOperation(
+            .ctRange(lower: lowerHU, upper: upperHU),
+            defaultName: "CT Volumes",
+            className: "CT Volume",
+            category: .organ,
+            color: .cyan,
+            forceCT: true
+        )
+    }
+
+    public func startActiveVolumeMeasurement(method: VolumeMeasurementMethod = .activeLabel,
+                                             thresholdSummary: String = "Active label",
+                                             preferPET: Bool = true) {
+        guard !isVolumeOperationRunning else {
+            statusMessage = "Volume operation already running. Cancel it before starting another label-volume job."
+            return
+        }
+        guard let map = labeling.activeLabelMap else {
+            lastVolumeMeasurementReport = nil
+            statusMessage = "No active label map to measure"
+            return
+        }
+        guard let source = activeMeasurementSource(matching: map, preferPET: preferPET) else {
+            lastVolumeMeasurementReport = nil
+            statusMessage = "No matching volume grid for the active label map"
+            return
+        }
+
+        let operationID = UUID()
+        let title = source.source == .petSUV ? "Measure SUV metrics" : "Measure volume"
+        volumeOperationStatus = VolumeOperationStatus(
+            id: operationID,
+            title: title,
+            detail: thresholdSummary,
+            startedAt: Date()
+        )
+        statusMessage = "Running \(title)… viewer remains responsive"
+
+        let input = VolumeMeasurementInput(
+            mapID: map.id,
+            mapName: map.name,
+            classes: map.classes,
+            voxels: map.voxels,
+            volume: source.volume,
+            classID: labeling.activeClassID,
+            source: source.source,
+            method: method,
+            thresholdSummary: thresholdSummary,
+            suvSettings: suvSettings
+        )
+
+        volumeOperationTask = Task { [weak self, input, operationID] in
+            let report = await Task.detached(priority: .userInitiated) {
+                VolumeOperationWorker.measure(input)
+            }.value
+            guard !Task.isCancelled,
+                  let self,
+                  self.volumeOperationStatus?.id == operationID else { return }
+            self.lastVolumeMeasurementReport = report
+            self.statusMessage = self.measurementStatus(report)
+            self.volumeOperationStatus = nil
+            self.volumeOperationTask = nil
+        }
+    }
+
     public func thresholdActiveLabel(atOrAbove threshold: Double) {
         ensureActiveLabelMapForCurrentContext(defaultName: "PET/CT Volumes", className: "Lesion", category: .lesion, color: .orange)
         guard let map = labeling.activeLabelMap else { return }
@@ -1646,6 +1802,142 @@ public final class ViewerViewModel: ObservableObject {
         )
         lastVolumeMeasurementReport = report
         return report
+    }
+
+    private func runBackgroundLabelOperation(_ operation: VolumeLabelOperation,
+                                             defaultName: String,
+                                             className: String,
+                                             category: LabelCategory,
+                                             color: Color,
+                                             forceCT: Bool = false,
+                                             preferredVolume: ImageVolume? = nil) {
+        guard !isVolumeOperationRunning else {
+            statusMessage = "Volume operation already running. Cancel it before starting another label-volume job."
+            return
+        }
+
+        ensureActiveLabelMapForCurrentContext(
+            defaultName: defaultName,
+            className: className,
+            category: category,
+            color: color
+        )
+        guard let map = labeling.activeLabelMap else { return }
+
+        let source: (volume: ImageVolume, usesSUV: Bool)?
+        if let preferredVolume, sameGrid(preferredVolume, map) {
+            source = (preferredVolume, Modality.normalize(preferredVolume.modality) == .PT)
+        } else if forceCT {
+            source = activeCTVolumeMatching(map).map { ($0, false) }
+        } else {
+            source = activeSegmentationSource(matching: map)
+        }
+        guard let source else {
+            statusMessage = forceCT
+                ? "No CT volume matches the active label map grid"
+                : "No current image or PET overlay matches the active label map grid"
+            return
+        }
+
+        let operationID = UUID()
+        volumeOperationStatus = VolumeOperationStatus(
+            id: operationID,
+            title: operation.title,
+            detail: operation.thresholdSummary,
+            startedAt: Date()
+        )
+        statusMessage = "Running \(operation.title)… viewer remains responsive"
+
+        let input = VolumeLabelOperationInput(
+            mapID: map.id,
+            mapName: map.name,
+            classes: map.classes,
+            startingVoxels: map.voxels,
+            volume: source.volume,
+            classID: labeling.activeClassID,
+            usesSUV: source.usesSUV,
+            suvSettings: suvSettings,
+            operation: operation,
+            diffLimit: maxBackgroundTrackedChangedVoxels
+        )
+
+        volumeOperationTask = Task { [weak self, input, operationID] in
+            let result = await Task.detached(priority: .userInitiated) {
+                VolumeOperationWorker.runLabelOperation(input)
+            }.value
+            guard !Task.isCancelled,
+                  let self,
+                  self.volumeOperationStatus?.id == operationID else { return }
+            self.finishBackgroundLabelOperation(result)
+        }
+    }
+
+    private func finishBackgroundLabelOperation(_ result: VolumeLabelOperationOutput) {
+        let changed = labeling.applyVoxelReplacement(
+            mapID: result.mapID,
+            voxels: result.voxels,
+            diff: result.diff,
+            name: result.operation.title
+        )
+        lastVolumeMeasurementReport = result.report
+
+        if changed && !result.diff.overflowed {
+            recordHistoryIfNeeded(name: result.operation.title, changed: true) { [weak self] in
+                self?.labeling.undo()
+                self?.startActiveVolumeMeasurement(
+                    method: result.operation.method,
+                    thresholdSummary: result.operation.thresholdSummary,
+                    preferPET: result.report.source == .petSUV
+                )
+            } redo: { [weak self] in
+                self?.labeling.redo()
+                self?.startActiveVolumeMeasurement(
+                    method: result.operation.method,
+                    thresholdSummary: result.operation.thresholdSummary,
+                    preferPET: result.report.source == .petSUV
+                )
+            }
+        }
+
+        var message: String
+        switch result.operation {
+        case .petThreshold:
+            message = "Segmented \(result.voxelCount) voxels at \(result.operation.thresholdSummary)"
+        case .petPercentOfMax, .petSeededPercentOfMax:
+            message = "Segmented \(result.voxelCount) voxels at \(result.operation.thresholdSummary)"
+        case .petGradient:
+            if let gradient = result.gradient {
+                message = "SUV gradient segmented \(gradient.voxelCount) voxels | peak \(String(format: "%.2f", gradient.maxValue)), edge \(String(format: "%.3f", gradient.gradientCutoff))/mm"
+            } else {
+                message = "SUV gradient finished"
+            }
+        case .regionGrow:
+            message = "Region grow segmented \(result.voxelCount) voxels"
+        case .ctRange:
+            message = "Segmented \(result.voxelCount) CT voxels from \(result.operation.thresholdSummary)"
+        }
+        if result.diff.overflowed {
+            message += " (undo history skipped: very large edit)"
+        }
+        if !changed && result.voxelCount == 0 {
+            message = "No voxels matched \(result.operation.thresholdSummary)"
+        }
+        statusMessage = message
+        volumeOperationStatus = nil
+        volumeOperationTask = nil
+    }
+
+    private func measurementStatus(_ report: VolumeMeasurementReport) -> String {
+        if report.source == .petSUV {
+            let suvMax = report.suvMax.map { String(format: " SUVmax %.2f", $0) } ?? ""
+            let suvMean = report.suvMean.map { String(format: " SUVmean %.2f", $0) } ?? ""
+            return String(format: "Measured %@: %.2f mL%@%@",
+                          report.className,
+                          report.volumeML,
+                          suvMax,
+                          suvMean)
+        }
+        return String(format: "Measured %@: %.2f mL", report.className, report.volumeML)
     }
 
     private func suvTransform(for volume: ImageVolume) -> (Double) -> Double {

@@ -713,6 +713,11 @@ public struct SliceView: View {
 
     private func handleLabelingDrag(value: DragGesture.Value, volume: ImageVolume,
                                      geo: GeometryProxy) {
+        guard !vm.isVolumeOperationRunning else {
+            vm.statusMessage = "Volume operation is running; pan, zoom, scroll, or cancel before editing labels."
+            return
+        }
+
         let pixel = mapToImagePixel(point: value.location, volume: volume, geo: geo)
         guard let p = pixel else { return }
 
@@ -744,17 +749,10 @@ public struct SliceView: View {
                     axis: axis, sliceIndex: vm.sliceIndices[axis],
                     pixelX: p.0, pixelY: p.1
                 )
-                let beforeUndo = vm.labeling.undoDepth
-                vm.labeling.regionGrow(
-                    volume: volume,
+                vm.startRegionGrowActiveLabelAroundSeed(
                     seed: (z: z, y: y, x: x),
-                    tolerance: vm.labeling.regionGrowTolerance
-                )
-                vm.recordLabelEditIfChanged(named: "Region grow", beforeUndoDepth: beforeUndo)
-                vm.refreshActiveVolumeMeasurement(
-                    method: .regionGrow,
-                    thresholdSummary: String(format: "Region grow ±%.1f", vm.labeling.regionGrowTolerance),
-                    preferPET: Modality.normalize(volume.modality) == .PT
+                    tolerance: vm.labeling.regionGrowTolerance,
+                    preferredVolume: volume
                 )
                 lastPaintPoint = p
             }
@@ -766,7 +764,7 @@ public struct SliceView: View {
                     axis: axis, sliceIndex: vm.sliceIndices[axis],
                     pixelX: p.0, pixelY: p.1
                 )
-                vm.percentOfMaxActiveLabelAroundSeed(
+                vm.startPercentOfMaxActiveLabelAroundSeed(
                     seed: (z: z, y: y, x: x),
                     boxRadius: 30,
                     percent: vm.labeling.percentOfMax
@@ -780,7 +778,7 @@ public struct SliceView: View {
                     axis: axis, sliceIndex: vm.sliceIndices[axis],
                     pixelX: p.0, pixelY: p.1
                 )
-                vm.gradientActiveLabelAroundSeed(
+                vm.startGradientActiveLabelAroundSeed(
                     seed: (z: z, y: y, x: x),
                     minimumValue: vm.labeling.thresholdValue,
                     gradientCutoffFraction: vm.labeling.gradientCutoffFraction,

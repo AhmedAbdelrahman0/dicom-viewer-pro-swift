@@ -344,6 +344,7 @@ public struct ContentView: View {
         ) {
             vm.resetEditableChanges()
         }
+        .disabled(vm.isVolumeOperationRunning)
 
         HoverIconButton(
             systemImage: vm.linkZoomPanAcrossPanes ? "link" : "link.badge.plus",
@@ -358,6 +359,19 @@ public struct ContentView: View {
         orientationMenu
 
         petDisplayMenu
+
+        HoverIconButton(
+            systemImage: "flame",
+            tooltip: "Measure PET SUV / MTV / TLG\nCalculates SUVmax, SUVmean, metabolic tumor volume, and TLG for the active label without blocking the viewer.",
+            isActive: vm.volumeOperationStatus?.title.contains("SUV") == true
+        ) {
+            vm.startActiveVolumeMeasurement(
+                method: .activeLabel,
+                thresholdSummary: "Active PET label",
+                preferPET: true
+            )
+        }
+        .disabled(vm.labeling.activeLabelMap == nil || vm.isVolumeOperationRunning)
 
         volumetryMenu
 
@@ -569,13 +583,13 @@ public struct ContentView: View {
             }
             Divider()
             Button {
-                vm.thresholdActiveLabel(atOrAbove: vm.labeling.thresholdValue)
+                vm.startThresholdActiveLabel(atOrAbove: vm.labeling.thresholdValue)
             } label: {
                 Label(String(format: "PET Fixed SUV ≥ %.1f", vm.labeling.thresholdValue),
                       systemImage: "greaterthan.circle")
             }
             Button {
-                vm.percentOfMaxActiveLabelWholeVolume(percent: vm.labeling.percentOfMax)
+                vm.startPercentOfMaxActiveLabelWholeVolume(percent: vm.labeling.percentOfMax)
             } label: {
                 Label(String(format: "PET %.0f%% SUVmax", vm.labeling.percentOfMax * 100),
                       systemImage: "percent")
@@ -591,7 +605,7 @@ public struct ContentView: View {
             Divider()
             ForEach(HUThresholdPreset.presets) { preset in
                 Button {
-                    vm.thresholdActiveCTLabel(lowerHU: preset.lower, upperHU: preset.upper)
+                    vm.startThresholdActiveCTLabel(lowerHU: preset.lower, upperHU: preset.upper)
                 } label: {
                     Label("\(preset.name) \(Int(preset.lower))...\(Int(preset.upper)) HU",
                           systemImage: "cube")
@@ -599,7 +613,7 @@ public struct ContentView: View {
             }
             Divider()
             Button {
-                vm.refreshActiveVolumeMeasurement(
+                vm.startActiveVolumeMeasurement(
                     method: .activeLabel,
                     thresholdSummary: "Active PET label",
                     preferPET: true
@@ -608,7 +622,7 @@ public struct ContentView: View {
                 Label("Measure PET SUV / Volume", systemImage: "flame")
             }
             Button {
-                vm.refreshActiveVolumeMeasurement(
+                vm.startActiveVolumeMeasurement(
                     method: .activeLabel,
                     thresholdSummary: "Active CT label",
                     preferPET: false
@@ -631,7 +645,7 @@ public struct ContentView: View {
                 }
             }
         } label: {
-            Label("Volumes", systemImage: "chart.bar.doc.horizontal")
+            Label("SUV/Volumes", systemImage: "chart.bar.doc.horizontal")
                 .font(.system(size: 12, weight: .medium))
         }
         .menuStyle(.borderlessButton)
@@ -741,6 +755,19 @@ public struct ContentView: View {
 
     private var statusBar: some View {
         HStack {
+            if let operation = vm.volumeOperationStatus {
+                ProgressView()
+                    .controlSize(.small)
+                Text(operation.title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(TracerTheme.accentBright)
+                    .lineLimit(1)
+                Button("Cancel") {
+                    vm.cancelVolumeOperation()
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+            }
             Text(vm.statusMessage)
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundColor(.secondary)

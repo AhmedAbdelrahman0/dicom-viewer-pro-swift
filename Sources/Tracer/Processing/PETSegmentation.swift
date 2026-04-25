@@ -533,7 +533,7 @@ public enum PETSegmentation {
     }
 }
 
-public struct PETGradientSegmentationResult: Equatable {
+public struct PETGradientSegmentationResult: Equatable, Sendable {
     public let voxelCount: Int
     public let seedValue: Double
     public let maxValue: Double
@@ -556,7 +556,7 @@ public struct PETGradientSegmentationResult: Equatable {
 }
 
 /// A 3D voxel bounding box (inclusive).
-public struct VoxelBox {
+public struct VoxelBox: Sendable {
     public var minZ, maxZ, minY, maxY, minX, maxX: Int
 
     public init(minZ: Int, maxZ: Int, minY: Int, maxY: Int, minX: Int, maxX: Int) {

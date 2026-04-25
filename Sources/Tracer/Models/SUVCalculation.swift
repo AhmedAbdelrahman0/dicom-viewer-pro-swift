@@ -1,6 +1,6 @@
 import Foundation
 
-public enum SUVCalculationMode: String, CaseIterable, Identifiable {
+public enum SUVCalculationMode: String, CaseIterable, Identifiable, Sendable {
     case storedSUV
     case manualScale
     case bodyWeight
@@ -20,7 +20,7 @@ public enum SUVCalculationMode: String, CaseIterable, Identifiable {
     }
 }
 
-public enum PETActivityUnit: String, CaseIterable, Identifiable {
+public enum PETActivityUnit: String, CaseIterable, Identifiable, Sendable {
     case bqml
     case kbqml
     case mbqml
@@ -38,7 +38,7 @@ public enum PETActivityUnit: String, CaseIterable, Identifiable {
     }
 }
 
-public enum BiologicalSexForSUV: String, CaseIterable, Identifiable {
+public enum BiologicalSexForSUV: String, CaseIterable, Identifiable, Sendable {
     case male
     case female
 
@@ -52,7 +52,7 @@ public enum BiologicalSexForSUV: String, CaseIterable, Identifiable {
     }
 }
 
-public struct SUVCalculationSettings: Equatable {
+public struct SUVCalculationSettings: Equatable, Sendable {
     public var mode: SUVCalculationMode = .storedSUV
     public var activityUnit: PETActivityUnit = .bqml
     public var customBqPerMLPerStoredUnit: Double = 1

@@ -6,6 +6,19 @@ import MetalKit
 #endif
 
 final class GeometryAndIOTests: XCTestCase {
+    @MainActor
+    private func waitForVolumeOperation(_ vm: ViewerViewModel,
+                                        file: StaticString = #filePath,
+                                        line: UInt = #line) async throws {
+        for _ in 0..<200 {
+            if !vm.isVolumeOperationRunning {
+                return
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTFail("Timed out waiting for volume operation", file: file, line: line)
+    }
+
     func testVolumeWorldVoxelRoundTripUsesDirection() {
         let direction = simd_double3x3(
             SIMD3<Double>(0, 1, 0),
@@ -1171,6 +1184,42 @@ final class GeometryAndIOTests: XCTestCase {
                        "Thresholding must compare scaled SUV, not raw PET counts")
     }
 
+    @MainActor
+    func testBackgroundPETThresholdUsesMatchedVolumeScale() async throws {
+        let ct = ImageVolume(
+            pixels: [0, 0],
+            depth: 1,
+            height: 1,
+            width: 2,
+            modality: "CT"
+        )
+        let pet = ImageVolume(
+            pixels: [10, 20],
+            depth: 1,
+            height: 1,
+            width: 2,
+            modality: "PT",
+            suvScaleFactor: 0.5
+        )
+        let vm = ViewerViewModel()
+        vm.currentVolume = ct
+        vm.suvSettings.mode = .storedSUV
+        let pair = FusionPair(base: ct, overlay: pet)
+        pair.resampledOverlay = pet
+        vm.fusion = pair
+        let map = vm.labeling.createLabelMap(for: ct)
+
+        vm.startThresholdActiveLabel(atOrAbove: 8)
+
+        XCTAssertNotNil(vm.volumeOperationStatus)
+        try await waitForVolumeOperation(vm)
+        XCTAssertEqual(map.voxels, [0, 1],
+                       "Background thresholding must compare scaled SUV, not raw PET counts")
+        let report = try XCTUnwrap(vm.lastVolumeMeasurementReport)
+        XCTAssertEqual(report.source, .petSUV)
+        XCTAssertEqual(report.suvMax ?? 0, 10, accuracy: 1e-9)
+    }
+
     func testPETSegmentationGradientEdgeStopsAtSUVDrop() {
         let volume = ImageVolume(
             pixels: [0, 3, 8, 6, 2, 0],
@@ -1365,6 +1414,42 @@ final class GeometryAndIOTests: XCTestCase {
             searchRadius: 5
         )
 
+        XCTAssertEqual(map.voxels, [0, 1, 1, 1, 0, 0])
+        XCTAssertTrue(vm.statusMessage.contains("SUV gradient"))
+    }
+
+    @MainActor
+    func testBackgroundSUVGradientUsesPETOverlayForCTLabelMap() async throws {
+        let ct = ImageVolume(
+            pixels: [0, 0, 0, 0, 0, 0],
+            depth: 1,
+            height: 1,
+            width: 6,
+            modality: "CT"
+        )
+        let pet = ImageVolume(
+            pixels: [0, 3, 8, 6, 2, 0],
+            depth: 1,
+            height: 1,
+            width: 6,
+            modality: "PT"
+        )
+        let vm = ViewerViewModel()
+        vm.currentVolume = ct
+        let pair = FusionPair(base: ct, overlay: pet)
+        pair.resampledOverlay = pet
+        vm.fusion = pair
+        let map = vm.labeling.createLabelMap(for: ct)
+
+        vm.startGradientActiveLabelAroundSeed(
+            seed: (z: 0, y: 0, x: 2),
+            minimumValue: 2.5,
+            gradientCutoffFraction: 0.75,
+            searchRadius: 5
+        )
+
+        XCTAssertNotNil(vm.volumeOperationStatus)
+        try await waitForVolumeOperation(vm)
         XCTAssertEqual(map.voxels, [0, 1, 1, 1, 0, 0])
         XCTAssertTrue(vm.statusMessage.contains("SUV gradient"))
     }

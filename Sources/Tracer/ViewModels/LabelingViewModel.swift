@@ -176,6 +176,48 @@ public final class LabelingViewModel: ObservableObject {
         recordVoxelChanges(map: map, name: name, before: before)
     }
 
+    @discardableResult
+    public func applyVoxelReplacement(mapID: UUID,
+                                      voxels: [UInt16],
+                                      diff: VoxelEditDiff,
+                                      name: String) -> Bool {
+        guard let map = labelMaps.first(where: { $0.id == mapID }),
+              voxels.count == map.voxels.count else {
+            return false
+        }
+
+        if diff.isEmpty {
+            return false
+        }
+
+        if diff.overflowed {
+            clearHistory()
+        } else {
+            guard diff.indices.count == diff.before.count,
+                  diff.indices.count == diff.after.count else {
+                return false
+            }
+            dropRedoStack()
+            let record = VoxelEditRecord(
+                mapID: map.id,
+                name: name,
+                indices: diff.indices,
+                before: diff.before,
+                after: diff.after
+            )
+            undoStack.append(record)
+            currentHistoryBytes += record.byteSize
+            trimHistoryToLimits()
+        }
+
+        map.voxels = voxels
+        activeLabelMap = map
+        hasUnsavedChanges = true
+        map.objectWillChange.send()
+        refreshHistoryDepths()
+        return true
+    }
+
     public func markSaved() {
         hasUnsavedChanges = false
     }

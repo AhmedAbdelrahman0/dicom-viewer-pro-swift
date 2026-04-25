@@ -119,8 +119,8 @@ public extension ViewerViewModel {
                 ensureLabelMapForAssistant(defaultPreset: defaultPresetFor(volume: volume), warnings: &warnings)
                 labeling.thresholdValue = threshold
                 labeling.labelingTool = .threshold
-                thresholdActiveLabel(atOrAbove: threshold)
-                applied.append("Segmented voxels at or above \(String(format: "%.2f", threshold)) using the active SUV/intensity calculation.")
+                startThresholdActiveLabel(atOrAbove: threshold)
+                applied.append("Started segmentation for voxels at or above \(String(format: "%.2f", threshold)) using the active SUV/intensity calculation.")
 
             case .setPercentOfMax(let percent):
                 labeling.percentOfMax = percent
