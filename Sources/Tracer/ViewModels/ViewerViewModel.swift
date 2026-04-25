@@ -307,6 +307,23 @@ public final class ViewerViewModel: ObservableObject {
         }
     }
 
+    public func setDisplayOrientationCorrection(ap: Bool, rl: Bool, name: String = "Display positioning") {
+        let before = (correctAnteriorPosteriorDisplay, correctRightLeftDisplay)
+        let after = (ap, rl)
+        correctAnteriorPosteriorDisplay = ap
+        correctRightLeftDisplay = rl
+        recordHistoryIfNeeded(
+            name: name,
+            changed: before.0 != after.0 || before.1 != after.1
+        ) { [weak self] in
+            self?.correctAnteriorPosteriorDisplay = before.0
+            self?.correctRightLeftDisplay = before.1
+        } redo: { [weak self] in
+            self?.correctAnteriorPosteriorDisplay = after.0
+            self?.correctRightLeftDisplay = after.1
+        }
+    }
+
     public func setLinkZoomPanAcrossPanes(_ enabled: Bool) {
         let before = linkZoomPanAcrossPanes
         linkZoomPanAcrossPanes = enabled
@@ -601,7 +618,9 @@ public final class ViewerViewModel: ObservableObject {
             overlayLevel: overlayLevel,
             hangingPanes: hangingPanes,
             annotations: annotations,
-            labelVoxels: Dictionary(uniqueKeysWithValues: labeling.labelMaps.map { ($0.id, $0.voxels) })
+            labelVoxels: labeling.labelMaps.reduce(into: [:]) { voxelsByMapID, map in
+                voxelsByMapID[map.id] = map.voxels
+            }
         )
     }
 

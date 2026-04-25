@@ -497,14 +497,12 @@ public struct ContentView: View {
             ))
             Divider()
             Button {
-                vm.setCorrectAnteriorPosteriorDisplay(false)
-                vm.setCorrectRightLeftDisplay(false)
+                vm.setDisplayOrientationCorrection(ap: false, rl: false, name: "Native geometry")
             } label: {
                 Label("Native Geometry", systemImage: "arrow.counterclockwise")
             }
             Button {
-                vm.setCorrectAnteriorPosteriorDisplay(true)
-                vm.setCorrectRightLeftDisplay(false)
+                vm.setDisplayOrientationCorrection(ap: true, rl: false, name: "Radiology default")
             } label: {
                 Label("Radiology Default", systemImage: "viewfinder")
             }

@@ -89,6 +89,67 @@ final class GeometryAndIOTests: XCTestCase {
     }
 
     @MainActor
+    func testDisplayOrientationPresetIsSingleUndoableChange() {
+        let vm = ViewerViewModel()
+        let volume = ImageVolume(
+            pixels: [Float](repeating: 0, count: 8),
+            depth: 2,
+            height: 2,
+            width: 2,
+            direction: matrix_identity_double3x3
+        )
+        vm.displayVolume(volume)
+
+        vm.setDisplayOrientationCorrection(ap: false, rl: true, name: "Test orientation")
+
+        XCTAssertFalse(vm.correctAnteriorPosteriorDisplay)
+        XCTAssertTrue(vm.correctRightLeftDisplay)
+        XCTAssertEqual(vm.appUndoDepth, 1)
+
+        vm.undoLastEdit()
+        XCTAssertTrue(vm.correctAnteriorPosteriorDisplay)
+        XCTAssertFalse(vm.correctRightLeftDisplay)
+
+        vm.redoLastEdit()
+        XCTAssertFalse(vm.correctAnteriorPosteriorDisplay)
+        XCTAssertTrue(vm.correctRightLeftDisplay)
+    }
+
+    @MainActor
+    func testDisplayOrientationCorrectionHandlesEveryPlaneAndToggleCombination() throws {
+        let vm = ViewerViewModel()
+        let direction = simd_double3x3(
+            SIMD3<Double>(0, -1, 0),
+            SIMD3<Double>(-1, 0, 0),
+            SIMD3<Double>(0, 0, 1)
+        )
+        let volume = ImageVolume(
+            pixels: [Float](repeating: 0, count: 27),
+            depth: 3,
+            height: 3,
+            width: 3,
+            direction: direction
+        )
+        vm.displayVolume(volume)
+
+        for ap in [false, true] {
+            for rl in [false, true] {
+                vm.setDisplayOrientationCorrection(ap: ap, rl: rl, name: "Test orientation")
+                for axis in 0..<3 {
+                    _ = vm.displayTransform(for: axis)
+                    let axes = try XCTUnwrap(vm.displayAxes(for: axis))
+                    XCTAssertFalse(axes.right.x.isNaN)
+                    XCTAssertFalse(axes.right.y.isNaN)
+                    XCTAssertFalse(axes.right.z.isNaN)
+                    XCTAssertFalse(axes.down.x.isNaN)
+                    XCTAssertFalse(axes.down.y.isNaN)
+                    XCTAssertFalse(axes.down.z.isNaN)
+                }
+            }
+        }
+    }
+
+    @MainActor
     func testPETOverlayRangeUsesExplicitSUVMinMax() {
         let vm = ViewerViewModel()
 
@@ -2235,9 +2296,32 @@ final class GeometryAndIOTests: XCTestCase {
     func testNNUnetRunnerReportsAvailabilityFromPATH() {
         // We don't assume nnUNetv2_predict is installed in CI — just prove
         // the detector runs without crashing and returns a reasonable value.
-        let located = NNUnetRunner.locatePredictBinary(override: "/bin/does-not-exist")
+        let located = NNUnetRunner.locatePredictBinary(
+            override: "/bin/does-not-exist",
+            environment: ["PATH": "", "HOME": "/tmp/does-not-exist"]
+        )
         XCTAssertNil(located,
                      "Explicit bad path override must not be resolved as valid")
+    }
+
+    func testNNUnetRunnerFindsPredictBinaryFromEnvironmentPATHWithoutShellingOut() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("nnunet-path-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let fakeBinary = dir.appendingPathComponent("nnUNetv2_predict")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: fakeBinary)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: fakeBinary.path
+        )
+
+        let located = NNUnetRunner.locatePredictBinary(
+            environment: ["PATH": dir.path, "HOME": "/tmp/does-not-exist"]
+        )
+
+        XCTAssertEqual(located, fakeBinary.path)
     }
 
     // MARK: - Recent volumes store

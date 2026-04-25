@@ -130,49 +130,50 @@ public final class NNUnetRunner: @unchecked Sendable {
 
     /// Search PATH and conventional Python-env locations for
     /// `nnUNetv2_predict`. Returns the absolute path when found.
-    public static func locatePredictBinary(override: String? = nil) -> String? {
-        if let override, FileManager.default.isExecutableFile(atPath: override) {
-            return override
+    public static func locatePredictBinary(
+        override: String? = nil,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> String? {
+        let fm = FileManager.default
+        if let override = override?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !override.isEmpty {
+            let expanded = (override as NSString).expandingTildeInPath
+            return fm.isExecutableFile(atPath: expanded) ? expanded : nil
         }
 
-        let fm = FileManager.default
-        let candidates = [
+        var candidates: [String] = []
+        var seen = Set<String>()
+        func appendCandidate(_ rawPath: String) {
+            guard !rawPath.isEmpty else { return }
+            let expanded = (rawPath as NSString).expandingTildeInPath
+            guard seen.insert(expanded).inserted else { return }
+            candidates.append(expanded)
+        }
+
+        let binaryName = "nnUNetv2_predict"
+        let pathDirs = (environment["PATH"] ?? "")
+            .split(separator: ":")
+            .map(String.init)
+        for dir in pathDirs {
+            appendCandidate(URL(fileURLWithPath: dir).appendingPathComponent(binaryName).path)
+        }
+
+        let home = environment["HOME"] ?? NSHomeDirectory()
+        [
             "/opt/homebrew/bin/nnUNetv2_predict",
             "/usr/local/bin/nnUNetv2_predict",
             "/usr/bin/nnUNetv2_predict",
-            (ProcessInfo.processInfo.environment["HOME"] ?? "") + "/miniforge3/envs/nnunet/bin/nnUNetv2_predict",
-            (ProcessInfo.processInfo.environment["HOME"] ?? "") + "/miniconda3/envs/nnunet/bin/nnUNetv2_predict",
-            (ProcessInfo.processInfo.environment["HOME"] ?? "") + "/.venv/bin/nnUNetv2_predict",
-        ]
+            "\(home)/miniforge3/envs/nnunet/bin/nnUNetv2_predict",
+            "\(home)/miniconda3/envs/nnunet/bin/nnUNetv2_predict",
+            "\(home)/mambaforge/envs/nnunet/bin/nnUNetv2_predict",
+            "\(home)/.conda/envs/nnunet/bin/nnUNetv2_predict",
+            "\(home)/.venv/bin/nnUNetv2_predict",
+        ].forEach(appendCandidate)
+
         for path in candidates where fm.isExecutableFile(atPath: path) {
             return path
         }
-
-        // Fallback: `which` via /usr/bin/env — respects user's login shell PATH.
-        if let resolved = whichBinary(name: "nnUNetv2_predict") {
-            return resolved
-        }
         return nil
-    }
-
-    private static func whichBinary(name: String) -> String? {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        proc.arguments = ["which", name]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = Pipe()
-        do {
-            try proc.run()
-            proc.waitUntilExit()
-            guard proc.terminationStatus == 0 else { return nil }
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let raw = String(data: data, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            return (raw?.isEmpty == false) ? raw : nil
-        } catch {
-            return nil
-        }
     }
 
     public func isAvailable() -> Bool {
@@ -371,6 +372,16 @@ public final class NNUnetRunner: @unchecked Sendable {
         proc.standardOutput = stdoutPipe
         proc.standardError = stderrPipe
 
+        // Drain both pipes while the process runs. Some nnU-Net/Python setups
+        // are surprisingly chatty on stdout; waiting until exit can fill the
+        // pipe buffer and stall inference indefinitely.
+        let stdoutBuffer = StreamedBuffer(sink: { _ in })
+        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            guard !chunk.isEmpty else { return }
+            stdoutBuffer.append(chunk)
+        }
+
         // Stream stderr line-by-line to the log sink.
         let stderrBuffer = StreamedBuffer(sink: logSink)
         stderrPipe.fileHandleForReading.readabilityHandler = { handle in
@@ -402,11 +413,13 @@ public final class NNUnetRunner: @unchecked Sendable {
         )
 
         // Drain.
+        stdoutPipe.fileHandleForReading.readabilityHandler = nil
         stderrPipe.fileHandleForReading.readabilityHandler = nil
+        let remainingStdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        stdoutBuffer.append(remainingStdout)
         let remainingStderr = stderrPipe.fileHandleForReading.readDataToEndOfFile()
         stderrBuffer.append(remainingStderr)
-        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        let stdoutStr = String(data: stdoutData, encoding: .utf8) ?? ""
+        let stdoutStr = stdoutBuffer.flush()
 
         let wasCancelled = withProcessLock {
             let value = cancelled
@@ -480,7 +493,7 @@ private final class StreamedBuffer: @unchecked Sendable {
         var lines = combined.split(separator: "\n", omittingEmptySubsequences: false)
             .map(String.init)
         if !combined.hasSuffix("\n") {
-            carry = lines.removeLast()
+            carry = lines.popLast() ?? ""
         } else {
             carry = ""
         }

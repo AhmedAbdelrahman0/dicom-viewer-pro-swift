@@ -136,11 +136,12 @@ public struct NNUnetPanel: View {
             Toggle("Disable test-time augmentation (≈ 8× faster)",
                    isOn: $nnunet.disableTTA)
 
+            let subprocessAvailable = nnunet.isSubprocessAvailable
             HStack(spacing: 6) {
                 Circle()
-                    .fill(nnunet.isSubprocessAvailable ? Color.green : Color.orange)
+                    .fill(subprocessAvailable ? Color.green : Color.orange)
                     .frame(width: 8, height: 8)
-                Text(nnunet.isSubprocessAvailable
+                Text(subprocessAvailable
                      ? "nnUNetv2_predict found"
                      : "nnUNetv2_predict not found — install via `pip install nnunetv2`")
                     .font(.system(size: 10))
