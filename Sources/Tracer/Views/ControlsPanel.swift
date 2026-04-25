@@ -217,6 +217,8 @@ private struct FusionTab: View {
                 .background(Color.secondary.opacity(0.1))
                 .cornerRadius(6)
 
+                fusionLayerStack(pair)
+
                 Toggle("Show PET overlay", isOn: Binding(
                     get: { pair.overlayVisible },
                     set: { pair.overlayVisible = $0; pair.objectWillChange.send() }
@@ -255,6 +257,26 @@ private struct FusionTab: View {
                         }
                     }
                     .labelsHidden()
+                }
+
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 5) {
+                    ForEach(petPaletteShortlist) { c in
+                        Button {
+                            vm.overlayColormap = c
+                            vm.fusion?.colormap = c
+                        } label: {
+                            HStack(spacing: 5) {
+                                paletteSwatch(c)
+                                Text(shortPaletteName(c))
+                                    .font(.system(size: 10, weight: .medium))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.75)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+                    }
                 }
 
                 // Overlay W/L
@@ -339,6 +361,89 @@ private struct FusionTab: View {
             }
 
             Spacer()
+        }
+    }
+
+    private var petPaletteShortlist: [Colormap] {
+        [.tracerPET, .petRainbow, .petHotIron, .petMagma, .petViridis, .hot]
+    }
+
+    private func fusionLayerStack(_ pair: FusionPair) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Label("Layer stack", systemImage: "square.3.layers.3d.down.right")
+                    .font(.system(size: 11, weight: .semibold))
+                Spacer()
+                Text("top → bottom")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+            layerRow(name: "Labels", detail: "contours above fusion", color: .green, opacity: 1.0)
+            layerRow(
+                name: Modality.normalize(pair.overlayVolume.modality).displayName,
+                detail: "\(pair.colormap.displayName) · \(Int(pair.opacity * 100))%",
+                color: .orange,
+                opacity: pair.overlayVisible ? 1.0 : 0.35
+            )
+            layerRow(
+                name: Modality.normalize(pair.baseVolume.modality).displayName,
+                detail: pair.baseVolume.seriesDescription.isEmpty ? "base anatomy" : pair.baseVolume.seriesDescription,
+                color: TracerTheme.accent,
+                opacity: 1.0
+            )
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.black.opacity(0.18))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(TracerTheme.hairline, lineWidth: 1)
+        )
+        .cornerRadius(6)
+    }
+
+    private func layerRow(name: String, detail: String, color: Color, opacity: Double) -> some View {
+        HStack(spacing: 7) {
+            Circle()
+                .fill(color.opacity(opacity))
+                .frame(width: 8, height: 8)
+            Text(name)
+                .font(.system(size: 11, weight: .semibold))
+                .frame(width: 46, alignment: .leading)
+            Text(detail)
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func paletteSwatch(_ colormap: Colormap) -> some View {
+        Canvas { context, size in
+            let lut = ColormapLUT.generate(colormap, size: 32)
+            let step = size.width / CGFloat(lut.count)
+            for (index, color) in lut.enumerated() {
+                let rect = CGRect(x: CGFloat(index) * step, y: 0, width: step + 0.5, height: size.height)
+                context.fill(Path(rect), with: .color(Color(
+                    red: Double(color.0) / 255,
+                    green: Double(color.1) / 255,
+                    blue: Double(color.2) / 255
+                )))
+            }
+        }
+        .frame(width: 30, height: 10)
+        .cornerRadius(2)
+    }
+
+    private func shortPaletteName(_ colormap: Colormap) -> String {
+        switch colormap {
+        case .tracerPET: return "Tracer"
+        case .petRainbow: return "Rainbow"
+        case .petHotIron: return "Hot Iron"
+        case .petMagma: return "Magma"
+        case .petViridis: return "Viridis"
+        default: return colormap.displayName
         }
     }
 

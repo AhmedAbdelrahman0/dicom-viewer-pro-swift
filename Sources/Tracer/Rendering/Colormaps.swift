@@ -11,6 +11,17 @@ public enum ColormapLUT {
             let (r, g, b): (Double, Double, Double)
 
             switch colormap {
+            case .tracerPET:
+                (r, g, b) = interpolate(t, stops: [
+                    (0.00, 0.00, 0.00, 0.06),
+                    (0.16, 0.12, 0.00, 0.38),
+                    (0.34, 0.00, 0.58, 0.98),
+                    (0.52, 0.00, 0.94, 0.82),
+                    (0.68, 0.22, 1.00, 0.18),
+                    (0.84, 1.00, 0.78, 0.00),
+                    (1.00, 1.00, 1.00, 0.96)
+                ])
+
             case .hot:
                 r = min(1.0, t * 3.0)
                 g = max(0.0, min(1.0, (t - 0.333) * 3.0))
@@ -26,6 +37,35 @@ public enum ColormapLUT {
                 } else {
                     (r, g, b) = (1, 1 - (t - 0.75) * 4, 0)
                 }
+
+            case .petHotIron:
+                (r, g, b) = interpolate(t, stops: [
+                    (0.00, 0.00, 0.00, 0.00),
+                    (0.20, 0.24, 0.00, 0.00),
+                    (0.42, 0.78, 0.08, 0.00),
+                    (0.66, 1.00, 0.55, 0.00),
+                    (0.84, 1.00, 0.92, 0.16),
+                    (1.00, 1.00, 1.00, 1.00)
+                ])
+
+            case .petMagma:
+                (r, g, b) = interpolate(t, stops: [
+                    (0.00, 0.00, 0.00, 0.02),
+                    (0.18, 0.16, 0.02, 0.32),
+                    (0.38, 0.50, 0.06, 0.52),
+                    (0.58, 0.88, 0.18, 0.34),
+                    (0.78, 1.00, 0.52, 0.10),
+                    (1.00, 1.00, 0.96, 0.72)
+                ])
+
+            case .petViridis:
+                (r, g, b) = interpolate(t, stops: [
+                    (0.00, 0.27, 0.00, 0.33),
+                    (0.25, 0.23, 0.32, 0.55),
+                    (0.50, 0.13, 0.57, 0.55),
+                    (0.75, 0.47, 0.82, 0.32),
+                    (1.00, 0.99, 0.91, 0.14)
+                ])
 
             case .jet:
                 r = max(0, min(1, 1.5 - abs(t - 0.75) * 4))
@@ -84,5 +124,29 @@ public enum ColormapLUT {
         }
 
         return lut
+    }
+
+    private static func interpolate(
+        _ t: Double,
+        stops: [(Double, Double, Double, Double)]
+    ) -> (Double, Double, Double) {
+        guard let first = stops.first else { return (t, t, t) }
+        guard let last = stops.last else { return (first.1, first.2, first.3) }
+        if t <= first.0 { return (first.1, first.2, first.3) }
+        if t >= last.0 { return (last.1, last.2, last.3) }
+
+        for index in 1..<stops.count {
+            let prev = stops[index - 1]
+            let next = stops[index]
+            guard t <= next.0 else { continue }
+            let span = max(next.0 - prev.0, 0.0001)
+            let s = max(0, min(1, (t - prev.0) / span))
+            return (
+                prev.1 + (next.1 - prev.1) * s,
+                prev.2 + (next.2 - prev.2) * s,
+                prev.3 + (next.3 - prev.3) * s
+            )
+        }
+        return (last.1, last.2, last.3)
     }
 }

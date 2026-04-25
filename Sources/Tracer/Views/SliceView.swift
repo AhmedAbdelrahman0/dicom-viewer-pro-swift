@@ -20,6 +20,11 @@ public struct SliceView: View {
     @State private var activeMeasurement: Annotation?
     @State private var dragStart: CGPoint?
     @State private var lastPaintPoint: (Int, Int)?
+    #if os(macOS)
+    @State private var isPointerInsideViewport = false
+    @State private var scrollMonitor: Any?
+    @State private var wheelAccumulator: CGFloat = 0
+    #endif
 
     /// Voxel under the mouse cursor — drives the live intensity / SUV /
     /// world-coordinate badge in the upper-right of the slice view.
@@ -96,23 +101,46 @@ public struct SliceView: View {
                         Spacer()
                     }
                     .padding(6)
+
+                    if let badge = fusionLayerBadge {
+                        VStack {
+                            Spacer()
+                            HStack {
+                                badge
+                                Spacer()
+                            }
+                        }
+                        .padding(8)
+                    }
                 }
                 .clipped()
                 .contentShape(Rectangle())
-                .gesture(scrollGesture(geo: geo))
+                .gesture(magnificationGesture())
                 .gesture(dragGesture(geo: geo))
                 .onTapGesture(count: 2) { resetView() }
                 .onContinuousHover { phase in
                     switch phase {
                     case .active(let location):
+                        #if os(macOS)
+                        isPointerInsideViewport = true
+                        #endif
                         hoverSample = sampleVoxel(at: location, in: geo.size)
                     case .ended:
+                        #if os(macOS)
+                        isPointerInsideViewport = false
+                        #endif
                         hoverSample = nil
                     }
                 }
                 .contextMenu { contextMenuItems() }
                 #if os(macOS)
-                .onAppear { NSCursor.setHiddenUntilMouseMoves(false) }
+                .onAppear {
+                    installScrollWheelMonitor()
+                    NSCursor.setHiddenUntilMouseMoves(false)
+                }
+                .onDisappear {
+                    removeScrollWheelMonitor()
+                }
                 #endif
             }
             .background(TracerTheme.viewportBackground)
@@ -205,6 +233,33 @@ public struct SliceView: View {
         .cornerRadius(4)
     }
 
+    private var fusionLayerBadge: AnyView? {
+        guard let pair = vm.fusion, pair.overlayVisible else { return nil }
+        let overlay = Modality.normalize(pair.overlayVolume.modality).displayName
+        let base = Modality.normalize(pair.baseVolume.modality).displayName
+        let opacity = Int(pair.opacity * 100)
+        return AnyView(
+            HStack(spacing: 6) {
+                Image(systemName: "square.3.layers.3d.down.right")
+                    .foregroundColor(TracerTheme.accentBright)
+                Text("Top \(overlay) \(opacity)%")
+                    .foregroundColor(.white)
+                Text("over \(base)")
+                    .foregroundColor(.secondary)
+                Circle()
+                    .fill(Color.orange)
+                    .frame(width: 7, height: 7)
+                Text(pair.colormap.displayName)
+                    .foregroundColor(.secondary)
+            }
+            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+            .padding(.vertical, 4)
+            .padding(.horizontal, 7)
+            .background(Color.black.opacity(0.58))
+            .cornerRadius(5)
+        )
+    }
+
     private func sliceDimensions(for v: ImageVolume) -> (Int, Int) {
         switch axis {
         case 0: return (v.height, v.depth)
@@ -248,9 +303,13 @@ public struct SliceView: View {
             return nil
         }
 
-        let px = Int(localX.rounded(.down))
+        var px = Int(localX.rounded(.down))
         var py = Int(localY.rounded(.down))
-        if axis == 0 || axis == 1 {
+        let transform = vm.displayTransform(for: axis, volume: volume)
+        if transform.flipHorizontal {
+            px = Int(imgW) - 1 - px
+        }
+        if transform.flipVertical {
             py = Int(imgH) - 1 - py
         }
         let (vz, vy, vx) = volumeVoxel(px: px, py: py, sliceIndex: vm.sliceIndices[axis])
@@ -431,19 +490,9 @@ public struct SliceView: View {
             return fallbackOrientationLetters(for: axis)
         }
 
-        let rightVector: SIMD3<Double>
-        let downVector: SIMD3<Double>
-        switch axis {
-        case 0:
-            rightVector = volume.direction[1]
-            downVector = -volume.direction[2]
-        case 1:
-            rightVector = volume.direction[0]
-            downVector = -volume.direction[2]
-        default:
-            rightVector = volume.direction[0]
-            downVector = volume.direction[1]
-        }
+        let axes = SliceDisplayTransform.displayAxes(axis: axis, volume: volume)
+        let rightVector = axes.right
+        let downVector = axes.down
 
         return (
             top: patientLetter(for: -downVector),
@@ -462,27 +511,55 @@ public struct SliceView: View {
     }
 
     private func patientLetter(for vector: SIMD3<Double>) -> String {
-        let absX = abs(vector.x)
-        let absY = abs(vector.y)
-        let absZ = abs(vector.z)
-        if absX >= absY && absX >= absZ {
-            return vector.x >= 0 ? "L" : "R"
-        }
-        if absY >= absX && absY >= absZ {
-            return vector.y >= 0 ? "P" : "A"
-        }
-        return vector.z >= 0 ? "H" : "F"
+        SliceDisplayTransform.patientLetter(for: vector)
     }
 
     // MARK: - Gestures
 
-    private func scrollGesture(geo: GeometryProxy) -> some Gesture {
+    private func magnificationGesture() -> some Gesture {
         // Magnification for pinch-to-zoom
         MagnificationGesture()
             .onChanged { scale in
                 zoom = max(0.25, min(10.0, scale))
             }
     }
+
+    #if os(macOS)
+    private func installScrollWheelMonitor() {
+        guard scrollMonitor == nil else { return }
+        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+            guard isPointerInsideViewport, vm.currentVolume != nil else { return event }
+            handleScrollWheel(event)
+            return nil
+        }
+    }
+
+    private func removeScrollWheelMonitor() {
+        if let scrollMonitor {
+            NSEvent.removeMonitor(scrollMonitor)
+            self.scrollMonitor = nil
+        }
+    }
+
+    private func handleScrollWheel(_ event: NSEvent) {
+        let rawDelta = event.scrollingDeltaY != 0 ? event.scrollingDeltaY : event.deltaY
+        guard abs(rawDelta) > 0.01 else { return }
+
+        if event.modifierFlags.contains(.shift) || event.modifierFlags.contains(.command) {
+            let sensitivity = event.hasPreciseScrollingDeltas ? 0.0025 : 0.08
+            let factor = max(0.2, 1.0 + Double(rawDelta) * sensitivity)
+            zoom = CGFloat(max(0.25, min(10.0, Double(zoom) * factor)))
+            return
+        }
+
+        let threshold: CGFloat = event.hasPreciseScrollingDeltas ? 14 : 1
+        wheelAccumulator += rawDelta
+        let steps = Int(wheelAccumulator / threshold)
+        guard steps != 0 else { return }
+        wheelAccumulator -= CGFloat(steps) * threshold
+        vm.scrollAllSlices(delta: steps)
+    }
+    #endif
 
     private func dragGesture(geo: GeometryProxy) -> some Gesture {
         DragGesture(minimumDistance: 0)
@@ -638,15 +715,19 @@ public struct SliceView: View {
         let localX = point.x - originX
         let localY = point.y - originY
 
-        let px = Int(localX / fit)
-        var py = Int(localY / fit)
+        var px = Int((localX / fit).rounded(.down))
+        var py = Int((localY / fit).rounded(.down))
 
-        // Account for vertical flip used on sagittal/coronal
-        if axis == 0 || axis == 1 {
+        guard px >= 0, py >= 0, px < Int(imgW), py < Int(imgH) else { return nil }
+
+        let transform = vm.displayTransform(for: axis, volume: volume)
+        if transform.flipHorizontal {
+            px = Int(imgW) - 1 - px
+        }
+        if transform.flipVertical {
             py = Int(imgH) - 1 - py
         }
 
-        guard px >= 0, py >= 0, px < Int(imgW), py < Int(imgH) else { return nil }
         return (px, py)
     }
 
@@ -807,8 +888,15 @@ public struct SliceView: View {
     }
 
     private func displayPoint(for point: CGPoint, imageSize: CGSize) -> CGPoint {
-        guard axis == 0 || axis == 1 else { return point }
-        return CGPoint(x: point.x, y: imageSize.height - 1 - point.y)
+        let transform = vm.displayTransform(for: axis)
+        var display = point
+        if transform.flipHorizontal {
+            display.x = imageSize.width - 1 - display.x
+        }
+        if transform.flipVertical {
+            display.y = imageSize.height - 1 - display.y
+        }
+        return display
     }
 
     // MARK: - Reset

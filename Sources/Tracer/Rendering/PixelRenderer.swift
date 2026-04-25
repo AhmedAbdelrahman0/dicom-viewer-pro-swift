@@ -107,8 +107,20 @@ public enum PixelRenderer {
 
 /// Apply flip/rotation in-place on a flat pixel buffer.
 public enum SliceTransform {
-    public static func flipVertical(_ pixels: [Float], width: Int, height: Int) -> [Float] {
-        var out = [Float](repeating: 0, count: pixels.count)
+    public static func apply<T>(_ pixels: [T], width: Int, height: Int, transform: SliceDisplayTransform) -> [T] {
+        var out = pixels
+        if transform.flipHorizontal {
+            out = flipHorizontal(out, width: width, height: height)
+        }
+        if transform.flipVertical {
+            out = flipVertical(out, width: width, height: height)
+        }
+        return out
+    }
+
+    public static func flipVertical<T>(_ pixels: [T], width: Int, height: Int) -> [T] {
+        guard pixels.count == width * height else { return pixels }
+        var out = pixels
         for row in 0..<height {
             let srcStart = row * width
             let dstStart = (height - 1 - row) * width
@@ -119,8 +131,9 @@ public enum SliceTransform {
         return out
     }
 
-    public static func flipHorizontal(_ pixels: [Float], width: Int, height: Int) -> [Float] {
-        var out = [Float](repeating: 0, count: pixels.count)
+    public static func flipHorizontal<T>(_ pixels: [T], width: Int, height: Int) -> [T] {
+        guard pixels.count == width * height else { return pixels }
+        var out = pixels
         for row in 0..<height {
             for col in 0..<width {
                 out[row * width + col] = pixels[row * width + (width - 1 - col)]

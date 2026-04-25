@@ -1,15 +1,20 @@
 import Foundation
 
 public enum Colormap: String, CaseIterable, Identifiable {
-    case hot, petRainbow = "pet_rainbow", jet, bone, coolWarm = "cool_warm"
+    case tracerPET = "tracer_pet", petRainbow = "pet_rainbow", petHotIron = "pet_hot_iron", petMagma = "pet_magma", petViridis = "pet_viridis"
+    case hot, jet, bone, coolWarm = "cool_warm"
     case fire, ice, grayscale, invertedGray = "inverted_gray"
 
     public var id: String { rawValue }
 
     public var displayName: String {
         switch self {
+        case .tracerPET:    return "Tracer PET"
         case .hot:          return "Hot"
         case .petRainbow:   return "PET Rainbow"
+        case .petHotIron:   return "PET Hot Iron"
+        case .petMagma:     return "PET Magma"
+        case .petViridis:   return "PET Viridis"
         case .jet:          return "Jet"
         case .bone:         return "Bone"
         case .coolWarm:     return "Cool/Warm"
@@ -27,7 +32,7 @@ public final class FusionPair: ObservableObject {
     @Published public var overlayVolume: ImageVolume
 
     @Published public var opacity: Double = 0.5
-    @Published public var colormap: Colormap = .hot
+    @Published public var colormap: Colormap = .tracerPET
     @Published public var overlayWindow: Double = 6
     @Published public var overlayLevel: Double = 3
     @Published public var overlayVisible: Bool = true

@@ -31,6 +31,45 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(roundTrip.z, voxel.z, accuracy: 1e-9)
     }
 
+    func testSliceDisplayTransformKeepsCanonicalRadiologicalOrientation() {
+        let volume = ImageVolume(
+            pixels: [Float](repeating: 0, count: 8),
+            depth: 2,
+            height: 2,
+            width: 2,
+            direction: matrix_identity_double3x3
+        )
+
+        XCTAssertEqual(SliceDisplayTransform.canonical(axis: 0, volume: volume),
+                       SliceDisplayTransform(flipHorizontal: false, flipVertical: true))
+        XCTAssertEqual(SliceDisplayTransform.canonical(axis: 1, volume: volume),
+                       SliceDisplayTransform(flipHorizontal: false, flipVertical: true))
+        XCTAssertEqual(SliceDisplayTransform.canonical(axis: 2, volume: volume),
+                       SliceDisplayTransform(flipHorizontal: false, flipVertical: false))
+    }
+
+    func testSliceDisplayTransformCorrectsAnteriorPosteriorSignFlip() {
+        let direction = simd_double3x3(
+            SIMD3<Double>(1, 0, 0),
+            SIMD3<Double>(0, -1, 0),
+            SIMD3<Double>(0, 0, 1)
+        )
+        let volume = ImageVolume(
+            pixels: [Float](repeating: 0, count: 8),
+            depth: 2,
+            height: 2,
+            width: 2,
+            direction: direction
+        )
+
+        let sagittal = SliceDisplayTransform.canonical(axis: 0, volume: volume)
+        let axial = SliceDisplayTransform.canonical(axis: 2, volume: volume)
+
+        XCTAssertTrue(sagittal.flipHorizontal)
+        XCTAssertTrue(axial.flipVertical)
+        XCTAssertEqual(SliceDisplayTransform.patientLetter(for: SliceDisplayTransform.displayAxes(axis: 2, volume: volume).down), "P")
+    }
+
     func testNIfTILoaderPreservesSFormAsLPSGeometry() throws {
         var data = Data(count: 352)
         data.writeInt32LE(348, at: 0)

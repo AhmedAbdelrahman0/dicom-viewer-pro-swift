@@ -2,6 +2,7 @@ import Foundation
 import SwiftUI
 import Combine
 import SwiftData
+import simd
 
 public enum ViewerTool: String, CaseIterable, Identifiable {
     case wl, pan, zoom, distance, angle, area
@@ -108,7 +109,7 @@ public final class ViewerViewModel: ObservableObject {
 
     // Overlay display settings
     @Published public var overlayOpacity: Double = 0.5
-    @Published public var overlayColormap: Colormap = .hot
+    @Published public var overlayColormap: Colormap = .tracerPET
     @Published public var overlayWindow: Double = 6
     @Published public var overlayLevel: Double = 3
     @Published public var suvSettings = SUVCalculationSettings()
@@ -625,7 +626,7 @@ public final class ViewerViewModel: ObservableObject {
     private func applyFusionDisplayDefaults(for overlay: ImageVolume, pair: FusionPair) {
         if Modality.normalize(overlay.modality) == .PT {
             overlayOpacity = 0.55
-            overlayColormap = .petRainbow
+            overlayColormap = .tracerPET
             if overlay.suvScaleFactor != nil {
                 suvSettings.mode = .manualScale
                 suvSettings.manualScaleFactor = overlay.suvScaleFactor ?? 1
@@ -751,6 +752,14 @@ public final class ViewerViewModel: ObservableObject {
         sliceIndices[axis] = Swift.max(0, Swift.min(max, sliceIndices[axis] + delta))
     }
 
+    public func scrollAllSlices(delta: Int) {
+        guard let v = currentVolume, delta != 0 else { return }
+        let maxima = [v.width - 1, v.height - 1, v.depth - 1]
+        for axis in 0..<3 {
+            sliceIndices[axis] = Swift.max(0, Swift.min(maxima[axis], sliceIndices[axis] + delta))
+        }
+    }
+
     public func setSlice(axis: Int, index: Int) {
         guard let v = currentVolume else { return }
         let max: Int
@@ -760,6 +769,16 @@ public final class ViewerViewModel: ObservableObject {
         default: max = v.depth - 1
         }
         sliceIndices[axis] = Swift.max(0, Swift.min(max, index))
+    }
+
+    public func displayTransform(for axis: Int, volume: ImageVolume? = nil) -> SliceDisplayTransform {
+        guard let volume = volume ?? currentVolume else { return .identity }
+        return SliceDisplayTransform.canonical(axis: axis, volume: volume)
+    }
+
+    public func displayAxes(for axis: Int, volume: ImageVolume? = nil) -> (right: SIMD3<Double>, down: SIMD3<Double>)? {
+        guard let volume = volume ?? currentVolume else { return nil }
+        return SliceDisplayTransform.displayAxes(axis: axis, volume: volume)
     }
 
     // MARK: - W/L manipulation
@@ -1018,10 +1037,8 @@ public final class ViewerViewModel: ObservableObject {
         var pixels = slice.pixels
         let w = slice.width, h = slice.height
 
-        // Default orientation: flip vertical for sag/cor so head is at top
-        if axis == 0 || axis == 1 {
-            pixels = SliceTransform.flipVertical(pixels, width: w, height: h)
-        }
+        pixels = SliceTransform.apply(pixels, width: w, height: h,
+                                      transform: displayTransform(for: axis, volume: v))
 
         return PixelRenderer.makeGrayImage(
             pixels: pixels, width: w, height: h,
@@ -1035,16 +1052,8 @@ public final class ViewerViewModel: ObservableObject {
         let slice = map.slice(axis: axis, index: sliceIndices[axis])
         var values = slice.values
         let w = slice.width, h = slice.height
-        // Flip for sagittal/coronal (match base slice orientation)
-        if axis == 0 || axis == 1 {
-            var flipped = [UInt16](repeating: 0, count: values.count)
-            for row in 0..<h {
-                for col in 0..<w {
-                    flipped[(h - 1 - row) * w + col] = values[row * w + col]
-                }
-            }
-            values = flipped
-        }
+        values = SliceTransform.apply(values, width: w, height: h,
+                                      transform: displayTransform(for: axis))
         if outlineOnly {
             return LabelRenderer.makeOutlineImage(values: values, width: w, height: h,
                                                     classes: map.classes,
@@ -1062,9 +1071,8 @@ public final class ViewerViewModel: ObservableObject {
         let slice = ov.slice(axis: axis, index: sliceIndices[axis])
         var pixels = slice.pixels
         let w = slice.width, h = slice.height
-        if axis == 0 || axis == 1 {
-            pixels = SliceTransform.flipVertical(pixels, width: w, height: h)
-        }
+        pixels = SliceTransform.apply(pixels, width: w, height: h,
+                                      transform: displayTransform(for: axis, volume: pair.baseVolume))
         return PixelRenderer.makeColorImage(
             pixels: pixels, width: w, height: h,
             window: pair.overlayWindow, level: pair.overlayLevel,
