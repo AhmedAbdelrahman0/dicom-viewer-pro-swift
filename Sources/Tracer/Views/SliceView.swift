@@ -95,6 +95,11 @@ public struct SliceView: View {
                             .frame(width: imgW * fit, height: imgH * fit)
                             .offset(pan)
 
+                        // 3D spherical PET SUV ROIs projected into the active plane.
+                        suvROICanvas(scale: fit, imageSize: CGSize(width: imgW, height: imgH))
+                            .frame(width: imgW * fit, height: imgH * fit)
+                            .offset(pan)
+
                         // Orientation letters
                         orientationMarkers
                             .padding(12)
@@ -520,6 +525,12 @@ public struct SliceView: View {
                 Label("Area / ROI", systemImage: "skew")
             }
             Button {
+                vm.activeTool = .suvSphere
+            } label: {
+                Label("Spherical SUV ROI", systemImage: "flame.circle")
+            }
+            .disabled(vm.activePETQuantificationVolume == nil)
+            Button {
                 vm.activeTool = .wl
                 vm.labeling.labelingTool = .brush
             } label: {
@@ -719,7 +730,7 @@ public struct SliceView: View {
                     let start = gestureStartZoom ?? 1.0
                     let factor = 1.0 + Double(-translation.height) * 0.005
                     setZoom(CGFloat(max(0.25, min(10.0, Double(start) * factor))))
-                case .distance, .angle, .area:
+                case .distance, .angle, .area, .suvSphere:
                     break
                 }
             }
@@ -887,7 +898,7 @@ public struct SliceView: View {
     // MARK: - Measurements
 
     private func isMeasurementTool(_ tool: ViewerTool) -> Bool {
-        tool == .distance || tool == .angle || tool == .area
+        tool == .distance || tool == .angle || tool == .area || tool == .suvSphere
     }
 
     private func isTap(_ value: DragGesture.Value) -> Bool {
@@ -897,8 +908,15 @@ public struct SliceView: View {
     private func handleMeasurementTap(at location: CGPoint,
                                       volume: ImageVolume,
                                       geo: GeometryProxy) {
-        guard let pixel = mapToImagePixel(point: location, volume: volume, geo: geo),
-              let type = annotationType(for: vm.activeTool) else { return }
+        guard let pixel = mapToImagePixel(point: location, volume: volume, geo: geo) else { return }
+
+        if vm.activeTool == .suvSphere {
+            let center = CGPoint(x: pixel.0, y: pixel.1)
+            _ = vm.addSphericalSUVROI(at: worldPoint(for: center, volume: volume))
+            return
+        }
+
+        guard let type = annotationType(for: vm.activeTool) else { return }
 
         measurementPoints.append(CGPoint(x: pixel.0, y: pixel.1))
         let required = Annotation(type: type, axis: axis,
@@ -979,6 +997,21 @@ public struct SliceView: View {
                 drawAnnotation(ann, in: context, scale: scale, imageSize: imageSize)
             }
         }
+    }
+
+    private func suvROICanvas(scale: CGFloat, imageSize: CGSize) -> some View {
+        Canvas { context, _ in
+            guard let displayVolume = vm.volumeForDisplayMode(displayMode),
+                  let pet = vm.activePETQuantificationVolume else { return }
+            for roi in vm.suvROIMeasurements where roi.sourceVolumeIdentity == pet.sessionIdentity {
+                drawSUVROI(roi,
+                           displayVolume: displayVolume,
+                           in: context,
+                           scale: scale,
+                           imageSize: imageSize)
+            }
+        }
+        .allowsHitTesting(false)
     }
 
     private struct CrossReferenceOverlayLine: Identifiable {
@@ -1150,10 +1183,83 @@ public struct SliceView: View {
         }
     }
 
+    private func drawSUVROI(_ roi: SUVROIMeasurement,
+                            displayVolume: ImageVolume,
+                            in context: GraphicsContext,
+                            scale: CGFloat,
+                            imageSize: CGSize) {
+        let centerVoxel = displayVolume.voxelCoordinates(from: roi.centerWorld)
+        guard centerVoxel.x.isFinite,
+              centerVoxel.y.isFinite,
+              centerVoxel.z.isFinite else { return }
+
+        let currentSlice = Double(vm.sliceIndices[axis])
+        let sliceCoordinate: Double
+        let sliceSpacing: Double
+        let rawCenter: CGPoint
+        let horizontalSpacing: Double
+        let verticalSpacing: Double
+
+        switch axis {
+        case 0:
+            sliceCoordinate = centerVoxel.x
+            sliceSpacing = displayVolume.spacing.x
+            rawCenter = CGPoint(x: centerVoxel.y, y: centerVoxel.z)
+            horizontalSpacing = displayVolume.spacing.y
+            verticalSpacing = displayVolume.spacing.z
+        case 1:
+            sliceCoordinate = centerVoxel.y
+            sliceSpacing = displayVolume.spacing.y
+            rawCenter = CGPoint(x: centerVoxel.x, y: centerVoxel.z)
+            horizontalSpacing = displayVolume.spacing.x
+            verticalSpacing = displayVolume.spacing.z
+        default:
+            sliceCoordinate = centerVoxel.z
+            sliceSpacing = displayVolume.spacing.z
+            rawCenter = CGPoint(x: centerVoxel.x, y: centerVoxel.y)
+            horizontalSpacing = displayVolume.spacing.x
+            verticalSpacing = displayVolume.spacing.y
+        }
+
+        let planeDistanceMM = abs(currentSlice - sliceCoordinate) * sliceSpacing
+        guard planeDistanceMM <= roi.radiusMM else { return }
+
+        let inPlaneRadiusMM = sqrt(max(0, roi.radiusMM * roi.radiusMM - planeDistanceMM * planeDistanceMM))
+        let rx = CGFloat(inPlaneRadiusMM / max(horizontalSpacing, 1e-9)) * scale
+        let ry = CGFloat(inPlaneRadiusMM / max(verticalSpacing, 1e-9)) * scale
+        guard rx > 0.25, ry > 0.25 else { return }
+
+        let displayCenter = displayPoint(for: rawCenter, imageSize: imageSize)
+        let center = CGPoint(x: displayCenter.x * scale, y: displayCenter.y * scale)
+        let alpha = max(0.30, 1.0 - planeDistanceMM / max(roi.radiusMM, 1e-9) * 0.55)
+        let rect = CGRect(x: center.x - rx, y: center.y - ry, width: rx * 2, height: ry * 2)
+        let ellipse = Path(ellipseIn: rect)
+        context.fill(ellipse, with: .color(TracerTheme.pet.opacity(0.12 * alpha)))
+        context.stroke(ellipse,
+                       with: .color(TracerTheme.pet.opacity(0.92 * alpha)),
+                       style: StrokeStyle(lineWidth: 1.6, lineCap: .round, dash: [5, 3]))
+
+        let crossSize: CGFloat = 4
+        var cross = Path()
+        cross.move(to: CGPoint(x: center.x - crossSize, y: center.y))
+        cross.addLine(to: CGPoint(x: center.x + crossSize, y: center.y))
+        cross.move(to: CGPoint(x: center.x, y: center.y - crossSize))
+        cross.addLine(to: CGPoint(x: center.x, y: center.y + crossSize))
+        context.stroke(cross, with: .color(TracerTheme.pet.opacity(alpha)), lineWidth: 1.2)
+
+        if abs(currentSlice - sliceCoordinate) <= 0.5 {
+            drawText(roi.compactSummary, at: center, in: context, color: TracerTheme.pet)
+        }
+    }
+
     private func drawText(_ text: String, at point: CGPoint, in context: GraphicsContext) {
+        drawText(text, at: point, in: context, color: .yellow)
+    }
+
+    private func drawText(_ text: String, at point: CGPoint, in context: GraphicsContext, color: Color) {
         let t = Text(text)
             .font(.system(size: 10, design: .monospaced))
-            .foregroundColor(.yellow)
+            .foregroundColor(color)
         context.draw(t, at: CGPoint(x: point.x + 4, y: point.y - 8))
     }
 

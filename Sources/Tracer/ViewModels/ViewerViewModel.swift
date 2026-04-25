@@ -5,7 +5,7 @@ import SwiftData
 import simd
 
 public enum ViewerTool: String, CaseIterable, Identifiable {
-    case wl, pan, zoom, distance, angle, area
+    case wl, pan, zoom, distance, angle, area, suvSphere
 
     public var id: String { rawValue }
     public var displayName: String {
@@ -16,6 +16,7 @@ public enum ViewerTool: String, CaseIterable, Identifiable {
         case .distance: return "Distance"
         case .angle: return "Angle"
         case .area: return "Area"
+        case .suvSphere: return "SUV Sphere"
         }
     }
     public var systemImage: String {
@@ -26,6 +27,7 @@ public enum ViewerTool: String, CaseIterable, Identifiable {
         case .distance: return "ruler"
         case .angle: return "angle"
         case .area: return "skew"
+        case .suvSphere: return "flame.circle"
         }
     }
 
@@ -63,6 +65,11 @@ public enum ViewerTool: String, CaseIterable, Identifiable {
                  + "Click multiple points to outline a polygon.\n"
                  + "Shows the enclosed area in mm² / cm².\n"
                  + "Shortcut: R"
+        case .suvSphere:
+            return "Spherical SUV ROI\n"
+                 + "Click PET or fused images to place a 3D spherical VOI.\n"
+                 + "Reports SUVmax, SUVmean, and sampled volume.\n"
+                 + "Shortcut: S"
         }
     }
 
@@ -75,6 +82,7 @@ public enum ViewerTool: String, CaseIterable, Identifiable {
         case .distance: return "d"
         case .angle: return "a"
         case .area: return "r"
+        case .suvSphere: return "s"
         }
     }
 }
@@ -232,6 +240,9 @@ public final class ViewerViewModel: ObservableObject {
     @Published public var suvSettings = SUVCalculationSettings()
     @Published public var hangingPanes: [HangingPaneConfiguration] = HangingPaneConfiguration.defaultPETCT
     @Published public var lastVolumeMeasurementReport: VolumeMeasurementReport?
+    @Published public var suvSphereRadiusMM: Double = 6.2
+    @Published public var suvROIMeasurements: [SUVROIMeasurement] = []
+    @Published public var lastSUVROIMeasurement: SUVROIMeasurement?
     @Published public private(set) var volumeOperationStatus: VolumeOperationStatus?
     @Published public private(set) var petMIPCacheRevision: Int = 0
     @Published public private(set) var appUndoDepth: Int = 0
@@ -276,6 +287,9 @@ public final class ViewerViewModel: ObservableObject {
         var hangingGrid: HangingGridLayout
         var hangingPanes: [HangingPaneConfiguration]
         var annotations: [Annotation]
+        var suvSphereRadiusMM: Double
+        var suvROIs: [SUVROIMeasurement]
+        var lastSUVROI: SUVROIMeasurement?
         var labelVoxels: [UUID: [UInt16]]
     }
 
@@ -655,6 +669,8 @@ public final class ViewerViewModel: ObservableObject {
             labeling.markDirty()
         }
         annotations.removeAll()
+        suvROIMeasurements.removeAll()
+        lastSUVROIMeasurement = nil
         lastVolumeMeasurementReport = nil
         resetAllViewportTransforms()
         invertColors = false
@@ -719,6 +735,63 @@ public final class ViewerViewModel: ObservableObject {
             guard let self, !self.annotations.contains(where: { $0.id == id }) else { return }
             self.annotations.append(annotation)
         }
+    }
+
+    @discardableResult
+    public func addSphericalSUVROI(at worldPoint: SIMD3<Double>,
+                                   radiusMM: Double? = nil) -> SUVROIMeasurement? {
+        guard let pet = activePETQuantificationVolume else {
+            statusMessage = "No PET volume is available for SUV measurement"
+            return nil
+        }
+        let radius = max(0.5, radiusMM ?? suvSphereRadiusMM)
+        let voxel = pet.voxelIndex(from: worldPoint)
+        let center = VoxelCoordinate(z: voxel.z, y: voxel.y, x: voxel.x)
+        guard let measurement = SUVROICalculator.spherical(
+            volume: pet,
+            center: center,
+            radiusMM: radius,
+            suvTransform: { [settings = suvSettings, pet] raw in
+                settings.suv(forStoredValue: raw, volume: pet)
+            }
+        ) else {
+            statusMessage = "Could not measure spherical SUV ROI at that point"
+            return nil
+        }
+
+        suvROIMeasurements.append(measurement)
+        lastSUVROIMeasurement = measurement
+        let id = measurement.id
+        recordHistoryIfNeeded(name: "SUV sphere ROI", changed: true) { [weak self] in
+            guard let self else { return }
+            self.suvROIMeasurements.removeAll { $0.id == id }
+            self.lastSUVROIMeasurement = self.suvROIMeasurements.last
+        } redo: { [weak self] in
+            guard let self, !self.suvROIMeasurements.contains(where: { $0.id == id }) else { return }
+            self.suvROIMeasurements.append(measurement)
+            self.lastSUVROIMeasurement = measurement
+        }
+        statusMessage = "SUV sphere ROI: \(measurement.compactSummary)"
+        return measurement
+    }
+
+    public func clearSUVROIMeasurements() {
+        let before = suvROIMeasurements
+        let beforeLast = lastSUVROIMeasurement
+        guard !before.isEmpty else {
+            statusMessage = "No SUV ROI measurements to clear"
+            return
+        }
+        suvROIMeasurements.removeAll()
+        lastSUVROIMeasurement = nil
+        recordHistoryIfNeeded(name: "Clear SUV ROIs", changed: true) { [weak self] in
+            self?.suvROIMeasurements = before
+            self?.lastSUVROIMeasurement = beforeLast
+        } redo: { [weak self] in
+            self?.suvROIMeasurements.removeAll()
+            self?.lastSUVROIMeasurement = nil
+        }
+        statusMessage = "Cleared \(before.count) SUV ROI measurements"
     }
 
     public func ensureActiveLabelMapForCurrentContext(defaultName: String = "Measurement Labels",
@@ -808,6 +881,9 @@ public final class ViewerViewModel: ObservableObject {
             hangingGrid: hangingGrid,
             hangingPanes: hangingPanes,
             annotations: annotations,
+            suvSphereRadiusMM: suvSphereRadiusMM,
+            suvROIs: suvROIMeasurements,
+            lastSUVROI: lastSUVROIMeasurement,
             labelVoxels: labeling.labelMaps.reduce(into: [:]) { voxelsByMapID, map in
                 voxelsByMapID[map.id] = map.voxels
             }
@@ -833,6 +909,9 @@ public final class ViewerViewModel: ObservableObject {
         fusion?.objectWillChange.send()
         applyHangingProtocol(grid: snapshot.hangingGrid, panes: snapshot.hangingPanes)
         annotations = snapshot.annotations
+        suvSphereRadiusMM = snapshot.suvSphereRadiusMM
+        suvROIMeasurements = snapshot.suvROIs
+        lastSUVROIMeasurement = snapshot.lastSUVROI
         for map in labeling.labelMaps {
             if let voxels = snapshot.labelVoxels[map.id], voxels.count == map.voxels.count {
                 map.voxels = voxels

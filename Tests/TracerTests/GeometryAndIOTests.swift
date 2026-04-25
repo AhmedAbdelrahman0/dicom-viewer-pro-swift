@@ -2449,6 +2449,56 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(probe?.suv ?? 0, 2.5, accuracy: 1e-9)
     }
 
+    func testSphericalSUVROIMeasuresMaxAndMeanWithVolumeScale() throws {
+        let pet = ImageVolume(
+            pixels: (1...27).map(Float.init),
+            depth: 3,
+            height: 3,
+            width: 3,
+            spacing: (1, 1, 1),
+            modality: "PT",
+            suvScaleFactor: 0.5
+        )
+
+        let roi = try XCTUnwrap(SUVROICalculator.spherical(
+            volume: pet,
+            center: VoxelCoordinate(z: 1, y: 1, x: 1),
+            radiusMM: 1.1,
+            suvTransform: { raw in raw * 0.5 }
+        ))
+
+        XCTAssertEqual(roi.voxelCount, 7)
+        XCTAssertEqual(roi.suvMax, 11.5, accuracy: 1e-9)
+        XCTAssertEqual(roi.suvMean, 7.0, accuracy: 1e-9)
+        XCTAssertEqual(roi.volumeML, 0.007, accuracy: 1e-12)
+    }
+
+    @MainActor
+    func testViewerAddsSphericalSUVROIAtWorldPoint() throws {
+        let vm = ViewerViewModel()
+        vm.suvSettings.mode = .storedSUV
+        vm.suvSphereRadiusMM = 1.1
+        let pet = ImageVolume(
+            pixels: (1...27).map(Float.init),
+            depth: 3,
+            height: 3,
+            width: 3,
+            spacing: (1, 1, 1),
+            modality: "PT",
+            suvScaleFactor: 0.5
+        )
+        vm.displayVolume(pet)
+
+        let roi = try XCTUnwrap(vm.addSphericalSUVROI(
+            at: pet.worldPoint(z: 1, y: 1, x: 1)
+        ))
+
+        XCTAssertEqual(vm.suvROIMeasurements.count, 1)
+        XCTAssertEqual(vm.lastSUVROIMeasurement?.id, roi.id)
+        XCTAssertEqual(roi.suvMax, 11.5, accuracy: 1e-9)
+        XCTAssertTrue(vm.statusMessage.contains("SUV sphere ROI"))
+    }
+
     func testNNUnetRunnerReportsAvailabilityFromPATH() {
         // We don't assume nnUNetv2_predict is installed in CI — just prove
         // the detector runs without crashing and returns a reasonable value.

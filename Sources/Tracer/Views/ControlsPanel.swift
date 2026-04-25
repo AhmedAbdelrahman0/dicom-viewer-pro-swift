@@ -754,6 +754,58 @@ private struct FusionTab: View {
                 ControlStatRow(vm.suvSettings.mode.displayName, String(format: "%.3f", probe.suv))
             }
 
+            Divider()
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Spherical ROI")
+                        .font(.system(size: 11, weight: .semibold))
+                    Spacer()
+                    Text(String(format: "r %.1f mm", vm.suvSphereRadiusMM))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+
+                Slider(value: $vm.suvSphereRadiusMM, in: 2...30, step: 0.5)
+                    .help("3D spherical PET VOI radius. A 6.2 mm radius is approximately a 1 mL sphere.")
+
+                HStack(spacing: 6) {
+                    Button {
+                        vm.suvSphereRadiusMM = 6.2
+                    } label: {
+                        Text("1 mL")
+                    }
+                    .controlSize(.small)
+                    .help("Approximate PERCIST-style 1 mL sphere")
+
+                    Button {
+                        vm.activeTool = .suvSphere
+                    } label: {
+                        Label("Place", systemImage: "flame.circle")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(vm.activePETQuantificationVolume == nil)
+
+                    Button {
+                        vm.clearSUVROIMeasurements()
+                    } label: {
+                        Label("Clear", systemImage: "trash")
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .disabled(vm.suvROIMeasurements.isEmpty)
+                }
+
+                if let roi = vm.lastSUVROIMeasurement {
+                    ControlStatRow("ROI", roi.sourceDescription)
+                    ControlStatRow("Radius", String(format: "%.1f mm", roi.radiusMM))
+                    ControlStatRow("Volume", String(format: "%.3f mL", roi.volumeML))
+                    ControlStatRow("SUVmax", String(format: "%.3f", roi.suvMax))
+                    ControlStatRow("SUVmean", String(format: "%.3f", roi.suvMean))
+                    ControlStatRow("SUVsd", String(format: "%.3f", roi.suvStd))
+                }
+            }
+
             if let report = vm.lastVolumeMeasurementReport,
                report.source == .petSUV,
                report.voxelCount > 0 {
@@ -865,6 +917,7 @@ private struct DisplayTab: View {
         case .distance: return "Tap two points to measure distance"
         case .angle: return "Tap three points for an angle measurement"
         case .area: return "Tap three+ points, close to measure area"
+        case .suvSphere: return "Tap PET/fused image to place a spherical SUV ROI"
         }
     }
 }
