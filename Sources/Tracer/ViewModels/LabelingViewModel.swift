@@ -180,6 +180,10 @@ public final class LabelingViewModel: ObservableObject {
         hasUnsavedChanges = false
     }
 
+    public func markDirty() {
+        hasUnsavedChanges = true
+    }
+
     public func undo() {
         guard let record = undoStack.popLast(),
               let map = labelMaps.first(where: { $0.id == record.mapID }) else {

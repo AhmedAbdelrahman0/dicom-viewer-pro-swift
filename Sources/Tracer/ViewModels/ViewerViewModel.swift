@@ -108,18 +108,22 @@ public final class ViewerViewModel: ObservableObject {
     @Published public var invertColors: Bool = false
     @Published public var invertPETMIP: Bool = false
     @Published public var correctAnteriorPosteriorDisplay: Bool = true
-    @Published public var linkZoomPanAcrossPanes: Bool = false
+    @Published public var correctRightLeftDisplay: Bool = false
+    @Published public var linkZoomPanAcrossPanes: Bool = true
     @Published public var sharedViewportTransform: ViewportTransformState = .identity
     @Published public var paneViewportTransforms: [Int: ViewportTransformState] = [:]
 
     // Overlay display settings
     @Published public var overlayOpacity: Double = 0.5
     @Published public var overlayColormap: Colormap = .tracerPET
+    @Published public var mipColormap: Colormap = .grayscale
     @Published public var overlayWindow: Double = 6
     @Published public var overlayLevel: Double = 3
     @Published public var suvSettings = SUVCalculationSettings()
     @Published public var hangingPanes: [HangingPaneConfiguration] = HangingPaneConfiguration.defaultPETCT
     @Published public var lastVolumeMeasurementReport: VolumeMeasurementReport?
+    @Published public private(set) var appUndoDepth: Int = 0
+    @Published public private(set) var appRedoDepth: Int = 0
 
     // Annotations per view
     @Published public var annotations: [Annotation] = []
@@ -135,6 +139,37 @@ public final class ViewerViewModel: ObservableObject {
     /// Shared flag that lets the UI cancel a long-running PACS index scan.
     /// Read-only outside the VM; callers cancel via `cancelIndexing()`.
     public let indexCancellation = PACSScanCancellation()
+
+    private struct AppHistoryRecord {
+        let name: String
+        let undo: () -> Void
+        let redo: () -> Void
+    }
+
+    private struct EditableSnapshot {
+        var window: Double
+        var level: Double
+        var invertColors: Bool
+        var invertPETMIP: Bool
+        var correctAnteriorPosteriorDisplay: Bool
+        var correctRightLeftDisplay: Bool
+        var linkZoomPanAcrossPanes: Bool
+        var sharedViewportTransform: ViewportTransformState
+        var paneViewportTransforms: [Int: ViewportTransformState]
+        var overlayOpacity: Double
+        var overlayColormap: Colormap
+        var mipColormap: Colormap
+        var overlayWindow: Double
+        var overlayLevel: Double
+        var hangingPanes: [HangingPaneConfiguration]
+        var annotations: [Annotation]
+        var labelVoxels: [UUID: [UInt16]]
+    }
+
+    private var appUndoStack: [AppHistoryRecord] = []
+    private var appRedoStack: [AppHistoryRecord] = []
+    private var isReplayingAppHistory = false
+    private let maxAppHistoryRecords = 120
 
     // DICOM study browser
     @Published public var loadedSeries: [DICOMSeries] = []
@@ -179,6 +214,14 @@ public final class ViewerViewModel: ObservableObject {
         overlayLevel + overlayWindow / 2
     }
 
+    public var canUndo: Bool {
+        appUndoDepth > 0 || labeling.undoDepth > 0
+    }
+
+    public var canRedo: Bool {
+        appRedoDepth > 0 || labeling.redoDepth > 0
+    }
+
     public func volumeForDisplayMode(_ mode: SliceDisplayMode) -> ImageVolume? {
         switch mode {
         case .fused, .ctOnly:
@@ -189,24 +232,91 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     public func setFusionOverlayVisible(_ visible: Bool) {
+        let before = fusion?.overlayVisible ?? false
         fusion?.overlayVisible = visible
         fusion?.objectWillChange.send()
         objectWillChange.send()
+        recordValueChange(name: "Toggle PET overlay", before: before, after: visible) { vm, value in
+            vm.fusion?.overlayVisible = value
+            vm.fusion?.objectWillChange.send()
+            vm.objectWillChange.send()
+        }
     }
 
     public func setFusionOpacity(_ opacity: Double) {
+        let before = overlayOpacity
         overlayOpacity = max(0, min(1, opacity))
         fusion?.opacity = overlayOpacity
         fusion?.objectWillChange.send()
+        recordValueChange(name: "PET overlay opacity", before: before, after: overlayOpacity) { vm, value in
+            vm.overlayOpacity = value
+            vm.fusion?.opacity = value
+            vm.fusion?.objectWillChange.send()
+        }
     }
 
     public func setFusionColormap(_ colormap: Colormap) {
+        let before = overlayColormap
         overlayColormap = colormap
         fusion?.colormap = colormap
         fusion?.objectWillChange.send()
+        recordValueChange(name: "PET overlay color", before: before, after: colormap) { vm, value in
+            vm.overlayColormap = value
+            vm.fusion?.colormap = value
+            vm.fusion?.objectWillChange.send()
+        }
+    }
+
+    public func setPETMIPColormap(_ colormap: Colormap) {
+        let before = mipColormap
+        mipColormap = colormap
+        recordValueChange(name: "PET MIP color", before: before, after: colormap) { vm, value in
+            vm.mipColormap = value
+        }
+    }
+
+    public func setInvertColors(_ enabled: Bool) {
+        let before = invertColors
+        invertColors = enabled
+        recordValueChange(name: "Invert images", before: before, after: enabled) { vm, value in
+            vm.invertColors = value
+        }
+    }
+
+    public func setInvertPETMIP(_ enabled: Bool) {
+        let before = invertPETMIP
+        invertPETMIP = enabled
+        recordValueChange(name: "Invert PET MIP", before: before, after: enabled) { vm, value in
+            vm.invertPETMIP = value
+        }
+    }
+
+    public func setCorrectAnteriorPosteriorDisplay(_ enabled: Bool) {
+        let before = correctAnteriorPosteriorDisplay
+        correctAnteriorPosteriorDisplay = enabled
+        recordValueChange(name: "Flip A/P display axis", before: before, after: enabled) { vm, value in
+            vm.correctAnteriorPosteriorDisplay = value
+        }
+    }
+
+    public func setCorrectRightLeftDisplay(_ enabled: Bool) {
+        let before = correctRightLeftDisplay
+        correctRightLeftDisplay = enabled
+        recordValueChange(name: "Flip R/L display axis", before: before, after: enabled) { vm, value in
+            vm.correctRightLeftDisplay = value
+        }
+    }
+
+    public func setLinkZoomPanAcrossPanes(_ enabled: Bool) {
+        let before = linkZoomPanAcrossPanes
+        linkZoomPanAcrossPanes = enabled
+        recordValueChange(name: "Link zoom/pan", before: before, after: enabled) { vm, value in
+            vm.linkZoomPanAcrossPanes = value
+        }
     }
 
     public func setPETOverlayRange(min rawMin: Double, max rawMax: Double) {
+        let before = (overlayWindow, overlayLevel)
         let lower = max(0, min(rawMin, rawMax - 0.1))
         let upper = max(lower + 0.1, rawMax)
         overlayWindow = upper - lower
@@ -214,20 +324,40 @@ public final class ViewerViewModel: ObservableObject {
         fusion?.overlayWindow = overlayWindow
         fusion?.overlayLevel = overlayLevel
         fusion?.objectWillChange.send()
+        let after = (overlayWindow, overlayLevel)
+        recordHistoryIfNeeded(name: "PET SUV window", changed: abs(before.0 - after.0) > 0.0001 || abs(before.1 - after.1) > 0.0001) { [weak self] in
+            self?.applyPETOverlayWindow(window: before.0, level: before.1)
+        } redo: { [weak self] in
+            self?.applyPETOverlayWindow(window: after.0, level: after.1)
+        }
     }
 
     public func setHangingPaneKind(index: Int, kind: HangingPaneKind) {
         guard hangingPanes.indices.contains(index) else { return }
+        let before = hangingPanes
         hangingPanes[index].kind = kind
+        let after = hangingPanes
+        recordValueChange(name: "Hanging pane role", before: before, after: after) { vm, value in
+            vm.hangingPanes = value
+        }
     }
 
     public func setHangingPanePlane(index: Int, plane: SlicePlane) {
         guard hangingPanes.indices.contains(index) else { return }
+        let before = hangingPanes
         hangingPanes[index].plane = plane
+        let after = hangingPanes
+        recordValueChange(name: "Hanging pane plane", before: before, after: after) { vm, value in
+            vm.hangingPanes = value
+        }
     }
 
     public func resetPETHangingProtocol() {
+        let before = hangingPanes
         hangingPanes = HangingPaneConfiguration.defaultPETCT
+        recordValueChange(name: "Reset hanging protocol", before: before, after: hangingPanes) { vm, value in
+            vm.hangingPanes = value
+        }
     }
 
     public func viewportTransform(for paneKey: Int) -> ViewportTransformState {
@@ -274,27 +404,50 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     public func undoLastEdit() {
-        guard labeling.undoDepth > 0 else {
+        if let record = appUndoStack.popLast() {
+            isReplayingAppHistory = true
+            record.undo()
+            isReplayingAppHistory = false
+            appRedoStack.append(record)
+            refreshAppHistoryDepths()
+            statusMessage = "Undo: \(record.name)"
+        } else if labeling.undoDepth > 0 {
+            labeling.undo()
+            refreshActiveVolumeMeasurement(method: .activeLabel, thresholdSummary: "Undo")
+            statusMessage = "Undo label edit"
+        } else {
             statusMessage = "Nothing to undo"
-            return
         }
-        labeling.undo()
-        refreshActiveVolumeMeasurement(method: .activeLabel, thresholdSummary: "Undo")
-        statusMessage = "Undo label edit"
     }
 
     public func redoLastEdit() {
-        guard labeling.redoDepth > 0 else {
+        if let record = appRedoStack.popLast() {
+            isReplayingAppHistory = true
+            record.redo()
+            isReplayingAppHistory = false
+            appUndoStack.append(record)
+            refreshAppHistoryDepths()
+            statusMessage = "Redo: \(record.name)"
+        } else if labeling.redoDepth > 0 {
+            labeling.redo()
+            refreshActiveVolumeMeasurement(method: .activeLabel, thresholdSummary: "Redo")
+            statusMessage = "Redo label edit"
+        } else {
             statusMessage = "Nothing to redo"
-            return
         }
-        labeling.redo()
-        refreshActiveVolumeMeasurement(method: .activeLabel, thresholdSummary: "Redo")
-        statusMessage = "Redo label edit"
     }
 
     public func resetEditableChanges() {
-        let resetVoxels = labeling.resetAllLabelMaps()
+        let before = editableSnapshot()
+        var resetVoxels = 0
+        for map in labeling.labelMaps {
+            resetVoxels += map.voxels.reduce(0) { $0 + ($1 == 0 ? 0 : 1) }
+            map.voxels = [UInt16](repeating: 0, count: map.voxels.count)
+            map.objectWillChange.send()
+        }
+        if resetVoxels > 0 {
+            labeling.markDirty()
+        }
         annotations.removeAll()
         lastVolumeMeasurementReport = nil
         resetAllViewportTransforms()
@@ -305,7 +458,179 @@ public final class ViewerViewModel: ObservableObject {
             window = w
             level = l
         }
+        let after = editableSnapshot()
+        recordHistoryIfNeeded(name: "Reset edits", changed: true) { [weak self] in
+            self?.applyEditableSnapshot(before)
+        } redo: { [weak self] in
+            self?.applyEditableSnapshot(after)
+        }
         statusMessage = "Reset editable labels, measurements, zoom/pan, and display overrides (\(resetVoxels) voxels cleared)"
+    }
+
+    public func recordViewportChange(named name: String = "Zoom/pan",
+                                     before: ViewportTransformState,
+                                     after: ViewportTransformState,
+                                     paneKey: Int) {
+        let wasLinked = linkZoomPanAcrossPanes
+        recordHistoryIfNeeded(name: name, changed: before != after) { [weak self] in
+            self?.applyViewportTransform(before, for: paneKey, linked: wasLinked)
+        } redo: { [weak self] in
+            self?.applyViewportTransform(after, for: paneKey, linked: wasLinked)
+        }
+    }
+
+    public func recordWindowLevelChange(before: (window: Double, level: Double),
+                                        after: (window: Double, level: Double),
+                                        name: String = "Window / level") {
+        let changed = abs(before.window - after.window) > 0.0001 ||
+            abs(before.level - after.level) > 0.0001
+        recordHistoryIfNeeded(name: name, changed: changed) { [weak self] in
+            self?.window = before.window
+            self?.level = before.level
+        } redo: { [weak self] in
+            self?.window = after.window
+            self?.level = after.level
+        }
+    }
+
+    public func recordLabelEditIfChanged(named name: String, beforeUndoDepth: Int?) {
+        guard let beforeUndoDepth, labeling.undoDepth > beforeUndoDepth else { return }
+        recordHistoryIfNeeded(name: name, changed: true) { [weak self] in
+            self?.labeling.undo()
+            self?.refreshActiveVolumeMeasurement(method: .activeLabel, thresholdSummary: "Undo")
+        } redo: { [weak self] in
+            self?.labeling.redo()
+            self?.refreshActiveVolumeMeasurement(method: .activeLabel, thresholdSummary: "Redo")
+        }
+    }
+
+    public func addAnnotation(_ annotation: Annotation) {
+        annotations.append(annotation)
+        let id = annotation.id
+        recordHistoryIfNeeded(name: "Measurement", changed: true) { [weak self] in
+            self?.annotations.removeAll { $0.id == id }
+        } redo: { [weak self] in
+            guard let self, !self.annotations.contains(where: { $0.id == id }) else { return }
+            self.annotations.append(annotation)
+        }
+    }
+
+    public func ensureActiveLabelMapForCurrentContext(defaultName: String = "Measurement Labels",
+                                                      className: String = "Lesion",
+                                                      category: LabelCategory = .lesion,
+                                                      color: Color = .orange) {
+        if labeling.activeLabelMap == nil {
+            let source = fusion?.baseVolume ?? currentVolume ?? activePETQuantificationVolume
+            if let source {
+                let map = labeling.createLabelMap(for: source, name: defaultName)
+                map.addClass(LabelClass(labelID: 1, name: className, category: category, color: color))
+                labeling.activeClassID = 1
+                map.objectWillChange.send()
+            }
+        } else if let map = labeling.activeLabelMap,
+                  map.classInfo(id: labeling.activeClassID) == nil {
+            map.addClass(LabelClass(labelID: labeling.activeClassID, name: className, category: category, color: color))
+            map.objectWillChange.send()
+        }
+    }
+
+    private func recordValueChange<T: Equatable>(
+        name: String,
+        before: T,
+        after: T,
+        apply: @escaping (ViewerViewModel, T) -> Void
+    ) {
+        recordHistoryIfNeeded(name: name, changed: before != after) { [weak self] in
+            guard let self else { return }
+            apply(self, before)
+        } redo: { [weak self] in
+            guard let self else { return }
+            apply(self, after)
+        }
+    }
+
+    private func recordHistoryIfNeeded(name: String,
+                                       changed: Bool,
+                                       undo: @escaping () -> Void,
+                                       redo: @escaping () -> Void) {
+        guard changed, !isReplayingAppHistory else { return }
+        appUndoStack.append(AppHistoryRecord(name: name, undo: undo, redo: redo))
+        if appUndoStack.count > maxAppHistoryRecords {
+            appUndoStack.removeFirst(appUndoStack.count - maxAppHistoryRecords)
+        }
+        appRedoStack.removeAll()
+        refreshAppHistoryDepths()
+    }
+
+    private func refreshAppHistoryDepths() {
+        appUndoDepth = appUndoStack.count
+        appRedoDepth = appRedoStack.count
+    }
+
+    private func applyPETOverlayWindow(window: Double, level: Double) {
+        overlayWindow = window
+        overlayLevel = level
+        fusion?.overlayWindow = window
+        fusion?.overlayLevel = level
+        fusion?.objectWillChange.send()
+    }
+
+    private func applyViewportTransform(_ transform: ViewportTransformState, for paneKey: Int, linked: Bool) {
+        if linked {
+            sharedViewportTransform = transform
+        } else {
+            paneViewportTransforms[paneKey] = transform
+        }
+    }
+
+    private func editableSnapshot() -> EditableSnapshot {
+        EditableSnapshot(
+            window: window,
+            level: level,
+            invertColors: invertColors,
+            invertPETMIP: invertPETMIP,
+            correctAnteriorPosteriorDisplay: correctAnteriorPosteriorDisplay,
+            correctRightLeftDisplay: correctRightLeftDisplay,
+            linkZoomPanAcrossPanes: linkZoomPanAcrossPanes,
+            sharedViewportTransform: sharedViewportTransform,
+            paneViewportTransforms: paneViewportTransforms,
+            overlayOpacity: overlayOpacity,
+            overlayColormap: overlayColormap,
+            mipColormap: mipColormap,
+            overlayWindow: overlayWindow,
+            overlayLevel: overlayLevel,
+            hangingPanes: hangingPanes,
+            annotations: annotations,
+            labelVoxels: Dictionary(uniqueKeysWithValues: labeling.labelMaps.map { ($0.id, $0.voxels) })
+        )
+    }
+
+    private func applyEditableSnapshot(_ snapshot: EditableSnapshot) {
+        window = snapshot.window
+        level = snapshot.level
+        invertColors = snapshot.invertColors
+        invertPETMIP = snapshot.invertPETMIP
+        correctAnteriorPosteriorDisplay = snapshot.correctAnteriorPosteriorDisplay
+        correctRightLeftDisplay = snapshot.correctRightLeftDisplay
+        linkZoomPanAcrossPanes = snapshot.linkZoomPanAcrossPanes
+        sharedViewportTransform = snapshot.sharedViewportTransform
+        paneViewportTransforms = snapshot.paneViewportTransforms
+        overlayOpacity = snapshot.overlayOpacity
+        overlayColormap = snapshot.overlayColormap
+        mipColormap = snapshot.mipColormap
+        applyPETOverlayWindow(window: snapshot.overlayWindow, level: snapshot.overlayLevel)
+        fusion?.opacity = snapshot.overlayOpacity
+        fusion?.colormap = snapshot.overlayColormap
+        fusion?.objectWillChange.send()
+        hangingPanes = snapshot.hangingPanes
+        annotations = snapshot.annotations
+        for map in labeling.labelMaps {
+            if let voxels = snapshot.labelVoxels[map.id], voxels.count == map.voxels.count {
+                map.voxels = voxels
+                map.objectWillChange.send()
+            }
+        }
+        labeling.markDirty()
     }
 
     // MARK: - Loading
@@ -753,7 +1078,8 @@ public final class ViewerViewModel: ObservableObject {
         displayVolume(base)
         if Modality.normalize(base.modality) == .CT,
            let softTissue = WLPresets.CT.first(where: { $0.name == "Soft Tissue" }) {
-            applyPreset(softTissue)
+            window = softTissue.window
+            level = softTissue.level
         }
 
         let pair = FusionPair(base: base, overlay: overlay)
@@ -779,11 +1105,13 @@ public final class ViewerViewModel: ObservableObject {
             let range = petSUVDisplayRange(for: pair.displayedOverlay)
             let maxValue = range.max
             if maxValue.isFinite, maxValue > 0, maxValue <= 25 {
-                setPETOverlayRange(min: 0, max: min(15, max(10, maxValue)))
+                let upper = min(15, max(10, maxValue))
+                applyPETOverlayWindow(window: upper, level: upper / 2)
             } else if maxValue.isFinite, maxValue > 0 {
-                setPETOverlayRange(min: 0, max: max(1, maxValue * 0.85))
+                let upper = max(1, maxValue * 0.85)
+                applyPETOverlayWindow(window: upper, level: upper / 2)
             } else {
-                setPETOverlayRange(min: 0, max: 10)
+                applyPETOverlayWindow(window: 10, level: 5)
             }
         }
 
@@ -917,7 +1245,10 @@ public final class ViewerViewModel: ObservableObject {
         guard let volume = volume ?? currentVolume else { return .identity }
         var transform = SliceDisplayTransform.canonical(axis: axis, volume: volume)
         if correctAnteriorPosteriorDisplay {
-            transform = anteriorPosteriorCorrected(transform, axis: axis, volume: volume)
+            transform = patientAxisCorrected(transform, axis: axis, volume: volume, letters: ["A", "P"])
+        }
+        if correctRightLeftDisplay {
+            transform = patientAxisCorrected(transform, axis: axis, volume: volume, letters: ["R", "L"])
         }
         return transform
     }
@@ -931,20 +1262,21 @@ public final class ViewerViewModel: ObservableObject {
         )
     }
 
-    private func anteriorPosteriorCorrected(
+    private func patientAxisCorrected(
         _ transform: SliceDisplayTransform,
         axis: Int,
-        volume: ImageVolume
+        volume: ImageVolume,
+        letters: Set<String>
     ) -> SliceDisplayTransform {
         let axes = SliceDisplayTransform.displayAxes(axis: axis, volume: volume, transform: transform)
         var adjusted = transform
-        if isAnteriorPosteriorAxis(axes.right) {
+        if isPatientAxis(axes.right, letters: letters) {
             adjusted = SliceDisplayTransform(
                 flipHorizontal: !adjusted.flipHorizontal,
                 flipVertical: adjusted.flipVertical
             )
         }
-        if isAnteriorPosteriorAxis(axes.down) {
+        if isPatientAxis(axes.down, letters: letters) {
             adjusted = SliceDisplayTransform(
                 flipHorizontal: adjusted.flipHorizontal,
                 flipVertical: !adjusted.flipVertical
@@ -953,9 +1285,9 @@ public final class ViewerViewModel: ObservableObject {
         return adjusted
     }
 
-    private func isAnteriorPosteriorAxis(_ vector: SIMD3<Double>) -> Bool {
+    private func isPatientAxis(_ vector: SIMD3<Double>, letters: Set<String>) -> Bool {
         let letter = SliceDisplayTransform.patientLetter(for: vector)
-        return letter == "A" || letter == "P"
+        return letters.contains(letter)
     }
 
     // MARK: - W/L manipulation
@@ -966,8 +1298,22 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     public func applyPreset(_ preset: WindowLevel) {
+        let before = (window, level)
         window = preset.window
         level = preset.level
+        recordWindowLevelChange(before: before, after: (window, level), name: "\(preset.name) W/L")
+    }
+
+    public func setWindow(_ value: Double) {
+        let before = (window, level)
+        window = max(1, value)
+        recordWindowLevelChange(before: before, after: (window, level), name: "Window")
+    }
+
+    public func setLevel(_ value: Double) {
+        let before = (window, level)
+        level = value
+        recordWindowLevelChange(before: before, after: (window, level), name: "Level")
     }
 
     /// Look up a preset by name across the current modality's list first,
@@ -1010,21 +1356,25 @@ public final class ViewerViewModel: ObservableObject {
 
     public func autoWL() {
         guard let v = currentVolume else { return }
+        let before = (window, level)
         let (w, l) = autoWindowLevel(pixels: v.pixels)
         window = w
         level = l
+        recordWindowLevelChange(before: before, after: (window, level), name: "Auto W/L")
     }
 
     /// Histogram-driven W/L picker, inspired by ITK-SNAP's auto-contrast.
     /// `preset` maps to a percentile clip range (see `HistogramAutoWindow.Preset`).
     public func autoWLHistogram(preset: HistogramAutoWindow.Preset = .balanced) {
         guard let v = currentVolume else { return }
+        let before = (window, level)
         let ignoreZeros = Modality.normalize(v.modality) == .PT
         let result = HistogramAutoWindow.compute(v,
                                                   preset: preset,
                                                   ignoreZeros: ignoreZeros)
         window = result.window
         level = result.level
+        recordWindowLevelChange(before: before, after: (window, level), name: "Auto W/L")
         statusMessage = String(format: "Auto W/L: W=%.0f L=%.0f (%.0f–%.0f)",
                                result.window, result.level,
                                result.lowerValue, result.upperValue)
@@ -1083,10 +1433,8 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     public func thresholdActiveLabel(atOrAbove threshold: Double) {
-        guard let map = labeling.activeLabelMap else {
-            statusMessage = "Create or select a label map before thresholding"
-            return
-        }
+        ensureActiveLabelMapForCurrentContext(defaultName: "PET/CT Volumes", className: "Lesion", category: .lesion, color: .orange)
+        guard let map = labeling.activeLabelMap else { return }
         guard let source = activeSegmentationSource(matching: map) else {
             statusMessage = "No current image or PET overlay matches the active label map grid"
             return
@@ -1094,6 +1442,7 @@ public final class ViewerViewModel: ObservableObject {
 
         labeling.thresholdValue = threshold
         let transform: ((Double) -> Double)? = source.usesSUV ? suvTransform(for: source.volume) : nil
+        let beforeUndoDepth = labeling.undoDepth
         var count = 0
         labeling.recordVoxelEdit(named: "SUV threshold") {
             count = PETSegmentation.thresholdAbove(
@@ -1108,6 +1457,7 @@ public final class ViewerViewModel: ObservableObject {
 
         let unit = source.usesSUV ? "SUV" : "intensity"
         statusMessage = "Segmented \(count) voxels at \(unit) >= \(String(format: "%.2f", threshold))"
+        recordLabelEditIfChanged(named: "Fixed \(unit) threshold", beforeUndoDepth: beforeUndoDepth)
         refreshActiveVolumeMeasurement(
             method: .fixedThreshold,
             thresholdSummary: "\(unit) >= \(String(format: "%.2f", threshold))",
@@ -1116,10 +1466,8 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     public func percentOfMaxActiveLabelWholeVolume(percent: Double) {
-        guard let map = labeling.activeLabelMap else {
-            statusMessage = "Create or select a label map before percent-of-max segmentation"
-            return
-        }
+        ensureActiveLabelMapForCurrentContext(defaultName: "PET/CT Volumes", className: "Lesion", category: .lesion, color: .orange)
+        guard let map = labeling.activeLabelMap else { return }
         guard let source = activeSegmentationSource(matching: map) else {
             statusMessage = "No current image or PET overlay matches the active label map grid"
             return
@@ -1128,6 +1476,7 @@ public final class ViewerViewModel: ObservableObject {
         labeling.percentOfMax = percent
         let transform: ((Double) -> Double)? = source.usesSUV ? suvTransform(for: source.volume) : nil
         let box = VoxelBox.all(in: source.volume)
+        let beforeUndoDepth = labeling.undoDepth
         var count = 0
         labeling.recordVoxelEdit(named: "Percent of max") {
             count = PETSegmentation.percentOfMax(
@@ -1143,6 +1492,7 @@ public final class ViewerViewModel: ObservableObject {
 
         let unit = source.usesSUV ? "SUVmax" : "intensity max"
         statusMessage = "Segmented \(count) voxels at \(Int(percent * 100))% of \(unit)"
+        recordLabelEditIfChanged(named: "Percent of max volume", beforeUndoDepth: beforeUndoDepth)
         refreshActiveVolumeMeasurement(
             method: .percentOfMax,
             thresholdSummary: "\(Int(percent * 100))% of \(unit)",
@@ -1153,10 +1503,8 @@ public final class ViewerViewModel: ObservableObject {
     public func percentOfMaxActiveLabelAroundSeed(seed: (z: Int, y: Int, x: Int),
                                                   boxRadius: Int = 30,
                                                   percent: Double) {
-        guard let map = labeling.activeLabelMap else {
-            statusMessage = "Create or select a label map before seed thresholding"
-            return
-        }
+        ensureActiveLabelMapForCurrentContext(defaultName: "PET/CT Volumes", className: "Lesion", category: .lesion, color: .orange)
+        guard let map = labeling.activeLabelMap else { return }
         guard let source = activeSegmentationSource(matching: map) else {
             statusMessage = "No current image or PET overlay matches the active label map grid"
             return
@@ -1165,6 +1513,7 @@ public final class ViewerViewModel: ObservableObject {
         labeling.percentOfMax = percent
         let transform: ((Double) -> Double)? = source.usesSUV ? suvTransform(for: source.volume) : nil
         let box = VoxelBox.around(seed, radius: boxRadius, in: source.volume)
+        let beforeUndoDepth = labeling.undoDepth
         var count = 0
         labeling.recordVoxelEdit(named: "SUV percent of max") {
             count = PETSegmentation.percentOfMax(
@@ -1180,6 +1529,7 @@ public final class ViewerViewModel: ObservableObject {
 
         let unit = source.usesSUV ? "SUVmax" : "intensity max"
         statusMessage = "Segmented \(count) voxels at \(Int(percent * 100))% of \(unit)"
+        recordLabelEditIfChanged(named: "Seeded percent of max", beforeUndoDepth: beforeUndoDepth)
         refreshActiveVolumeMeasurement(
             method: .percentOfMax,
             thresholdSummary: "\(Int(percent * 100))% of local \(unit)",
@@ -1191,10 +1541,8 @@ public final class ViewerViewModel: ObservableObject {
                                               minimumValue: Double,
                                               gradientCutoffFraction: Double,
                                               searchRadius: Int) {
-        guard let map = labeling.activeLabelMap else {
-            statusMessage = "Create or select a label map before SUV gradient segmentation"
-            return
-        }
+        ensureActiveLabelMapForCurrentContext(defaultName: "PET/CT Volumes", className: "Lesion", category: .lesion, color: .orange)
+        guard let map = labeling.activeLabelMap else { return }
         guard let source = activeSegmentationSource(matching: map) else {
             statusMessage = "No current image or PET overlay matches the active label map grid"
             return
@@ -1204,6 +1552,7 @@ public final class ViewerViewModel: ObservableObject {
         labeling.gradientCutoffFraction = gradientCutoffFraction
         labeling.gradientSearchRadius = searchRadius
         let transform: ((Double) -> Double)? = source.usesSUV ? suvTransform(for: source.volume) : nil
+        let beforeUndoDepth = labeling.undoDepth
         let result = labeling.gradientEdge(
             volume: source.volume,
             seed: seed,
@@ -1215,6 +1564,7 @@ public final class ViewerViewModel: ObservableObject {
 
         let unit = source.usesSUV ? "SUV" : "intensity"
         statusMessage = "SUV gradient segmented \(result.voxelCount) voxels | floor \(unit) \(String(format: "%.2f", minimumValue)), peak \(String(format: "%.2f", result.maxValue)), edge \(String(format: "%.3f", result.gradientCutoff))/mm"
+        recordLabelEditIfChanged(named: "SUV gradient edge", beforeUndoDepth: beforeUndoDepth)
         refreshActiveVolumeMeasurement(
             method: .gradientEdge,
             thresholdSummary: "Gradient edge, floor \(unit) \(String(format: "%.2f", minimumValue))",
@@ -1223,10 +1573,8 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     public func thresholdActiveCTLabel(lowerHU: Double, upperHU: Double) {
-        guard let map = labeling.activeLabelMap else {
-            statusMessage = "Create or select a label map before CT HU thresholding"
-            return
-        }
+        ensureActiveLabelMapForCurrentContext(defaultName: "CT Volumes", className: "CT Volume", category: .organ, color: .cyan)
+        guard let map = labeling.activeLabelMap else { return }
         guard let ct = activeCTVolumeMatching(map) else {
             statusMessage = "No CT volume matches the active label map grid"
             return
@@ -1234,6 +1582,7 @@ public final class ViewerViewModel: ObservableObject {
 
         let lower = min(lowerHU, upperHU)
         let upper = max(lowerHU, upperHU)
+        let beforeUndoDepth = labeling.undoDepth
         var count = 0
         labeling.recordVoxelEdit(named: "CT HU range") {
             count = PETSegmentation.thresholdRange(
@@ -1246,6 +1595,7 @@ public final class ViewerViewModel: ObservableObject {
         }
         map.objectWillChange.send()
         statusMessage = "Segmented \(count) CT voxels from \(Int(lower)) to \(Int(upper)) HU"
+        recordLabelEditIfChanged(named: "CT HU volume", beforeUndoDepth: beforeUndoDepth)
         refreshActiveVolumeMeasurement(
             method: .huRange,
             thresholdSummary: "\(Int(lower))...\(Int(upper)) HU",
@@ -1437,7 +1787,7 @@ public final class ViewerViewModel: ObservableObject {
             height: mip.height,
             window: overlayWindow,
             level: overlayLevel,
-            colormap: overlayColormap,
+            colormap: mipColormap,
             baseAlpha: 1.0,
             invert: invertPETMIP
         )

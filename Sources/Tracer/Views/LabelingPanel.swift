@@ -73,20 +73,20 @@ struct LabelingPanel: View {
 
                         HStack {
                             Button {
-                                vm.labeling.undo()
+                                vm.undoLastEdit()
                             } label: {
                                 Label("Undo", systemImage: "arrow.uturn.backward")
                                     .frame(maxWidth: .infinity)
                             }
-                            .disabled(vm.labeling.undoDepth == 0)
+                            .disabled(!vm.canUndo)
 
                             Button {
-                                vm.labeling.redo()
+                                vm.redoLastEdit()
                             } label: {
                                 Label("Redo", systemImage: "arrow.uturn.forward")
                                     .frame(maxWidth: .infinity)
                             }
-                            .disabled(vm.labeling.redoDepth == 0)
+                            .disabled(!vm.canRedo)
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
@@ -336,7 +336,9 @@ struct LabelingPanel: View {
                         .font(.system(size: 11))
                     HStack {
                         Button {
+                            let before = vm.labeling.undoDepth
                             vm.labeling.dilateActive(iterations: marginIterations)
+                            vm.recordLabelEditIfChanged(named: "Grow label", beforeUndoDepth: before)
                         } label: {
                             Label("Grow", systemImage: "arrow.up.left.and.arrow.down.right")
                                 .frame(maxWidth: .infinity)
@@ -345,7 +347,9 @@ struct LabelingPanel: View {
                         .controlSize(.small)
 
                         Button {
+                            let before = vm.labeling.undoDepth
                             vm.labeling.erodeActive(iterations: marginIterations)
+                            vm.recordLabelEditIfChanged(named: "Shrink label", beforeUndoDepth: before)
                         } label: {
                             Label("Shrink", systemImage: "arrow.down.right.and.arrow.up.left")
                                 .frame(maxWidth: .infinity)
@@ -363,14 +367,18 @@ struct LabelingPanel: View {
                         .font(.system(size: 11))
                     HStack {
                         Button {
+                            let before = vm.labeling.undoDepth
                             let removed = vm.labeling.keepLargestIslandActive()
+                            vm.recordLabelEditIfChanged(named: "Keep largest island", beforeUndoDepth: before)
                             vm.statusMessage = "Removed \(removed) voxels outside the largest island"
                         } label: {
                             Label("Keep Largest", systemImage: "circle.dashed.inset.filled")
                                 .frame(maxWidth: .infinity)
                         }
                         Button {
+                            let before = vm.labeling.undoDepth
                             let removed = vm.labeling.removeSmallIslandsActive(minVoxels: islandMinimumVoxels)
+                            vm.recordLabelEditIfChanged(named: "Remove small islands", beforeUndoDepth: before)
                             vm.statusMessage = "Removed \(removed) small-island voxels"
                         } label: {
                             Label("Remove Small", systemImage: "minus.circle")
@@ -680,7 +688,9 @@ struct LabelingPanel: View {
 
             HStack {
                 Button(role: .destructive) {
+                    let before = vm.labeling.undoDepth
                     let cleared = vm.labeling.resetActiveClass()
+                    vm.recordLabelEditIfChanged(named: "Reset active class", beforeUndoDepth: before)
                     vm.refreshActiveVolumeMeasurement()
                     vm.statusMessage = "Reset active class (\(cleared) voxels cleared)"
                 } label: {
@@ -723,7 +733,9 @@ struct LabelingPanel: View {
     private func applyLogical(_ operation: LabelLogicalOperation) {
         guard let map = vm.labeling.activeLabelMap else { return }
         let sourceID = logicalSourceBinding(for: map).wrappedValue
+        let before = vm.labeling.undoDepth
         let changed = vm.labeling.applyLogicalOperation(sourceClassID: sourceID, operation: operation)
+        vm.recordLabelEditIfChanged(named: operation.displayName, beforeUndoDepth: before)
         vm.statusMessage = "\(operation.displayName) changed \(changed) voxels"
     }
 }

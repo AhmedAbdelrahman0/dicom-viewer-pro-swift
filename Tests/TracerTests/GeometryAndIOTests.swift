@@ -3138,11 +3138,12 @@ final class GeometryAndIOTests: XCTestCase {
     func testLinkedViewportTransformCanApplyToAllPanes() {
         let vm = ViewerViewModel()
 
+        XCTAssertTrue(vm.linkZoomPanAcrossPanes)
+
         vm.setViewportZoom(2.0, for: 0)
         XCTAssertEqual(vm.viewportTransform(for: 0).zoom, 2.0, accuracy: 1e-9)
-        XCTAssertEqual(vm.viewportTransform(for: 1).zoom, 1.0, accuracy: 1e-9)
+        XCTAssertEqual(vm.viewportTransform(for: 1).zoom, 2.0, accuracy: 1e-9)
 
-        vm.linkZoomPanAcrossPanes = true
         vm.setViewportPan(x: 18, y: -7, for: 1)
         XCTAssertEqual(vm.viewportTransform(for: 0).panX, 18, accuracy: 1e-9)
         XCTAssertEqual(vm.viewportTransform(for: 2).panY, -7, accuracy: 1e-9)
@@ -3150,6 +3151,83 @@ final class GeometryAndIOTests: XCTestCase {
         vm.resetAllViewportTransforms()
         XCTAssertTrue(vm.viewportTransform(for: 0).isIdentity)
         XCTAssertTrue(vm.viewportTransform(for: 2).isIdentity)
+    }
+
+    @MainActor
+    func testAppUndoRedoTracksWindowLevelChanges() {
+        let vm = ViewerViewModel()
+        let before = (window: vm.window, level: vm.level)
+
+        vm.setWindow(1200)
+        vm.setLevel(350)
+
+        XCTAssertTrue(vm.canUndo)
+        XCTAssertEqual(vm.window, 1200, accuracy: 1e-9)
+        XCTAssertEqual(vm.level, 350, accuracy: 1e-9)
+
+        vm.undoLastEdit()
+        XCTAssertEqual(vm.level, before.level, accuracy: 1e-9)
+
+        vm.undoLastEdit()
+        XCTAssertEqual(vm.window, before.window, accuracy: 1e-9)
+
+        vm.redoLastEdit()
+        XCTAssertEqual(vm.window, 1200, accuracy: 1e-9)
+
+        vm.redoLastEdit()
+        XCTAssertEqual(vm.level, 350, accuracy: 1e-9)
+    }
+
+    @MainActor
+    func testMIPColormapIsIndependentFromFusionColormap() {
+        let vm = ViewerViewModel()
+
+        vm.setFusionColormap(.petHotIron)
+        vm.setPETMIPColormap(.grayscale)
+
+        XCTAssertEqual(vm.overlayColormap, .petHotIron)
+        XCTAssertEqual(vm.mipColormap, .grayscale)
+
+        vm.setPETMIPColormap(.invertedGray)
+        XCTAssertEqual(vm.overlayColormap, .petHotIron)
+        XCTAssertEqual(vm.mipColormap, .invertedGray)
+    }
+
+    @MainActor
+    func testResetEditableChangesCanBeUndone() throws {
+        let volume = ImageVolume(
+            pixels: [1, 2, 3, 4],
+            depth: 1, height: 2, width: 2,
+            modality: "CT"
+        )
+        let vm = ViewerViewModel()
+        vm.displayVolume(volume)
+        let map = vm.labeling.createLabelMap(
+            for: volume,
+            presetSet: LabelPresetSet(
+                name: "Test",
+                description: "",
+                classes: [LabelClass(labelID: 1, name: "ROI", category: .organ, color: .green)]
+            )
+        )
+        map.voxels[0] = 1
+        vm.annotations.append(Annotation(type: .distance, points: [CGPoint(x: 0, y: 0), CGPoint(x: 1, y: 1)]))
+        vm.setViewportZoom(2, for: 0)
+        vm.setInvertPETMIP(true)
+
+        vm.resetEditableChanges()
+
+        XCTAssertEqual(map.voxels.filter { $0 == 1 }.count, 0)
+        XCTAssertTrue(vm.annotations.isEmpty)
+        XCTAssertTrue(vm.viewportTransform(for: 0).isIdentity)
+        XCTAssertFalse(vm.invertPETMIP)
+
+        vm.undoLastEdit()
+
+        XCTAssertEqual(map.voxels[0], 1)
+        XCTAssertEqual(vm.annotations.count, 1)
+        XCTAssertEqual(vm.viewportTransform(for: 0).zoom, 2, accuracy: 1e-9)
+        XCTAssertTrue(vm.invertPETMIP)
     }
 
     @MainActor

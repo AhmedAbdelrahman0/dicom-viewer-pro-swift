@@ -322,20 +322,20 @@ public struct ContentView: View {
 
         HoverIconButton(
             systemImage: "arrow.uturn.backward",
-            tooltip: "Undo label edit (⌘Z)\nReverts the last paint, threshold, morphology, or reset operation."
+            tooltip: "Undo (⌘Z)\nReverts the last app action: labels, measurements, windowing, fusion, layout, zoom/pan, or display changes."
         ) {
             vm.undoLastEdit()
         }
-        .disabled(vm.labeling.undoDepth == 0)
+        .disabled(!vm.canUndo)
         .keyboardShortcut("z", modifiers: [.command])
 
         HoverIconButton(
             systemImage: "arrow.uturn.forward",
-            tooltip: "Redo label edit (⌘⇧Z)\nReapplies an undone label operation."
+            tooltip: "Redo (⌘⇧Z)\nReapplies the last undone app action."
         ) {
             vm.redoLastEdit()
         }
-        .disabled(vm.labeling.redoDepth == 0)
+        .disabled(!vm.canRedo)
         .keyboardShortcut("z", modifiers: [.command, .shift])
 
         HoverIconButton(
@@ -344,6 +344,22 @@ public struct ContentView: View {
         ) {
             vm.resetEditableChanges()
         }
+
+        HoverIconButton(
+            systemImage: vm.linkZoomPanAcrossPanes ? "link" : "link.badge.plus",
+            tooltip: vm.linkZoomPanAcrossPanes
+                ? "Linked Zoom/Pan: All Panes\nPan or zoom in one pane and all four windows move together."
+                : "Linked Zoom/Pan: Single Pane\nClick to link all four windows.",
+            isActive: vm.linkZoomPanAcrossPanes
+        ) {
+            vm.setLinkZoomPanAcrossPanes(!vm.linkZoomPanAcrossPanes)
+        }
+
+        orientationMenu
+
+        petDisplayMenu
+
+        volumetryMenu
 
         HoverIconButton(
             systemImage: "wand.and.stars",
@@ -467,6 +483,162 @@ public struct ContentView: View {
         .menuStyle(.borderlessButton)
         .fixedSize()
         .help("AI Engines\n• MONAI Label (⌘⇧M)\n• nnU-Net (⌘⇧N)\n• PET Engine (⌘⇧P)\n• Classify (⌘⇧C)\n• Model Manager (⌘⇧W)\n• Cohort Batch (⌘⇧B)\nPanels open as side inspectors — ⌘. to close.")
+    }
+
+    private var orientationMenu: some View {
+        Menu {
+            Toggle("Flip A/P Display Axis", isOn: Binding(
+                get: { vm.correctAnteriorPosteriorDisplay },
+                set: { vm.setCorrectAnteriorPosteriorDisplay($0) }
+            ))
+            Toggle("Flip R/L Display Axis", isOn: Binding(
+                get: { vm.correctRightLeftDisplay },
+                set: { vm.setCorrectRightLeftDisplay($0) }
+            ))
+            Divider()
+            Button {
+                vm.setCorrectAnteriorPosteriorDisplay(false)
+                vm.setCorrectRightLeftDisplay(false)
+            } label: {
+                Label("Native Geometry", systemImage: "arrow.counterclockwise")
+            }
+            Button {
+                vm.setCorrectAnteriorPosteriorDisplay(true)
+                vm.setCorrectRightLeftDisplay(false)
+            } label: {
+                Label("Radiology Default", systemImage: "viewfinder")
+            }
+        } label: {
+            Label("Position", systemImage: "arrow.left.and.right")
+                .font(.system(size: 12, weight: .medium))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Image Positioning\nControls anterior/posterior and right/left display flips from the toolbar.")
+    }
+
+    private var petDisplayMenu: some View {
+        Menu {
+            Picker("Fusion PET Color", selection: Binding(
+                get: { vm.overlayColormap },
+                set: { vm.setFusionColormap($0) }
+            )) {
+                ForEach(Colormap.allCases) { color in
+                    Text(color.displayName).tag(color)
+                }
+            }
+            Picker("MIP PET Color", selection: Binding(
+                get: { vm.mipColormap },
+                set: { vm.setPETMIPColormap($0) }
+            )) {
+                ForEach(Colormap.allCases) { color in
+                    Text(color.displayName).tag(color)
+                }
+            }
+            Toggle("Invert MIP", isOn: Binding(
+                get: { vm.invertPETMIP },
+                set: { vm.setInvertPETMIP($0) }
+            ))
+            Divider()
+            Button("SUV 0–5") { vm.setPETOverlayRange(min: 0, max: 5) }
+            Button("SUV 0–10") { vm.setPETOverlayRange(min: 0, max: 10) }
+            Button("SUV 0–15") { vm.setPETOverlayRange(min: 0, max: 15) }
+            Button("SUV 2.5–15") { vm.setPETOverlayRange(min: 2.5, max: 15) }
+            Button {
+                if let pet = vm.activePETQuantificationVolume {
+                    let range = vm.petSUVDisplayRange(for: pet)
+                    vm.setPETOverlayRange(min: max(0, range.min), max: max(1, range.max))
+                }
+            } label: {
+                Label("Auto SUV Range", systemImage: "wand.and.stars")
+            }
+        } label: {
+            Label("PET Color", systemImage: "paintpalette")
+                .font(.system(size: 12, weight: .medium))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("PET Coloring\nFusion and PET-only panes can use heat maps while MIP uses a separate black/white or custom map.")
+    }
+
+    private var volumetryMenu: some View {
+        Menu {
+            Button {
+                vm.ensureActiveLabelMapForCurrentContext()
+                vm.statusMessage = "Active label map ready for PET/CT volume measurements"
+            } label: {
+                Label("Create / Select Volume Label", systemImage: "plus.square.on.square")
+            }
+            Divider()
+            Button {
+                vm.thresholdActiveLabel(atOrAbove: vm.labeling.thresholdValue)
+            } label: {
+                Label(String(format: "PET Fixed SUV ≥ %.1f", vm.labeling.thresholdValue),
+                      systemImage: "greaterthan.circle")
+            }
+            Button {
+                vm.percentOfMaxActiveLabelWholeVolume(percent: vm.labeling.percentOfMax)
+            } label: {
+                Label(String(format: "PET %.0f%% SUVmax", vm.labeling.percentOfMax * 100),
+                      systemImage: "percent")
+            }
+            Button {
+                vm.ensureActiveLabelMapForCurrentContext()
+                vm.labeling.labelingTool = .suvGradient
+                vm.activeTool = .wl
+                vm.statusMessage = "SUV Gradient armed: click the PET lesion seed"
+            } label: {
+                Label("PET Gradient Seed Tool", systemImage: "waveform.path.ecg")
+            }
+            Divider()
+            ForEach(HUThresholdPreset.presets) { preset in
+                Button {
+                    vm.thresholdActiveCTLabel(lowerHU: preset.lower, upperHU: preset.upper)
+                } label: {
+                    Label("\(preset.name) \(Int(preset.lower))...\(Int(preset.upper)) HU",
+                          systemImage: "cube")
+                }
+            }
+            Divider()
+            Button {
+                vm.refreshActiveVolumeMeasurement(
+                    method: .activeLabel,
+                    thresholdSummary: "Active PET label",
+                    preferPET: true
+                )
+            } label: {
+                Label("Measure PET SUV / Volume", systemImage: "flame")
+            }
+            Button {
+                vm.refreshActiveVolumeMeasurement(
+                    method: .activeLabel,
+                    thresholdSummary: "Active CT label",
+                    preferPET: false
+                )
+            } label: {
+                Label("Measure CT HU / Volume", systemImage: "cube")
+            }
+            if let report = vm.lastVolumeMeasurementReport {
+                Divider()
+                Text(report.className)
+                Text(String(format: "Volume %.2f mL", report.volumeML))
+                if let suvMax = report.suvMax {
+                    Text(String(format: "SUVmax %.2f", suvMax))
+                }
+                if let suvMean = report.suvMean {
+                    Text(String(format: "SUVmean %.2f", suvMean))
+                }
+                if let tlg = report.tlg {
+                    Text(String(format: "TLG %.1f", tlg))
+                }
+            }
+        } label: {
+            Label("Volumes", systemImage: "chart.bar.doc.horizontal")
+                .font(.system(size: 12, weight: .medium))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("PET/CT Volume Tools\nVisible toolbar access to SUV metrics, MTV/TLG, HU volume masks, and active-label measurement.")
     }
 
     private var toolbarBrand: some View {
@@ -984,6 +1156,9 @@ private struct PETMIPPane: View {
     @EnvironmentObject var vm: ViewerViewModel
     let index: Int
     let plane: SlicePlane
+    @State private var dragStartPan: CGSize?
+    @State private var gestureStartZoom: CGFloat?
+    @State private var viewportBeforeInteraction: ViewportTransformState?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -994,11 +1169,12 @@ private struct PETMIPPane: View {
                     if let cg = vm.makePETMIPImage(for: plane.axis) {
                         let imgW = CGFloat(cg.width)
                         let imgH = CGFloat(cg.height)
-                        let fit = min(geo.size.width / imgW, geo.size.height / imgH)
+                        let fit = min(geo.size.width / imgW, geo.size.height / imgH) * zoom
                         Image(decorative: cg, scale: 1.0)
                             .resizable()
                             .interpolation(.medium)
                             .frame(width: imgW * fit, height: imgH * fit)
+                            .offset(pan)
 
                         orientationMarkers
                             .padding(12)
@@ -1023,11 +1199,34 @@ private struct PETMIPPane: View {
                     }
                 }
                 .clipped()
+                .contentShape(Rectangle())
+                .gesture(magnificationGesture())
+                .gesture(dragGesture())
+                .onTapGesture(count: 2) {
+                    vm.resetViewportTransform(for: index)
+                }
             }
             .background(TracerTheme.viewportBackground)
             .overlay(Rectangle().stroke(TracerTheme.hairline, lineWidth: 1))
         }
         .background(TracerTheme.panelBackground)
+    }
+
+    private var zoom: CGFloat {
+        CGFloat(vm.viewportTransform(for: index).zoom)
+    }
+
+    private var pan: CGSize {
+        let state = vm.viewportTransform(for: index)
+        return CGSize(width: state.panX, height: state.panY)
+    }
+
+    private func setZoom(_ value: CGFloat) {
+        vm.setViewportZoom(Double(value), for: index)
+    }
+
+    private func setPan(_ value: CGSize) {
+        vm.setViewportPan(x: Double(value.width), y: Double(value.height), for: index)
     }
 
     private var header: some View {
@@ -1064,6 +1263,35 @@ private struct PETMIPPane: View {
 
             Spacer()
 
+            Picker("", selection: Binding(
+                get: { vm.mipColormap },
+                set: { vm.setPETMIPColormap($0) }
+            )) {
+                ForEach(Colormap.allCases) { color in
+                    Text(color.displayName).tag(color)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(width: 92)
+            .controlSize(.mini)
+            .help("PET MIP colormap. This is independent from fused PET coloring.")
+
+            HoverIconButton(
+                systemImage: "circle.righthalf.filled",
+                tooltip: "Invert PET MIP\nReverses only the MIP color window.",
+                isActive: vm.invertPETMIP
+            ) {
+                vm.setInvertPETMIP(!vm.invertPETMIP)
+            }
+
+            HoverIconButton(
+                systemImage: "rectangle.on.rectangle.angled",
+                tooltip: "Reset MIP zoom/pan"
+            ) {
+                vm.resetViewportTransform(for: index)
+            }
+
             Text(String(format: "SUV %.1f–%.1f", vm.petOverlayRangeMin, vm.petOverlayRangeMax))
                 .font(.system(size: 10, design: .monospaced))
                 .foregroundColor(.secondary)
@@ -1079,8 +1307,12 @@ private struct PETMIPPane: View {
                 .foregroundColor(TracerTheme.pet)
             Text("PET MIP")
                 .foregroundColor(.white)
-            Text(vm.overlayColormap.displayName)
+            Text(vm.mipColormap.displayName)
                 .foregroundColor(.secondary)
+            if vm.invertPETMIP {
+                Text("inverted")
+                    .foregroundColor(.secondary)
+            }
         }
         .font(.system(size: 10, weight: .semibold, design: .monospaced))
         .padding(.vertical, 4)
@@ -1122,6 +1354,65 @@ private struct PETMIPPane: View {
             left: SliceDisplayTransform.patientLetter(for: -axes.right),
             right: SliceDisplayTransform.patientLetter(for: axes.right)
         )
+    }
+
+    private func magnificationGesture() -> some Gesture {
+        MagnificationGesture()
+            .onChanged { scale in
+                if gestureStartZoom == nil {
+                    gestureStartZoom = zoom
+                    viewportBeforeInteraction = vm.viewportTransform(for: index)
+                }
+                let start = gestureStartZoom ?? 1
+                setZoom(max(0.25, min(10, start * scale)))
+            }
+            .onEnded { _ in
+                if let before = viewportBeforeInteraction {
+                    vm.recordViewportChange(before: before,
+                                            after: vm.viewportTransform(for: index),
+                                            paneKey: index)
+                }
+                viewportBeforeInteraction = nil
+                gestureStartZoom = nil
+            }
+    }
+
+    private func dragGesture() -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                switch vm.activeTool {
+                case .pan:
+                    if dragStartPan == nil {
+                        dragStartPan = pan
+                        viewportBeforeInteraction = vm.viewportTransform(for: index)
+                    }
+                    let start = dragStartPan ?? .zero
+                    setPan(CGSize(
+                        width: start.width + value.translation.width,
+                        height: start.height + value.translation.height
+                    ))
+                case .zoom:
+                    if gestureStartZoom == nil {
+                        gestureStartZoom = zoom
+                        viewportBeforeInteraction = vm.viewportTransform(for: index)
+                    }
+                    let start = gestureStartZoom ?? 1
+                    let factor = 1.0 + Double(-value.translation.height) * 0.005
+                    setZoom(CGFloat(max(0.25, min(10.0, Double(start) * factor))))
+                default:
+                    break
+                }
+            }
+            .onEnded { _ in
+                if let before = viewportBeforeInteraction {
+                    vm.recordViewportChange(before: before,
+                                            after: vm.viewportTransform(for: index),
+                                            paneKey: index)
+                }
+                viewportBeforeInteraction = nil
+                dragStartPan = nil
+                gestureStartZoom = nil
+            }
     }
 }
 

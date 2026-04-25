@@ -119,7 +119,10 @@ private struct WLTab: View {
             HStack {
                 Text("W:")
                     .frame(width: 20, alignment: .leading)
-                Slider(value: $vm.window, in: 1...5000)
+                Slider(value: Binding(
+                    get: { vm.window },
+                    set: { vm.setWindow($0) }
+                ), in: 1...5000)
                 Text(String(format: "%.0f", vm.window))
                     .font(.system(size: 11, design: .monospaced))
                     .frame(width: 48, alignment: .trailing)
@@ -128,7 +131,10 @@ private struct WLTab: View {
             HStack {
                 Text("L:")
                     .frame(width: 20, alignment: .leading)
-                Slider(value: $vm.level, in: -1000...3000)
+                Slider(value: Binding(
+                    get: { vm.level },
+                    set: { vm.setLevel($0) }
+                ), in: -1000...3000)
                 Text(String(format: "%.0f", vm.level))
                     .font(.system(size: 11, design: .monospaced))
                     .frame(width: 48, alignment: .trailing)
@@ -225,7 +231,10 @@ private struct FusionTab: View {
                 ))
                 .help("Turns the PET layer on/off in fused panes. PET-only and MIP panes stay visible.")
 
-                Toggle("Correct A/P display", isOn: $vm.correctAnteriorPosteriorDisplay)
+                Toggle("Correct A/P display", isOn: Binding(
+                    get: { vm.correctAnteriorPosteriorDisplay },
+                    set: { vm.setCorrectAnteriorPosteriorDisplay($0) }
+                ))
                     .help("Use this when anterior/posterior anatomy appears swapped in CT/PET panes.")
 
                 // Opacity
@@ -276,7 +285,10 @@ private struct FusionTab: View {
                     }
                 }
 
-                Toggle("Invert PET MIP window", isOn: $vm.invertPETMIP)
+                Toggle("Invert PET MIP window", isOn: Binding(
+                    get: { vm.invertPETMIP },
+                    set: { vm.setInvertPETMIP($0) }
+                ))
                     .help("Reverses the PET MIP color mapping, useful when a black-hot or white-hot projection makes low uptake easier to read.")
 
                 petSUVRangePanel
@@ -495,7 +507,10 @@ private struct FusionTab: View {
             HStack {
                 Text("W")
                     .frame(width: 18, alignment: .leading)
-                Slider(value: $vm.window, in: 1...5000)
+                Slider(value: Binding(
+                    get: { vm.window },
+                    set: { vm.setWindow($0) }
+                ), in: 1...5000)
                 Text("\(Int(vm.window))")
                     .font(.system(size: 11, design: .monospaced))
                     .frame(width: 48, alignment: .trailing)
@@ -504,7 +519,10 @@ private struct FusionTab: View {
             HStack {
                 Text("L")
                     .frame(width: 18, alignment: .leading)
-                Slider(value: $vm.level, in: -1200...3000)
+                Slider(value: Binding(
+                    get: { vm.level },
+                    set: { vm.setLevel($0) }
+                ), in: -1200...3000)
                 Text("\(Int(vm.level))")
                     .font(.system(size: 11, design: .monospaced))
                     .frame(width: 48, alignment: .trailing)
@@ -738,18 +756,33 @@ private struct DisplayTab: View {
             Text("Display Options")
                 .font(.headline)
 
-            Toggle("Invert Colors", isOn: $vm.invertColors)
+            Toggle("Invert Colors", isOn: Binding(
+                get: { vm.invertColors },
+                set: { vm.setInvertColors($0) }
+            ))
                 .help("Useful for MR or X-ray inversion")
 
-            Toggle("Correct A/P Display Flip", isOn: $vm.correctAnteriorPosteriorDisplay)
+            Toggle("Correct A/P Display Flip", isOn: Binding(
+                get: { vm.correctAnteriorPosteriorDisplay },
+                set: { vm.setCorrectAnteriorPosteriorDisplay($0) }
+            ))
                 .help("Swaps the displayed anterior/posterior axis for studies that load reversed. This affects display, hover sampling, measurements, PET overlay, and labels together.")
+
+            Toggle("Correct R/L Display Flip", isOn: Binding(
+                get: { vm.correctRightLeftDisplay },
+                set: { vm.setCorrectRightLeftDisplay($0) }
+            ))
+                .help("Swaps the displayed right/left axis globally.")
 
             Divider()
 
             Text("Zoom / Pan")
                 .font(.subheadline)
 
-            Toggle("Link Zoom + Pan Across Panes", isOn: $vm.linkZoomPanAcrossPanes)
+            Toggle("Link Zoom + Pan Across Panes", isOn: Binding(
+                get: { vm.linkZoomPanAcrossPanes },
+                set: { vm.setLinkZoomPanAcrossPanes($0) }
+            ))
                 .help("When enabled, zooming or panning one viewport applies the same transform to every PET/CT hanging pane.")
 
             HStack {

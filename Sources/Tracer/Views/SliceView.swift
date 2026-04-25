@@ -19,6 +19,9 @@ public struct SliceView: View {
     // so it can be linked across the full hanging protocol when requested.
     @State private var dragStartPan: CGSize?
     @State private var gestureStartZoom: CGFloat?
+    @State private var viewportBeforeInteraction: ViewportTransformState?
+    @State private var windowLevelBeforeInteraction: (window: Double, level: Double)?
+    @State private var labelUndoDepthBeforeInteraction: Int?
     @State private var measurementPoints: [CGPoint] = []
     @State private var activeMeasurement: Annotation?
     @State private var dragStart: CGPoint?
@@ -192,7 +195,7 @@ public struct SliceView: View {
                        + "or X-ray images in the radiological convention.",
                 isActive: vm.invertColors
             ) {
-                vm.invertColors.toggle()
+                vm.setInvertColors(!vm.invertColors)
             }
 
             HoverIconButton(
@@ -477,7 +480,7 @@ public struct SliceView: View {
         Section("View") {
             Button("Reset zoom + pan") { resetView() }
             Button(vm.invertColors ? "Disable inversion" : "Invert colors") {
-                vm.invertColors.toggle()
+                vm.setInvertColors(!vm.invertColors)
             }
             Button("Center slices on cursor") {
                 if let sample = hoverSample {
@@ -583,11 +586,18 @@ public struct SliceView: View {
             .onChanged { scale in
                 if gestureStartZoom == nil {
                     gestureStartZoom = zoom
+                    viewportBeforeInteraction = vm.viewportTransform(for: viewportKey)
                 }
                 let start = gestureStartZoom ?? 1.0
                 setZoom(max(0.25, min(10.0, start * scale)))
             }
             .onEnded { _ in
+                if let before = viewportBeforeInteraction {
+                    vm.recordViewportChange(before: before,
+                                            after: vm.viewportTransform(for: viewportKey),
+                                            paneKey: viewportKey)
+                }
+                viewportBeforeInteraction = nil
                 gestureStartZoom = nil
             }
     }
@@ -600,7 +610,11 @@ public struct SliceView: View {
         if event.modifierFlags.contains(.shift) || event.modifierFlags.contains(.command) {
             let sensitivity = event.hasPreciseScrollingDeltas ? 0.0025 : 0.08
             let factor = max(0.2, 1.0 + Double(rawDelta) * sensitivity)
+            let before = vm.viewportTransform(for: viewportKey)
             setZoom(CGFloat(max(0.25, min(10.0, Double(zoom) * factor))))
+            vm.recordViewportChange(before: before,
+                                    after: vm.viewportTransform(for: viewportKey),
+                                    paneKey: viewportKey)
             return
         }
 
@@ -628,6 +642,9 @@ public struct SliceView: View {
 
                 switch vm.activeTool {
                 case .wl:
+                    if windowLevelBeforeInteraction == nil {
+                        windowLevelBeforeInteraction = (vm.window, vm.level)
+                    }
                     if let start = dragStart {
                         let dx = value.location.x - start.x
                         let dy = value.location.y - start.y
@@ -637,6 +654,7 @@ public struct SliceView: View {
                 case .pan:
                     if dragStartPan == nil {
                         dragStartPan = pan
+                        viewportBeforeInteraction = vm.viewportTransform(for: viewportKey)
                     }
                     let start = dragStartPan ?? .zero
                     setPan(CGSize(
@@ -646,6 +664,7 @@ public struct SliceView: View {
                 case .zoom:
                     if gestureStartZoom == nil {
                         gestureStartZoom = zoom
+                        viewportBeforeInteraction = vm.viewportTransform(for: viewportKey)
                     }
                     let start = gestureStartZoom ?? 1.0
                     let factor = 1.0 + Double(-translation.height) * 0.005
@@ -657,6 +676,7 @@ public struct SliceView: View {
             .onEnded { value in
                 if vm.labeling.labelingTool != .none {
                     vm.labeling.commitVoxelEdit()
+                    vm.recordLabelEditIfChanged(named: "Label edit", beforeUndoDepth: labelUndoDepthBeforeInteraction)
                 }
                 if vm.labeling.labelingTool == .none,
                    isMeasurementTool(vm.activeTool),
@@ -667,6 +687,18 @@ public struct SliceView: View {
                 dragStart = nil
                 dragStartPan = nil
                 gestureStartZoom = nil
+                if let before = viewportBeforeInteraction {
+                    vm.recordViewportChange(before: before,
+                                            after: vm.viewportTransform(for: viewportKey),
+                                            paneKey: viewportKey)
+                }
+                if let before = windowLevelBeforeInteraction {
+                    vm.recordWindowLevelChange(before: before,
+                                               after: (vm.window, vm.level))
+                }
+                viewportBeforeInteraction = nil
+                windowLevelBeforeInteraction = nil
+                labelUndoDepthBeforeInteraction = nil
                 lastPaintPoint = nil
             }
     }
@@ -680,6 +712,7 @@ public struct SliceView: View {
         case .brush, .eraser:
             let erase = vm.labeling.labelingTool == .eraser
             if lastPaintPoint == nil {
+                labelUndoDepthBeforeInteraction = vm.labeling.undoDepth
                 vm.labeling.beginVoxelEdit(named: erase ? "Erase stroke" : "Paint stroke")
             }
             if let last = lastPaintPoint {
@@ -703,11 +736,13 @@ public struct SliceView: View {
                     axis: axis, sliceIndex: vm.sliceIndices[axis],
                     pixelX: p.0, pixelY: p.1
                 )
+                let beforeUndo = vm.labeling.undoDepth
                 vm.labeling.regionGrow(
                     volume: volume,
                     seed: (z: z, y: y, x: x),
                     tolerance: vm.labeling.regionGrowTolerance
                 )
+                vm.recordLabelEditIfChanged(named: "Region grow", beforeUndoDepth: beforeUndo)
                 vm.refreshActiveVolumeMeasurement(
                     method: .regionGrow,
                     thresholdSummary: String(format: "Region grow ±%.1f", vm.labeling.regionGrowTolerance),
@@ -833,7 +868,7 @@ public struct SliceView: View {
                                             points: measurementPoints,
                                             volume: volume)
         annotation.unit = type == .angle ? "deg" : (type == .area ? "mm2" : "mm")
-        vm.annotations.append(annotation)
+        vm.addAnnotation(annotation)
         vm.statusMessage = "Added \(annotation.displayText)"
         measurementPoints.removeAll()
     }
