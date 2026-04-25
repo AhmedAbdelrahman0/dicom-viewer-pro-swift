@@ -243,14 +243,14 @@ public struct ContentView: View {
                                  fileImporterMode = .overlay
                                  showingFileImporter = true
                              })
-                .navigationSplitViewColumnWidth(min: 280, ideal: 340, max: 420)
+                .navigationSplitViewColumnWidth(min: 240, ideal: 320, max: 400)
         } content: {
             workstationScaffold
-                .navigationSplitViewColumnWidth(min: 560, ideal: 1100)
+                .navigationSplitViewColumnWidth(min: 360, ideal: 960)
         } detail: {
             ControlsPanel()
                 .environmentObject(vm)
-                .navigationSplitViewColumnWidth(min: 260, ideal: 320, max: 360)
+                .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 360)
         }
     }
 
@@ -270,149 +270,16 @@ public struct ContentView: View {
     // MARK: - Custom toolbar (in-content so hover + tooltips work reliably)
 
     private var customToolbar: some View {
-        HStack(spacing: 6) {
-            toolbarBrand
-
-            Divider()
-                .frame(height: 20)
-                .padding(.trailing, 4)
-
-            ForEach(ViewerTool.allCases) { tool in
-                ToolButton(
-                    tool: tool,
-                    isActive: vm.activeTool == tool,
-                    action: { vm.activeTool = tool }
-                )
+        HStack(spacing: 8) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    toolbarControls
+                }
+                .fixedSize(horizontal: true, vertical: false)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
             }
-
-            Divider()
-                .frame(height: 20)
-                .padding(.horizontal, 4)
-
-            HoverIconButton(
-                systemImage: "wand.and.stars",
-                tooltip: "Auto Window / Level  (⌘R or ⌘4)\n"
-                       + "Automatically compute window/level from the\n"
-                       + "1–99 percentile of the current volume."
-            ) {
-                vm.autoWLHistogram(preset: .balanced)
-            }
-            .keyboardShortcut("r", modifiers: [.command])
-
-            // Invisible buttons that own the global W/L shortcuts. Kept off-
-            // screen so they participate in the shortcut graph without
-            // crowding the visible toolbar. The preset names are read from
-            // Settings (`@AppStorage`) so users can rebind ⌘1 / ⌘2 / ⌘3.
-            Group {
-                Button("W/L Slot 1 (\(wlShortcut1))") {
-                    vm.applyPresetNamed(wlShortcut1)
-                }
-                .keyboardShortcut("1", modifiers: [.command])
-                Button("W/L Slot 2 (\(wlShortcut2))") {
-                    vm.applyPresetNamed(wlShortcut2)
-                }
-                .keyboardShortcut("2", modifiers: [.command])
-                Button("W/L Slot 3 (\(wlShortcut3))") {
-                    vm.applyPresetNamed(wlShortcut3)
-                }
-                .keyboardShortcut("3", modifiers: [.command])
-                Button("Auto W/L") { vm.autoWLHistogram(preset: .balanced) }
-                    .keyboardShortcut("4", modifiers: [.command])
-            }
-            .frame(width: 0, height: 0)
-            .hidden()
-            .accessibilityHidden(true)
-
-            HoverIconButton(
-                systemImage: focusModeEnabled
-                    ? "arrow.down.right.and.arrow.up.left"
-                    : "arrow.up.left.and.arrow.down.right",
-                tooltip: focusModeEnabled
-                    ? "Exit Focus Mode (⌘E)\nShow the study browser and controls panel."
-                    : "Focus Mode (⌘E)\nHide the side panels so the MPR viewport fills the window.\nGreat for contouring detailed lesions at full resolution."
-            ) {
-                toggleFocusMode()
-            }
-            .keyboardShortcut("e", modifiers: [.command])
-
-            HoverIconButton(
-                systemImage: "bubble.left.and.bubble.right",
-                tooltip: "Assistant Chat  (⌘⇧A)\n"
-                       + "Open the AI assistant panel on the right.\n"
-                       + "Type natural-language commands like\n"
-                       + "“Show lungs”, “threshold SUV 2.5”, or\n"
-                       + "“create label map TotalSegmentator”."
-            ) {
-                NotificationCenter.default.post(name: .focusAssistantTab, object: nil)
-            }
-            .keyboardShortcut("a", modifiers: [.command, .shift])
-
-            // One menu for every AI engine — replaces three separate toolbar
-            // buttons that were crowding the top bar. Each entry opens its
-            // own sheet / drawer and carries a keyboard shortcut so power
-            // users never have to touch the menu.
-            Menu {
-                Button {
-                    showInspector(.monai)
-                } label: {
-                    Label("MONAI Label — interactive server models",
-                          systemImage: "brain.head.profile")
-                }
-                .keyboardShortcut("m", modifiers: [.command, .shift])
-
-                Button {
-                    showInspector(.nnunet)
-                } label: {
-                    Label("nnU-Net — catalog of 15 pretrained datasets",
-                          systemImage: "square.stack.3d.up.fill")
-                }
-                .keyboardShortcut("n", modifiers: [.command, .shift])
-
-                Button {
-                    showInspector(.pet)
-                } label: {
-                    Label("PET Engine — AutoPET + MedSAM2 + TMTV",
-                          systemImage: "flame.fill")
-                }
-                .keyboardShortcut("p", modifiers: [.command, .shift])
-
-                Divider()
-
-                Button {
-                    showInspector(.classification)
-                } label: {
-                    Label("Classify lesions — radiomics / CoreML / MedGemma",
-                          systemImage: "square.stack.3d.forward.dottedline")
-                }
-                .keyboardShortcut("c", modifiers: [.command, .shift])
-
-                Divider()
-
-                Button {
-                    showInspector(.modelManager)
-                } label: {
-                    Label("Model Manager — weights + DGX Spark",
-                          systemImage: "externaldrive.fill.badge.icloud")
-                }
-                .keyboardShortcut("w", modifiers: [.command, .shift])
-
-                Button {
-                    refreshCohortStudies()
-                    showInspector(.cohort)
-                } label: {
-                    Label("Cohort Batch — run segmentation/classification on every study",
-                          systemImage: "square.3.layers.3d.down.right")
-                }
-                .keyboardShortcut("b", modifiers: [.command, .shift])
-            } label: {
-                Label("AI Engines", systemImage: "cpu")
-                    .font(.system(size: 12, weight: .medium))
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .help("AI Engines\n• MONAI Label (⌘⇧M)\n• nnU-Net (⌘⇧N)\n• PET Engine (⌘⇧P)\n• Classify (⌘⇧C)\n• Model Manager (⌘⇧W)\n• Cohort Batch (⌘⇧B)\nPanels open as side inspectors — ⌘. to close.")
-
-            Spacer()
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 10) {
@@ -424,12 +291,155 @@ public struct ContentView: View {
             }
             .font(.system(size: 11, weight: .medium))
             .foregroundColor(.secondary)
-            .padding(.horizontal, 8)
+            .lineLimit(1)
+            .padding(.trailing, 8)
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
         .background(Color(.displayP3, white: 0.115))
         .overlay(Divider(), alignment: .bottom)
+    }
+
+    @ViewBuilder
+    private var toolbarControls: some View {
+        toolbarBrand
+
+        Divider()
+            .frame(height: 20)
+            .padding(.trailing, 4)
+
+        ForEach(ViewerTool.allCases) { tool in
+            ToolButton(
+                tool: tool,
+                isActive: vm.activeTool == tool,
+                action: { vm.activeTool = tool }
+            )
+        }
+
+        Divider()
+            .frame(height: 20)
+            .padding(.horizontal, 4)
+
+        HoverIconButton(
+            systemImage: "wand.and.stars",
+            tooltip: "Auto Window / Level  (⌘R or ⌘4)\n"
+                   + "Automatically compute window/level from the\n"
+                   + "1–99 percentile of the current volume."
+        ) {
+            vm.autoWLHistogram(preset: .balanced)
+        }
+        .keyboardShortcut("r", modifiers: [.command])
+
+        // Invisible buttons that own the global W/L shortcuts. Kept off-
+        // screen so they participate in the shortcut graph without
+        // crowding the visible toolbar. The preset names are read from
+        // Settings (`@AppStorage`) so users can rebind ⌘1 / ⌘2 / ⌘3.
+        Group {
+            Button("W/L Slot 1 (\(wlShortcut1))") {
+                vm.applyPresetNamed(wlShortcut1)
+            }
+            .keyboardShortcut("1", modifiers: [.command])
+            Button("W/L Slot 2 (\(wlShortcut2))") {
+                vm.applyPresetNamed(wlShortcut2)
+            }
+            .keyboardShortcut("2", modifiers: [.command])
+            Button("W/L Slot 3 (\(wlShortcut3))") {
+                vm.applyPresetNamed(wlShortcut3)
+            }
+            .keyboardShortcut("3", modifiers: [.command])
+            Button("Auto W/L") { vm.autoWLHistogram(preset: .balanced) }
+                .keyboardShortcut("4", modifiers: [.command])
+        }
+        .frame(width: 0, height: 0)
+        .hidden()
+        .accessibilityHidden(true)
+
+        HoverIconButton(
+            systemImage: focusModeEnabled
+                ? "arrow.down.right.and.arrow.up.left"
+                : "arrow.up.left.and.arrow.down.right",
+            tooltip: focusModeEnabled
+                ? "Exit Focus Mode (⌘E)\nShow the study browser and controls panel."
+                : "Focus Mode (⌘E)\nHide the side panels so the MPR viewport fills the window.\nGreat for contouring detailed lesions at full resolution."
+        ) {
+            toggleFocusMode()
+        }
+        .keyboardShortcut("e", modifiers: [.command])
+
+        HoverIconButton(
+            systemImage: "bubble.left.and.bubble.right",
+            tooltip: "Assistant Chat  (⌘⇧A)\n"
+                   + "Open the AI assistant panel on the right.\n"
+                   + "Type natural-language commands like\n"
+                   + "“Show lungs”, “threshold SUV 2.5”, or\n"
+                   + "“create label map TotalSegmentator”."
+        ) {
+            NotificationCenter.default.post(name: .focusAssistantTab, object: nil)
+        }
+        .keyboardShortcut("a", modifiers: [.command, .shift])
+
+        // One menu for every AI engine — replaces three separate toolbar
+        // buttons that were crowding the top bar. Each entry opens its
+        // own sheet / drawer and carries a keyboard shortcut so power
+        // users never have to touch the menu.
+        Menu {
+            Button {
+                showInspector(.monai)
+            } label: {
+                Label("MONAI Label — interactive server models",
+                      systemImage: "brain.head.profile")
+            }
+            .keyboardShortcut("m", modifiers: [.command, .shift])
+
+            Button {
+                showInspector(.nnunet)
+            } label: {
+                Label("nnU-Net — catalog of 15 pretrained datasets",
+                      systemImage: "square.stack.3d.up.fill")
+            }
+            .keyboardShortcut("n", modifiers: [.command, .shift])
+
+            Button {
+                showInspector(.pet)
+            } label: {
+                Label("PET Engine — AutoPET + MedSAM2 + TMTV",
+                      systemImage: "flame.fill")
+            }
+            .keyboardShortcut("p", modifiers: [.command, .shift])
+
+            Divider()
+
+            Button {
+                showInspector(.classification)
+            } label: {
+                Label("Classify lesions — radiomics / CoreML / MedGemma",
+                      systemImage: "square.stack.3d.forward.dottedline")
+            }
+            .keyboardShortcut("c", modifiers: [.command, .shift])
+
+            Divider()
+
+            Button {
+                showInspector(.modelManager)
+            } label: {
+                Label("Model Manager — weights + DGX Spark",
+                      systemImage: "externaldrive.fill.badge.icloud")
+            }
+            .keyboardShortcut("w", modifiers: [.command, .shift])
+
+            Button {
+                refreshCohortStudies()
+                showInspector(.cohort)
+            } label: {
+                Label("Cohort Batch — run segmentation/classification on every study",
+                      systemImage: "square.3.layers.3d.down.right")
+            }
+            .keyboardShortcut("b", modifiers: [.command, .shift])
+        } label: {
+            Label("AI Engines", systemImage: "cpu")
+                .font(.system(size: 12, weight: .medium))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("AI Engines\n• MONAI Label (⌘⇧M)\n• nnU-Net (⌘⇧N)\n• PET Engine (⌘⇧P)\n• Classify (⌘⇧C)\n• Model Manager (⌘⇧W)\n• Cohort Batch (⌘⇧B)\nPanels open as side inspectors — ⌘. to close.")
     }
 
     private var toolbarBrand: some View {
@@ -877,25 +887,36 @@ private struct EmptyWorkstationView: View {
                     .foregroundColor(.secondary)
             }
 
-            HStack(spacing: 10) {
-                Button {
-                    NotificationCenter.default.post(name: .openDICOMDirectory, object: nil)
-                } label: {
-                    Label("DICOM Folder", systemImage: "folder")
-                }
-                .buttonStyle(.borderedProminent)
-
-                Button {
-                    NotificationCenter.default.post(name: .openNIfTIFile, object: nil)
-                } label: {
-                    Label("NIfTI File", systemImage: "doc")
-                }
-                .buttonStyle(.bordered)
+            ViewThatFits(in: .horizontal) {
+                emptyWorkstationButtons(axis: .horizontal)
+                emptyWorkstationButtons(axis: .vertical)
             }
             .controlSize(.regular)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black)
+    }
+
+    @ViewBuilder
+    private func emptyWorkstationButtons(axis: Axis) -> some View {
+        let stack = axis == .horizontal ? AnyLayout(HStackLayout(spacing: 10)) : AnyLayout(VStackLayout(spacing: 8))
+        stack {
+            Button {
+                NotificationCenter.default.post(name: .openDICOMDirectory, object: nil)
+            } label: {
+                Label("DICOM Folder", systemImage: "folder")
+                    .frame(minWidth: 132)
+            }
+            .buttonStyle(.borderedProminent)
+
+            Button {
+                NotificationCenter.default.post(name: .openNIfTIFile, object: nil)
+            } label: {
+                Label("NIfTI File", systemImage: "doc")
+                    .frame(minWidth: 112)
+            }
+            .buttonStyle(.bordered)
+        }
     }
 }
 

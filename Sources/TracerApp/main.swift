@@ -25,30 +25,35 @@ private final class TracerAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func openMainWindow() {
+        if let mainWindow {
+            mainWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
         let screen = NSScreen.main
-        let frame = screen?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 960)
+        let frame = defaultWindowFrame(on: screen)
         let root = ContentView()
             .modelContainer(for: PACSIndexedSeries.self)
             .preferredColorScheme(.dark)
 
         let window = WorkstationWindow(
             contentRect: frame,
-            styleMask: [.borderless, .resizable],
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false,
             screen: screen
         )
         window.title = "Tracer"
-        window.minSize = NSSize(width: 1180, height: 760)
+        window.minSize = NSSize(width: 920, height: 640)
         window.contentView = NSHostingView(rootView: root)
         window.backgroundColor = .black
-        window.hasShadow = false
         window.isReleasedWhenClosed = false
-        window.collectionBehavior = [.managed, .canJoinAllSpaces]
+        window.collectionBehavior = [.managed, .fullScreenPrimary]
+        window.setFrameAutosaveName("Tracer.MainWindow")
         mainWindow = window
 
-        enterWorkstationPresentationMode()
-        fillDisplay()
+        constrainMainWindowToCurrentScreen()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
@@ -57,22 +62,31 @@ private final class TracerAppDelegate: NSObject, NSApplicationDelegate {
             object: window,
             queue: .main
         ) { [weak self] _ in
-            self?.fillDisplay()
+            self?.constrainMainWindowToCurrentScreen()
         }
     }
 
-    private func fillDisplay() {
-        guard let window = mainWindow else { return }
-        let screen = window.screen ?? NSScreen.main
-        guard let frame = screen?.frame else { return }
-        window.setFrame(frame, display: true, animate: false)
+    private func defaultWindowFrame(on screen: NSScreen?) -> NSRect {
+        let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 960)
+        let width = min(max(1180, visible.width * 0.82), visible.width)
+        let height = min(max(760, visible.height * 0.84), visible.height)
+        return NSRect(x: visible.midX - width / 2,
+                      y: visible.midY - height / 2,
+                      width: width,
+                      height: height)
     }
 
-    private func enterWorkstationPresentationMode() {
-        var options = NSApp.presentationOptions
-        options.insert(.autoHideDock)
-        options.insert(.autoHideMenuBar)
-        NSApp.presentationOptions = options
+    private func constrainMainWindowToCurrentScreen() {
+        guard let window = mainWindow else { return }
+        guard let screen = window.screen ?? NSScreen.main else { return }
+        let constrained = window.constrainFrameRect(window.frame, to: screen)
+        window.setFrame(constrained, display: true, animate: false)
+    }
+
+    @objc private func fitMainWindowToDisplay() {
+        guard let window = mainWindow,
+              let screen = window.screen ?? NSScreen.main else { return }
+        window.setFrame(screen.visibleFrame, display: true, animate: true)
     }
 
     private func installMenu() {
@@ -113,6 +127,25 @@ private final class TracerAppDelegate: NSObject, NSApplicationDelegate {
         fileMenu.addItem(openNIfTI)
         fileMenuItem.submenu = fileMenu
         mainMenu.addItem(fileMenuItem)
+
+        let windowMenuItem = NSMenuItem()
+        let windowMenu = NSMenu(title: "Window")
+        let fitDisplay = NSMenuItem(title: "Fit Window to Display",
+                                    action: #selector(fitMainWindowToDisplay),
+                                    keyEquivalent: "f")
+        fitDisplay.target = self
+        fitDisplay.keyEquivalentModifierMask = [.command, .option]
+        windowMenu.addItem(fitDisplay)
+        windowMenu.addItem(.separator())
+        windowMenu.addItem(NSMenuItem(title: "Minimize",
+                                      action: #selector(NSWindow.performMiniaturize(_:)),
+                                      keyEquivalent: "m"))
+        windowMenu.addItem(NSMenuItem(title: "Zoom",
+                                      action: #selector(NSWindow.performZoom(_:)),
+                                      keyEquivalent: ""))
+        windowMenuItem.submenu = windowMenu
+        mainMenu.addItem(windowMenuItem)
+        NSApp.windowsMenu = windowMenu
 
         NSApp.mainMenu = mainMenu
     }

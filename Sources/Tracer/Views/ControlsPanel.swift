@@ -34,32 +34,29 @@ struct ControlsPanel: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("", selection: $group) {
+            ResponsivePicker("Panel", selection: $group, menuBreakpoint: 330) {
                 ForEach(Group.allCases) { g in
                     Text(g.rawValue).tag(g)
                 }
             }
-            .pickerStyle(.segmented)
             .padding(8)
 
             // Secondary sub-tab picker, shown only for groups that have
             // sub-tabs (Viewing, Segmentation).
             if group == .viewing {
-                Picker("", selection: $viewingSub) {
+                ResponsivePicker("Viewing", selection: $viewingSub, menuBreakpoint: 250) {
                     ForEach(ViewingSub.allCases) { s in
                         Text(s.rawValue).tag(s)
                     }
                 }
-                .pickerStyle(.segmented)
                 .padding(.horizontal, 8)
                 .padding(.bottom, 4)
             } else if group == .segmentation {
-                Picker("", selection: $segSub) {
+                ResponsivePicker("Segmentation", selection: $segSub, menuBreakpoint: 270) {
                     ForEach(SegSub.allCases) { s in
                         Text(s.rawValue).tag(s)
                     }
                 }
-                .pickerStyle(.segmented)
                 .padding(.horizontal, 8)
                 .padding(.bottom, 4)
             }
@@ -526,13 +523,12 @@ private struct DisplayTab: View {
 
             Text("Active Tool")
                 .font(.subheadline)
-            Picker("", selection: $vm.activeTool) {
+            ResponsivePicker("Active Tool", selection: $vm.activeTool, menuBreakpoint: 300) {
                 ForEach(ViewerTool.allCases) { t in
                     Label(t.displayName, systemImage: t.systemImage)
                         .tag(t)
                 }
             }
-            .pickerStyle(.segmented)
 
             Text(toolHelpText)
                 .font(.caption)

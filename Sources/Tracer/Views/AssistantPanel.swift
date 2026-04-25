@@ -41,12 +41,11 @@ struct AssistantPanel: View {
                 }
             }
 
-            Picker("Provider", selection: $provider) {
+            ResponsivePicker("Provider", selection: $provider, menuBreakpoint: 340) {
                 ForEach(AssistantCLIProvider.allCases) { provider in
                     Text(provider.displayName).tag(provider)
                 }
             }
-            .pickerStyle(.segmented)
 
             Text(runner.availabilityText(for: provider))
                 .font(.system(size: 10, design: .monospaced))

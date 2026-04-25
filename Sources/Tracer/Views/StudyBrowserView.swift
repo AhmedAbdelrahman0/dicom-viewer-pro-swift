@@ -362,27 +362,47 @@ struct StudyBrowserView: View {
                 .controlSize(.small)
             }
 
-            HStack(spacing: 6) {
-                Picker("Status", selection: $statusFilter) {
-                    ForEach(WorklistStatusFilter.allCases) { filter in
-                        Text(filter.displayName).tag(filter)
-                    }
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 6) {
+                    worklistStatusPicker
+                    worklistModalityPicker
+                    worklistDatePicker
                 }
 
-                Picker("Modality", selection: $modalityFilter) {
-                    ForEach(modalityFilterOptions, id: \.self) { modality in
-                        Text(modality).tag(modality)
-                    }
-                }
-
-                Picker("Date", selection: $dateFilter) {
-                    ForEach(WorklistDateFilter.allCases) { filter in
-                        Text(filter.displayName).tag(filter)
+                VStack(spacing: 6) {
+                    worklistStatusPicker
+                    HStack(spacing: 6) {
+                        worklistModalityPicker
+                        worklistDatePicker
                     }
                 }
             }
             .labelsHidden()
             .controlSize(.small)
+        }
+    }
+
+    private var worklistStatusPicker: some View {
+        Picker("Status", selection: $statusFilter) {
+            ForEach(WorklistStatusFilter.allCases) { filter in
+                Text(filter.displayName).tag(filter)
+            }
+        }
+    }
+
+    private var worklistModalityPicker: some View {
+        Picker("Modality", selection: $modalityFilter) {
+            ForEach(modalityFilterOptions, id: \.self) { modality in
+                Text(modality).tag(modality)
+            }
+        }
+    }
+
+    private var worklistDatePicker: some View {
+        Picker("Date", selection: $dateFilter) {
+            ForEach(WorklistDateFilter.allCases) { filter in
+                Text(filter.displayName).tag(filter)
+            }
         }
     }
 
