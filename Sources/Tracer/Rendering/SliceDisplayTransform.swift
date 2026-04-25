@@ -29,8 +29,15 @@ public struct SliceDisplayTransform: Equatable, Sendable {
     }
 
     public static func displayAxes(axis: Int, volume: ImageVolume) -> (right: SIMD3<Double>, down: SIMD3<Double>) {
+        displayAxes(axis: axis, volume: volume, transform: canonical(axis: axis, volume: volume))
+    }
+
+    public static func displayAxes(
+        axis: Int,
+        volume: ImageVolume,
+        transform: SliceDisplayTransform
+    ) -> (right: SIMD3<Double>, down: SIMD3<Double>) {
         let axes = rawDisplayAxes(axis: axis, volume: volume)
-        let transform = canonical(axis: axis, volume: volume)
         return (
             right: transform.flipHorizontal ? -axes.right : axes.right,
             down: transform.flipVertical ? -axes.down : axes.down

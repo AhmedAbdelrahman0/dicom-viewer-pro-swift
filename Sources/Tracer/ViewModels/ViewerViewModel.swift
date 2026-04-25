@@ -106,6 +106,7 @@ public final class ViewerViewModel: ObservableObject {
 
     // Display transforms
     @Published public var invertColors: Bool = false
+    @Published public var correctAnteriorPosteriorDisplay: Bool = true
 
     // Overlay display settings
     @Published public var overlayOpacity: Double = 0.5
@@ -113,6 +114,7 @@ public final class ViewerViewModel: ObservableObject {
     @Published public var overlayWindow: Double = 6
     @Published public var overlayLevel: Double = 3
     @Published public var suvSettings = SUVCalculationSettings()
+    @Published public var hangingPanes: [HangingPaneConfiguration] = HangingPaneConfiguration.defaultPETCT
 
     // Annotations per view
     @Published public var annotations: [Annotation] = []
@@ -162,6 +164,65 @@ public final class ViewerViewModel: ObservableObject {
 
     public var activePETSourceVolume: ImageVolume? {
         fusion?.overlayVolume ?? activePETQuantificationVolume
+    }
+
+    public var petOverlayRangeMin: Double {
+        overlayLevel - overlayWindow / 2
+    }
+
+    public var petOverlayRangeMax: Double {
+        overlayLevel + overlayWindow / 2
+    }
+
+    public func volumeForDisplayMode(_ mode: SliceDisplayMode) -> ImageVolume? {
+        switch mode {
+        case .fused, .ctOnly:
+            return fusion?.baseVolume ?? currentVolume
+        case .petOnly:
+            return activePETQuantificationVolume ?? currentVolume
+        }
+    }
+
+    public func setFusionOverlayVisible(_ visible: Bool) {
+        fusion?.overlayVisible = visible
+        fusion?.objectWillChange.send()
+        objectWillChange.send()
+    }
+
+    public func setFusionOpacity(_ opacity: Double) {
+        overlayOpacity = max(0, min(1, opacity))
+        fusion?.opacity = overlayOpacity
+        fusion?.objectWillChange.send()
+    }
+
+    public func setFusionColormap(_ colormap: Colormap) {
+        overlayColormap = colormap
+        fusion?.colormap = colormap
+        fusion?.objectWillChange.send()
+    }
+
+    public func setPETOverlayRange(min rawMin: Double, max rawMax: Double) {
+        let lower = max(0, min(rawMin, rawMax - 0.1))
+        let upper = max(lower + 0.1, rawMax)
+        overlayWindow = upper - lower
+        overlayLevel = (upper + lower) / 2
+        fusion?.overlayWindow = overlayWindow
+        fusion?.overlayLevel = overlayLevel
+        fusion?.objectWillChange.send()
+    }
+
+    public func setHangingPaneKind(index: Int, kind: HangingPaneKind) {
+        guard hangingPanes.indices.contains(index) else { return }
+        hangingPanes[index].kind = kind
+    }
+
+    public func setHangingPanePlane(index: Int, plane: SlicePlane) {
+        guard hangingPanes.indices.contains(index) else { return }
+        hangingPanes[index].plane = plane
+    }
+
+    public func resetPETHangingProtocol() {
+        hangingPanes = HangingPaneConfiguration.defaultPETCT
     }
 
     // MARK: - Loading
@@ -632,16 +693,14 @@ public final class ViewerViewModel: ObservableObject {
                 suvSettings.manualScaleFactor = overlay.suvScaleFactor ?? 1
             }
 
-            let maxValue = Double(overlay.intensityRange.max)
+            let range = petSUVDisplayRange(for: pair.displayedOverlay)
+            let maxValue = range.max
             if maxValue.isFinite, maxValue > 0, maxValue <= 25 {
-                overlayWindow = 10
-                overlayLevel = 5
+                setPETOverlayRange(min: 0, max: min(15, max(10, maxValue)))
             } else if maxValue.isFinite, maxValue > 0 {
-                overlayWindow = max(1, maxValue * 0.85)
-                overlayLevel = maxValue * 0.425
+                setPETOverlayRange(min: 0, max: max(1, maxValue * 0.85))
             } else {
-                overlayWindow = 10
-                overlayLevel = 5
+                setPETOverlayRange(min: 0, max: 10)
             }
         }
 
@@ -773,12 +832,47 @@ public final class ViewerViewModel: ObservableObject {
 
     public func displayTransform(for axis: Int, volume: ImageVolume? = nil) -> SliceDisplayTransform {
         guard let volume = volume ?? currentVolume else { return .identity }
-        return SliceDisplayTransform.canonical(axis: axis, volume: volume)
+        var transform = SliceDisplayTransform.canonical(axis: axis, volume: volume)
+        if correctAnteriorPosteriorDisplay {
+            transform = anteriorPosteriorCorrected(transform, axis: axis, volume: volume)
+        }
+        return transform
     }
 
     public func displayAxes(for axis: Int, volume: ImageVolume? = nil) -> (right: SIMD3<Double>, down: SIMD3<Double>)? {
         guard let volume = volume ?? currentVolume else { return nil }
-        return SliceDisplayTransform.displayAxes(axis: axis, volume: volume)
+        return SliceDisplayTransform.displayAxes(
+            axis: axis,
+            volume: volume,
+            transform: displayTransform(for: axis, volume: volume)
+        )
+    }
+
+    private func anteriorPosteriorCorrected(
+        _ transform: SliceDisplayTransform,
+        axis: Int,
+        volume: ImageVolume
+    ) -> SliceDisplayTransform {
+        let axes = SliceDisplayTransform.displayAxes(axis: axis, volume: volume, transform: transform)
+        var adjusted = transform
+        if isAnteriorPosteriorAxis(axes.right) {
+            adjusted = SliceDisplayTransform(
+                flipHorizontal: !adjusted.flipHorizontal,
+                flipVertical: adjusted.flipVertical
+            )
+        }
+        if isAnteriorPosteriorAxis(axes.down) {
+            adjusted = SliceDisplayTransform(
+                flipHorizontal: adjusted.flipHorizontal,
+                flipVertical: !adjusted.flipVertical
+            )
+        }
+        return adjusted
+    }
+
+    private func isAnteriorPosteriorAxis(_ vector: SIMD3<Double>) -> Bool {
+        let letter = SliceDisplayTransform.patientLetter(for: vector)
+        return letter == "A" || letter == "P"
     }
 
     // MARK: - W/L manipulation
@@ -1031,8 +1125,8 @@ public final class ViewerViewModel: ObservableObject {
 
     // MARK: - Slice images
 
-    public func makeImage(for axis: Int) -> CGImage? {
-        guard let v = currentVolume else { return nil }
+    public func makeImage(for axis: Int, mode: SliceDisplayMode = .fused) -> CGImage? {
+        guard let v = volumeForDisplayMode(mode) else { return nil }
         let slice = v.slice(axis: axis, index: sliceIndices[axis])
         var pixels = slice.pixels
         let w = slice.width, h = slice.height
@@ -1040,20 +1134,33 @@ public final class ViewerViewModel: ObservableObject {
         pixels = SliceTransform.apply(pixels, width: w, height: h,
                                       transform: displayTransform(for: axis, volume: v))
 
+        if mode == .petOnly, Modality.normalize(v.modality) == .PT {
+            pixels = petDisplayPixels(pixels, volume: v)
+            return PixelRenderer.makeColorImage(
+                pixels: pixels, width: w, height: h,
+                window: overlayWindow, level: overlayLevel,
+                colormap: overlayColormap,
+                baseAlpha: 1.0
+            )
+        }
+
         return PixelRenderer.makeGrayImage(
             pixels: pixels, width: w, height: h,
             window: window, level: level, invert: invertColors
         )
     }
 
-    public func makeLabelImage(for axis: Int, outlineOnly: Bool = false) -> CGImage? {
+    public func makeLabelImage(for axis: Int,
+                               mode: SliceDisplayMode = .fused,
+                               outlineOnly: Bool = false) -> CGImage? {
         guard let map = labeling.activeLabelMap else { return nil }
         guard map.visible else { return nil }
         let slice = map.slice(axis: axis, index: sliceIndices[axis])
         var values = slice.values
         let w = slice.width, h = slice.height
+        let displayVolume = volumeForDisplayMode(mode) ?? currentVolume
         values = SliceTransform.apply(values, width: w, height: h,
-                                      transform: displayTransform(for: axis))
+                                      transform: displayTransform(for: axis, volume: displayVolume))
         if outlineOnly {
             return LabelRenderer.makeOutlineImage(values: values, width: w, height: h,
                                                     classes: map.classes,
@@ -1064,12 +1171,13 @@ public final class ViewerViewModel: ObservableObject {
                                          baseAlpha: map.opacity)
     }
 
-    public func makeOverlayImage(for axis: Int) -> CGImage? {
+    public func makeOverlayImage(for axis: Int, mode: SliceDisplayMode = .fused) -> CGImage? {
+        guard mode == .fused else { return nil }
         guard let pair = fusion else { return nil }
         guard pair.overlayVisible else { return nil }
         let ov = pair.displayedOverlay
         let slice = ov.slice(axis: axis, index: sliceIndices[axis])
-        var pixels = slice.pixels
+        var pixels = petDisplayPixels(slice.pixels, volume: ov)
         let w = slice.width, h = slice.height
         pixels = SliceTransform.apply(pixels, width: w, height: h,
                                       transform: displayTransform(for: axis, volume: pair.baseVolume))
@@ -1079,6 +1187,94 @@ public final class ViewerViewModel: ObservableObject {
             colormap: pair.colormap,
             baseAlpha: pair.opacity
         )
+    }
+
+    public func makePETMIPImage(for axis: Int) -> CGImage? {
+        guard let pet = activePETQuantificationVolume else { return nil }
+        let mip = petMaximumIntensityProjection(pet, axis: axis)
+        var pixels = SliceTransform.apply(
+            mip.pixels,
+            width: mip.width,
+            height: mip.height,
+            transform: displayTransform(for: axis, volume: pet)
+        )
+        pixels = petDisplayPixels(pixels, volume: pet)
+        return PixelRenderer.makeColorImage(
+            pixels: pixels,
+            width: mip.width,
+            height: mip.height,
+            window: overlayWindow,
+            level: overlayLevel,
+            colormap: overlayColormap,
+            baseAlpha: 1.0
+        )
+    }
+
+    public func petSUVDisplayRange(for volume: ImageVolume) -> (min: Double, max: Double) {
+        guard Modality.normalize(volume.modality) == .PT else {
+            return (Double(volume.intensityRange.min), Double(volume.intensityRange.max))
+        }
+        var minValue = Double.greatestFiniteMagnitude
+        var maxValue = -Double.greatestFiniteMagnitude
+        for raw in volume.pixels {
+            let value = suvValue(rawStoredValue: Double(raw), volume: volume)
+            guard value.isFinite else { continue }
+            minValue = Swift.min(minValue, value)
+            maxValue = Swift.max(maxValue, value)
+        }
+        if minValue == Double.greatestFiniteMagnitude {
+            return (0, 1)
+        }
+        return (minValue, maxValue)
+    }
+
+    private func petDisplayPixels(_ pixels: [Float], volume: ImageVolume) -> [Float] {
+        guard Modality.normalize(volume.modality) == .PT else { return pixels }
+        return pixels.map { Float(suvValue(rawStoredValue: Double($0), volume: volume)) }
+    }
+
+    private func petMaximumIntensityProjection(
+        _ volume: ImageVolume,
+        axis: Int
+    ) -> (pixels: [Float], width: Int, height: Int) {
+        switch axis {
+        case 0:
+            var out = [Float](repeating: 0, count: volume.depth * volume.height)
+            for z in 0..<volume.depth {
+                for y in 0..<volume.height {
+                    var maxValue = -Float.greatestFiniteMagnitude
+                    for x in 0..<volume.width {
+                        maxValue = Swift.max(maxValue, volume.intensity(z: z, y: y, x: x))
+                    }
+                    out[z * volume.height + y] = maxValue
+                }
+            }
+            return (out, volume.height, volume.depth)
+        case 1:
+            var out = [Float](repeating: 0, count: volume.depth * volume.width)
+            for z in 0..<volume.depth {
+                for x in 0..<volume.width {
+                    var maxValue = -Float.greatestFiniteMagnitude
+                    for y in 0..<volume.height {
+                        maxValue = Swift.max(maxValue, volume.intensity(z: z, y: y, x: x))
+                    }
+                    out[z * volume.width + x] = maxValue
+                }
+            }
+            return (out, volume.width, volume.depth)
+        default:
+            var out = [Float](repeating: 0, count: volume.height * volume.width)
+            for y in 0..<volume.height {
+                for x in 0..<volume.width {
+                    var maxValue = -Float.greatestFiniteMagnitude
+                    for z in 0..<volume.depth {
+                        maxValue = Swift.max(maxValue, volume.intensity(z: z, y: y, x: x))
+                    }
+                    out[y * volume.width + x] = maxValue
+                }
+            }
+            return (out, volume.width, volume.height)
+        }
     }
 }
 

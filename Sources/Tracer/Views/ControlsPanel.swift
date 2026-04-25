@@ -220,9 +220,13 @@ private struct FusionTab: View {
                 fusionLayerStack(pair)
 
                 Toggle("Show PET overlay", isOn: Binding(
-                    get: { pair.overlayVisible },
-                    set: { pair.overlayVisible = $0; pair.objectWillChange.send() }
+                    get: { vm.fusion?.overlayVisible ?? false },
+                    set: { vm.setFusionOverlayVisible($0) }
                 ))
+                .help("Turns the PET layer on/off in fused panes. PET-only and MIP panes stay visible.")
+
+                Toggle("Correct A/P display", isOn: $vm.correctAnteriorPosteriorDisplay)
+                    .help("Use this when anterior/posterior anatomy appears swapped in CT/PET panes.")
 
                 // Opacity
                 VStack(alignment: .leading) {
@@ -234,10 +238,7 @@ private struct FusionTab: View {
                     }
                     Slider(value: Binding(
                         get: { vm.overlayOpacity },
-                        set: { new in
-                            vm.overlayOpacity = new
-                            vm.fusion?.opacity = new
-                        }
+                        set: { vm.setFusionOpacity($0) }
                     ), in: 0...1)
                 }
 
@@ -247,10 +248,7 @@ private struct FusionTab: View {
                     Spacer()
                     Picker("", selection: Binding(
                         get: { vm.overlayColormap },
-                        set: { new in
-                            vm.overlayColormap = new
-                            vm.fusion?.colormap = new
-                        }
+                        set: { vm.setFusionColormap($0) }
                     )) {
                         ForEach(Colormap.allCases) { c in
                             Text(c.displayName).tag(c)
@@ -262,8 +260,7 @@ private struct FusionTab: View {
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 5) {
                     ForEach(petPaletteShortlist) { c in
                         Button {
-                            vm.overlayColormap = c
-                            vm.fusion?.colormap = c
+                            vm.setFusionColormap(c)
                         } label: {
                             HStack(spacing: 5) {
                                 paletteSwatch(c)
@@ -279,63 +276,15 @@ private struct FusionTab: View {
                     }
                 }
 
-                // Overlay W/L
-                VStack(alignment: .leading) {
-                    Text("PET Range")
-                        .font(.subheadline)
-                    HStack(spacing: 6) {
-                        Button("SUV 0-10") {
-                            vm.overlayWindow = 10
-                            vm.overlayLevel = 5
-                            vm.fusion?.overlayWindow = 10
-                            vm.fusion?.overlayLevel = 5
-                        }
-                        Button("SUV 0-15") {
-                            vm.overlayWindow = 15
-                            vm.overlayLevel = 7.5
-                            vm.fusion?.overlayWindow = 15
-                            vm.fusion?.overlayLevel = 7.5
-                        }
-                        Button("Auto") {
-                            if let overlay = vm.fusion?.overlayVolume {
-                                let maxValue = max(1, Double(overlay.intensityRange.max))
-                                vm.overlayWindow = maxValue
-                                vm.overlayLevel = maxValue * 0.5
-                                vm.fusion?.overlayWindow = vm.overlayWindow
-                                vm.fusion?.overlayLevel = vm.overlayLevel
-                            }
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.mini)
+                petSUVRangePanel
 
-                    HStack {
-                        Text("W:")
-                        Slider(value: Binding(
-                            get: { vm.overlayWindow },
-                            set: { new in
-                                vm.overlayWindow = new
-                                vm.fusion?.overlayWindow = new
-                            }
-                        ), in: 0.1...40)
-                        Text(String(format: "%.1f", vm.overlayWindow))
-                            .font(.system(size: 11, design: .monospaced))
-                            .frame(width: 40, alignment: .trailing)
-                    }
-                    HStack {
-                        Text("L:")
-                        Slider(value: Binding(
-                            get: { vm.overlayLevel },
-                            set: { new in
-                                vm.overlayLevel = new
-                                vm.fusion?.overlayLevel = new
-                            }
-                        ), in: 0...40)
-                        Text(String(format: "%.1f", vm.overlayLevel))
-                            .font(.system(size: 11, design: .monospaced))
-                            .frame(width: 40, alignment: .trailing)
-                    }
-                }
+                Divider()
+
+                ctWindowPanel
+
+                Divider()
+
+                hangingProtocolPanel
 
                 Divider()
 
@@ -444,6 +393,169 @@ private struct FusionTab: View {
         case .petMagma: return "Magma"
         case .petViridis: return "Viridis"
         default: return colormap.displayName
+        }
+    }
+
+    private var petSUVRangePanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("PET SUV Range")
+                    .font(.subheadline)
+                Spacer()
+                Text(String(format: "%.1f–%.1f", vm.petOverlayRangeMin, vm.petOverlayRangeMax))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(TracerTheme.pet)
+            }
+
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 6) { petRangePresetButtons }
+                VStack(alignment: .leading, spacing: 6) { petRangePresetButtons }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.mini)
+
+            HStack {
+                Text("Min")
+                    .frame(width: 28, alignment: .leading)
+                Slider(value: Binding(
+                    get: { max(0, vm.petOverlayRangeMin) },
+                    set: { vm.setPETOverlayRange(min: $0, max: vm.petOverlayRangeMax) }
+                ), in: 0...60, step: 0.1)
+                Text(String(format: "%.1f", vm.petOverlayRangeMin))
+                    .font(.system(size: 11, design: .monospaced))
+                    .frame(width: 36, alignment: .trailing)
+                Stepper("", value: Binding(
+                    get: { max(0, vm.petOverlayRangeMin) },
+                    set: { vm.setPETOverlayRange(min: $0, max: vm.petOverlayRangeMax) }
+                ), in: 0...60, step: 0.1)
+                .labelsHidden()
+                .frame(width: 28)
+            }
+
+            HStack {
+                Text("Max")
+                    .frame(width: 28, alignment: .leading)
+                Slider(value: Binding(
+                    get: { min(80, max(0.1, vm.petOverlayRangeMax)) },
+                    set: { vm.setPETOverlayRange(min: vm.petOverlayRangeMin, max: $0) }
+                ), in: 0.1...80, step: 0.1)
+                Text(String(format: "%.1f", vm.petOverlayRangeMax))
+                    .font(.system(size: 11, design: .monospaced))
+                    .frame(width: 36, alignment: .trailing)
+                Stepper("", value: Binding(
+                    get: { min(80, max(0.1, vm.petOverlayRangeMax)) },
+                    set: { vm.setPETOverlayRange(min: vm.petOverlayRangeMin, max: $0) }
+                ), in: 0.1...80, step: 0.1)
+                .labelsHidden()
+                .frame(width: 28)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var petRangePresetButtons: some View {
+        Button("0–5") { vm.setPETOverlayRange(min: 0, max: 5) }
+        Button("0–10") { vm.setPETOverlayRange(min: 0, max: 10) }
+        Button("0–15") { vm.setPETOverlayRange(min: 0, max: 15) }
+        Button("2.5–15") { vm.setPETOverlayRange(min: 2.5, max: 15) }
+        Button("Auto") {
+            if let overlay = vm.activePETQuantificationVolume {
+                let range = vm.petSUVDisplayRange(for: overlay)
+                vm.setPETOverlayRange(min: max(0, range.min), max: max(1, range.max))
+            }
+        }
+    }
+
+    private var ctWindowPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("CT Window")
+                    .font(.subheadline)
+                Spacer()
+                Text("W \(Int(vm.window)) / L \(Int(vm.level))")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 5) {
+                ForEach(WLPresets.CT) { preset in
+                    Button(preset.name) {
+                        vm.applyPreset(preset)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                }
+            }
+
+            HStack {
+                Text("W")
+                    .frame(width: 18, alignment: .leading)
+                Slider(value: $vm.window, in: 1...5000)
+                Text("\(Int(vm.window))")
+                    .font(.system(size: 11, design: .monospaced))
+                    .frame(width: 48, alignment: .trailing)
+            }
+
+            HStack {
+                Text("L")
+                    .frame(width: 18, alignment: .leading)
+                Slider(value: $vm.level, in: -1200...3000)
+                Text("\(Int(vm.level))")
+                    .font(.system(size: 11, design: .monospaced))
+                    .frame(width: 48, alignment: .trailing)
+            }
+        }
+    }
+
+    private var hangingProtocolPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Hanging Protocol")
+                    .font(.subheadline)
+                Spacer()
+                Button {
+                    vm.resetPETHangingProtocol()
+                } label: {
+                    Label("Reset", systemImage: "arrow.counterclockwise")
+                        .labelStyle(.iconOnly)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+                .help("Restore PET/CT default: fused, CT, PET, and PET MIP panes.")
+            }
+
+            ForEach(Array(vm.hangingPanes.enumerated()), id: \.element.id) { index, pane in
+                HStack(spacing: 6) {
+                    Text("\(index + 1)")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .frame(width: 16)
+                    Picker("", selection: Binding(
+                        get: { pane.kind },
+                        set: { vm.setHangingPaneKind(index: index, kind: $0) }
+                    )) {
+                        ForEach(HangingPaneKind.allCases) { kind in
+                            Label(kind.displayName, systemImage: kind.systemImage).tag(kind)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: .infinity)
+
+                    Picker("", selection: Binding(
+                        get: { pane.plane },
+                        set: { vm.setHangingPanePlane(index: index, plane: $0) }
+                    )) {
+                        ForEach(SlicePlane.allCases) { plane in
+                            Text(plane.shortName).tag(plane)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 78)
+                }
+                .controlSize(.small)
+            }
         }
     }
 
@@ -625,6 +737,9 @@ private struct DisplayTab: View {
 
             Toggle("Invert Colors", isOn: $vm.invertColors)
                 .help("Useful for MR or X-ray inversion")
+
+            Toggle("Correct A/P Display Flip", isOn: $vm.correctAnteriorPosteriorDisplay)
+                .help("Swaps the displayed anterior/posterior axis for studies that load reversed. This affects display, hover sampling, measurements, PET overlay, and labels together.")
 
             Divider()
 

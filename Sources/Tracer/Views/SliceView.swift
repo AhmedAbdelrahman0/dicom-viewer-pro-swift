@@ -12,6 +12,8 @@ public struct SliceView: View {
     @EnvironmentObject var vm: ViewerViewModel
     let axis: Int
     let title: String
+    let displayMode: SliceDisplayMode
+    let paneIndex: Int?
 
     // Per-view display transform state
     @State private var zoom: CGFloat = 1.0
@@ -21,8 +23,6 @@ public struct SliceView: View {
     @State private var dragStart: CGPoint?
     @State private var lastPaintPoint: (Int, Int)?
     #if os(macOS)
-    @State private var isPointerInsideViewport = false
-    @State private var scrollMonitor: Any?
     @State private var wheelAccumulator: CGFloat = 0
     #endif
 
@@ -31,9 +31,14 @@ public struct SliceView: View {
     /// `nil` when the cursor has left the image area.
     @State private var hoverSample: HoverSample?
 
-    public init(axis: Int, title: String) {
+    public init(axis: Int,
+                title: String,
+                displayMode: SliceDisplayMode = .fused,
+                paneIndex: Int? = nil) {
         self.axis = axis
         self.title = title
+        self.displayMode = displayMode
+        self.paneIndex = paneIndex
     }
 
     public var body: some View {
@@ -43,7 +48,7 @@ public struct SliceView: View {
                 ZStack {
                     TracerTheme.viewportBackground
 
-                    if let cg = vm.makeImage(for: axis) {
+                    if let cg = vm.makeImage(for: axis, mode: displayMode) {
                         let imgW = CGFloat(cg.width)
                         let imgH = CGFloat(cg.height)
                         let fit = min(geo.size.width / imgW, geo.size.height / imgH) * zoom
@@ -56,7 +61,7 @@ public struct SliceView: View {
                             .offset(pan)
 
                         // Overlay image (if fusion active)
-                        if let ov = vm.makeOverlayImage(for: axis) {
+                        if let ov = vm.makeOverlayImage(for: axis, mode: displayMode) {
                             Image(decorative: ov, scale: 1.0)
                                 .resizable()
                                 .interpolation(.medium)
@@ -65,7 +70,7 @@ public struct SliceView: View {
                         }
 
                         // Label overlay
-                        if let lbl = vm.makeLabelImage(for: axis) {
+                        if let lbl = vm.makeLabelImage(for: axis, mode: displayMode) {
                             Image(decorative: lbl, scale: 1.0)
                                 .resizable()
                                 .interpolation(.none)
@@ -121,26 +126,17 @@ public struct SliceView: View {
                 .onContinuousHover { phase in
                     switch phase {
                     case .active(let location):
-                        #if os(macOS)
-                        isPointerInsideViewport = true
-                        #endif
                         hoverSample = sampleVoxel(at: location, in: geo.size)
                     case .ended:
-                        #if os(macOS)
-                        isPointerInsideViewport = false
-                        #endif
                         hoverSample = nil
                     }
                 }
                 .contextMenu { contextMenuItems() }
                 #if os(macOS)
-                .onAppear {
-                    installScrollWheelMonitor()
-                    NSCursor.setHiddenUntilMouseMoves(false)
-                }
-                .onDisappear {
-                    removeScrollWheelMonitor()
-                }
+                .background(SliceScrollWheelBridge { event in
+                    handleScrollWheel(event)
+                })
+                .onAppear { NSCursor.setHiddenUntilMouseMoves(false) }
                 #endif
             }
             .background(TracerTheme.viewportBackground)
@@ -160,6 +156,10 @@ public struct SliceView: View {
                 .font(.system(size: 11, weight: .bold))
                 .foregroundColor(TracerTheme.accentBright)
                 .help("\(title) view\nScroll wheel or slider to navigate slices")
+
+            if let paneIndex {
+                paneControls(index: paneIndex)
+            }
 
             Spacer()
 
@@ -189,7 +189,7 @@ public struct SliceView: View {
 
     private var sliceScrubber: some View {
         HStack(spacing: 4) {
-            if let v = vm.currentVolume {
+            if let v = vm.volumeForDisplayMode(displayMode) {
                 let maxIdx: Int = {
                     switch axis {
                     case 0: return v.width - 1
@@ -197,11 +197,12 @@ public struct SliceView: View {
                     default: return v.depth - 1
                     }
                 }()
+                let currentIndex = max(0, min(maxIdx, vm.sliceIndices[axis]))
                 let binding = Binding<Double>(
-                    get: { Double(vm.sliceIndices[axis]) },
+                    get: { Double(currentIndex) },
                     set: { vm.setSlice(axis: axis, index: Int($0)) }
                 )
-                Text("\(vm.sliceIndices[axis] + 1)/\(maxIdx + 1)")
+                Text("\(currentIndex + 1)/\(maxIdx + 1)")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.gray)
                     .frame(width: 60, alignment: .trailing)
@@ -215,12 +216,12 @@ public struct SliceView: View {
 
     private var infoText: some View {
         VStack(alignment: .leading, spacing: 2) {
-            if let v = vm.currentVolume {
+            if let v = vm.volumeForDisplayMode(displayMode) {
                 let (w, h) = sliceDimensions(for: v)
                 Text("\(w)×\(h)")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.gray)
-                Text("W: \(Int(vm.window))  L: \(Int(vm.level))")
+                Text(windowLevelInfo(for: v))
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.gray)
                 Text(String(format: "Zoom: %.0f%%", zoom * 100))
@@ -233,8 +234,45 @@ public struct SliceView: View {
         .cornerRadius(4)
     }
 
+    private func paneControls(index: Int) -> some View {
+        HStack(spacing: 3) {
+            Picker("", selection: Binding(
+                get: { vm.hangingPanes.indices.contains(index) ? vm.hangingPanes[index].kind : .fused },
+                set: { vm.setHangingPaneKind(index: index, kind: $0) }
+            )) {
+                ForEach(HangingPaneKind.allCases) { kind in
+                    Label(kind.displayName, systemImage: kind.systemImage).tag(kind)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(width: 88)
+            .controlSize(.mini)
+
+            Picker("", selection: Binding(
+                get: { vm.hangingPanes.indices.contains(index) ? vm.hangingPanes[index].plane : .axial },
+                set: { vm.setHangingPanePlane(index: index, plane: $0) }
+            )) {
+                ForEach(SlicePlane.allCases) { plane in
+                    Text(plane.shortName).tag(plane)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(width: 58)
+            .controlSize(.mini)
+        }
+    }
+
+    private func windowLevelInfo(for volume: ImageVolume) -> String {
+        if Modality.normalize(volume.modality) == .PT || displayMode == .petOnly {
+            return String(format: "SUV %.1f–%.1f", vm.petOverlayRangeMin, vm.petOverlayRangeMax)
+        }
+        return "W: \(Int(vm.window))  L: \(Int(vm.level))"
+    }
+
     private var fusionLayerBadge: AnyView? {
-        guard let pair = vm.fusion, pair.overlayVisible else { return nil }
+        guard displayMode == .fused, let pair = vm.fusion, pair.overlayVisible else { return nil }
         let overlay = Modality.normalize(pair.overlayVolume.modality).displayName
         let base = Modality.normalize(pair.baseVolume.modality).displayName
         let opacity = Int(pair.opacity * 100)
@@ -284,8 +322,8 @@ public struct SliceView: View {
     }
 
     private func sampleVoxel(at location: CGPoint, in viewSize: CGSize) -> HoverSample? {
-        guard let volume = vm.currentVolume,
-              let cg = vm.makeImage(for: axis) else {
+        guard let volume = vm.volumeForDisplayMode(displayMode),
+              let cg = vm.makeImage(for: axis, mode: displayMode) else {
             return nil
         }
         let imgW = CGFloat(cg.width)
@@ -486,11 +524,12 @@ public struct SliceView: View {
     }
 
     private func orientationLetters(for axis: Int) -> (top: String, bottom: String, left: String, right: String) {
-        guard let volume = vm.currentVolume else {
+        guard let volume = vm.volumeForDisplayMode(displayMode) else {
             return fallbackOrientationLetters(for: axis)
         }
 
-        let axes = SliceDisplayTransform.displayAxes(axis: axis, volume: volume)
+        let axes = vm.displayAxes(for: axis, volume: volume)
+            ?? SliceDisplayTransform.displayAxes(axis: axis, volume: volume)
         let rightVector = axes.right
         let downVector = axes.down
 
@@ -525,22 +564,6 @@ public struct SliceView: View {
     }
 
     #if os(macOS)
-    private func installScrollWheelMonitor() {
-        guard scrollMonitor == nil else { return }
-        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
-            guard isPointerInsideViewport, vm.currentVolume != nil else { return event }
-            handleScrollWheel(event)
-            return nil
-        }
-    }
-
-    private func removeScrollWheelMonitor() {
-        if let scrollMonitor {
-            NSEvent.removeMonitor(scrollMonitor)
-            self.scrollMonitor = nil
-        }
-    }
-
     private func handleScrollWheel(_ event: NSEvent) {
         let rawDelta = event.scrollingDeltaY != 0 ? event.scrollingDeltaY : event.deltaY
         guard abs(rawDelta) > 0.01 else { return }
@@ -552,7 +575,7 @@ public struct SliceView: View {
             return
         }
 
-        let threshold: CGFloat = event.hasPreciseScrollingDeltas ? 14 : 1
+        let threshold: CGFloat = event.hasPreciseScrollingDeltas ? 5 : 1
         wheelAccumulator += rawDelta
         let steps = Int(wheelAccumulator / threshold)
         guard steps != 0 else { return }
@@ -569,7 +592,7 @@ public struct SliceView: View {
 
                 // Labeling tools take priority over viewer tools
                 if vm.labeling.labelingTool != .none,
-                   let v = vm.currentVolume {
+                   let v = vm.volumeForDisplayMode(displayMode) {
                     handleLabelingDrag(value: value, volume: v, geo: geo)
                     return
                 }
@@ -598,7 +621,7 @@ public struct SliceView: View {
                 if vm.labeling.labelingTool == .none,
                    isMeasurementTool(vm.activeTool),
                    isTap(value),
-                   let volume = vm.currentVolume {
+                   let volume = vm.volumeForDisplayMode(displayMode) {
                     handleMeasurementTap(at: value.location, volume: volume, geo: geo)
                 }
                 dragStart = nil
@@ -888,7 +911,7 @@ public struct SliceView: View {
     }
 
     private func displayPoint(for point: CGPoint, imageSize: CGSize) -> CGPoint {
-        let transform = vm.displayTransform(for: axis)
+        let transform = vm.displayTransform(for: axis, volume: vm.volumeForDisplayMode(displayMode))
         var display = point
         if transform.flipHorizontal {
             display.x = imageSize.width - 1 - display.x
@@ -906,3 +929,77 @@ public struct SliceView: View {
         pan = .zero
     }
 }
+
+#if os(macOS)
+private struct SliceScrollWheelBridge: NSViewRepresentable {
+    var onScroll: (NSEvent) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onScroll: onScroll)
+    }
+
+    func makeNSView(context: Context) -> ScrollWheelView {
+        let view = ScrollWheelView()
+        view.coordinator = context.coordinator
+        return view
+    }
+
+    func updateNSView(_ nsView: ScrollWheelView, context: Context) {
+        context.coordinator.onScroll = onScroll
+        nsView.coordinator = context.coordinator
+    }
+
+    static func dismantleNSView(_ nsView: ScrollWheelView, coordinator: Coordinator) {
+        nsView.removeMonitor()
+    }
+
+    final class Coordinator {
+        var onScroll: (NSEvent) -> Void
+
+        init(onScroll: @escaping (NSEvent) -> Void) {
+            self.onScroll = onScroll
+        }
+    }
+
+    final class ScrollWheelView: NSView {
+        weak var coordinator: Coordinator?
+        private var monitor: Any?
+
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+            installMonitor()
+        }
+
+        required init?(coder: NSCoder) {
+            super.init(coder: coder)
+            installMonitor()
+        }
+
+        deinit {
+            removeMonitor()
+        }
+
+        private func installMonitor() {
+            guard monitor == nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                guard let self,
+                      let window = self.window,
+                      event.window === window else {
+                    return event
+                }
+                let point = convert(event.locationInWindow, from: nil)
+                guard bounds.contains(point) else { return event }
+                coordinator?.onScroll(event)
+                return nil
+            }
+        }
+
+        func removeMonitor() {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+                self.monitor = nil
+            }
+        }
+    }
+}
+#endif

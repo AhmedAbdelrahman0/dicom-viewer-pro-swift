@@ -70,6 +70,43 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(SliceDisplayTransform.patientLetter(for: SliceDisplayTransform.displayAxes(axis: 2, volume: volume).down), "P")
     }
 
+    @MainActor
+    func testViewerAPCorrectionCanBeToggledForDisplayOnly() {
+        let vm = ViewerViewModel()
+        let volume = ImageVolume(
+            pixels: [Float](repeating: 0, count: 8),
+            depth: 2,
+            height: 2,
+            width: 2,
+            direction: matrix_identity_double3x3
+        )
+        vm.displayVolume(volume)
+
+        XCTAssertTrue(vm.displayTransform(for: 2).flipVertical)
+
+        vm.correctAnteriorPosteriorDisplay = false
+        XCTAssertFalse(vm.displayTransform(for: 2).flipVertical)
+    }
+
+    @MainActor
+    func testPETOverlayRangeUsesExplicitSUVMinMax() {
+        let vm = ViewerViewModel()
+
+        vm.setPETOverlayRange(min: 2.5, max: 15)
+
+        XCTAssertEqual(vm.petOverlayRangeMin, 2.5, accuracy: 1e-9)
+        XCTAssertEqual(vm.petOverlayRangeMax, 15, accuracy: 1e-9)
+        XCTAssertEqual(vm.overlayWindow, 12.5, accuracy: 1e-9)
+        XCTAssertEqual(vm.overlayLevel, 8.75, accuracy: 1e-9)
+    }
+
+    func testDefaultPETHangingProtocolExposesFusionCTPETAndMIP() {
+        XCTAssertEqual(
+            HangingPaneConfiguration.defaultPETCT.map(\.kind),
+            [.fused, .ctOnly, .petOnly, .petMIP]
+        )
+    }
+
     func testNIfTILoaderPreservesSFormAsLPSGeometry() throws {
         var data = Data(count: 352)
         data.writeInt32LE(348, at: 0)

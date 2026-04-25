@@ -911,21 +911,192 @@ struct MPRLayoutView: View {
                 let h = max(0, (geo.size.height - gap) / 2)
                 VStack(spacing: gap) {
                     HStack(spacing: gap) {
-                        SliceView(axis: 2, title: "Axial")
+                        HangingPaneView(index: 0)
                             .frame(width: w, height: h)
-                        SliceView(axis: 0, title: "Sagittal")
+                        HangingPaneView(index: 1)
                             .frame(width: w, height: h)
                     }
                     HStack(spacing: gap) {
-                        SliceView(axis: 1, title: "Coronal")
+                        HangingPaneView(index: 2)
                             .frame(width: w, height: h)
-                        VolumeRenderingPane()
+                        HangingPaneView(index: 3)
                             .frame(width: w, height: h)
                     }
                 }
             }
             .background(TracerTheme.viewportBackground)
         }
+    }
+}
+
+private struct HangingPaneView: View {
+    @EnvironmentObject var vm: ViewerViewModel
+    let index: Int
+
+    var body: some View {
+        let config = paneConfig
+        if config.kind == .petMIP {
+            PETMIPPane(index: index, plane: config.plane)
+        } else {
+            SliceView(
+                axis: config.plane.axis,
+                title: "\(config.kind.shortName) \(config.plane.shortName)",
+                displayMode: config.kind.sliceDisplayMode ?? .fused,
+                paneIndex: index
+            )
+        }
+    }
+
+    private var paneConfig: HangingPaneConfiguration {
+        if vm.hangingPanes.indices.contains(index) {
+            return vm.hangingPanes[index]
+        }
+        return HangingPaneConfiguration.defaultPETCT[index % HangingPaneConfiguration.defaultPETCT.count]
+    }
+}
+
+private struct PETMIPPane: View {
+    @EnvironmentObject var vm: ViewerViewModel
+    let index: Int
+    let plane: SlicePlane
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            GeometryReader { geo in
+                ZStack {
+                    TracerTheme.viewportBackground
+                    if let cg = vm.makePETMIPImage(for: plane.axis) {
+                        let imgW = CGFloat(cg.width)
+                        let imgH = CGFloat(cg.height)
+                        let fit = min(geo.size.width / imgW, geo.size.height / imgH)
+                        Image(decorative: cg, scale: 1.0)
+                            .resizable()
+                            .interpolation(.medium)
+                            .frame(width: imgW * fit, height: imgH * fit)
+
+                        orientationMarkers
+                            .padding(12)
+
+                        VStack {
+                            Spacer()
+                            HStack {
+                                mipBadge
+                                Spacer()
+                            }
+                        }
+                        .padding(8)
+                    } else {
+                        VStack(spacing: 8) {
+                            Image(systemName: "flame")
+                                .font(.system(size: 30))
+                                .foregroundColor(.secondary)
+                            Text("Load or fuse PET to show MIP")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+                .clipped()
+            }
+            .background(TracerTheme.viewportBackground)
+            .overlay(Rectangle().stroke(TracerTheme.hairline, lineWidth: 1))
+        }
+        .background(TracerTheme.panelBackground)
+    }
+
+    private var header: some View {
+        HStack(spacing: 4) {
+            Text("MIP \(plane.shortName)")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(TracerTheme.pet)
+
+            Picker("", selection: Binding(
+                get: { vm.hangingPanes.indices.contains(index) ? vm.hangingPanes[index].kind : .petMIP },
+                set: { vm.setHangingPaneKind(index: index, kind: $0) }
+            )) {
+                ForEach(HangingPaneKind.allCases) { kind in
+                    Label(kind.displayName, systemImage: kind.systemImage).tag(kind)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(width: 88)
+            .controlSize(.mini)
+
+            Picker("", selection: Binding(
+                get: { vm.hangingPanes.indices.contains(index) ? vm.hangingPanes[index].plane : .coronal },
+                set: { vm.setHangingPanePlane(index: index, plane: $0) }
+            )) {
+                ForEach(SlicePlane.allCases) { plane in
+                    Text(plane.shortName).tag(plane)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(width: 58)
+            .controlSize(.mini)
+
+            Spacer()
+
+            Text(String(format: "SUV %.1f–%.1f", vm.petOverlayRangeMin, vm.petOverlayRangeMax))
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundColor(.secondary)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(TracerTheme.headerBackground)
+    }
+
+    private var mipBadge: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "cube.transparent")
+                .foregroundColor(TracerTheme.pet)
+            Text("PET MIP")
+                .foregroundColor(.white)
+            Text(vm.overlayColormap.displayName)
+                .foregroundColor(.secondary)
+        }
+        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+        .padding(.vertical, 4)
+        .padding(.horizontal, 7)
+        .background(Color.black.opacity(0.58))
+        .cornerRadius(5)
+    }
+
+    private var orientationMarkers: some View {
+        let letters = orientationLetters
+        return ZStack {
+            VStack {
+                Text(letters.top).opacity(0.6)
+                Spacer()
+                Text(letters.bottom).opacity(0.6)
+            }
+            HStack {
+                Text(letters.left).opacity(0.6)
+                Spacer()
+                Text(letters.right).opacity(0.6)
+            }
+        }
+        .font(.system(size: 12, weight: .bold, design: .monospaced))
+        .foregroundColor(.yellow)
+    }
+
+    private var orientationLetters: (top: String, bottom: String, left: String, right: String) {
+        guard let volume = vm.activePETQuantificationVolume,
+              let axes = vm.displayAxes(for: plane.axis, volume: volume) else {
+            switch plane {
+            case .sagittal: return ("H", "F", "A", "P")
+            case .coronal: return ("H", "F", "R", "L")
+            case .axial: return ("A", "P", "R", "L")
+            }
+        }
+        return (
+            top: SliceDisplayTransform.patientLetter(for: -axes.down),
+            bottom: SliceDisplayTransform.patientLetter(for: axes.down),
+            left: SliceDisplayTransform.patientLetter(for: -axes.right),
+            right: SliceDisplayTransform.patientLetter(for: axes.right)
+        )
     }
 }
 
