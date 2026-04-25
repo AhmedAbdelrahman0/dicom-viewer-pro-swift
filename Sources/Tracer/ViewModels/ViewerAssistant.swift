@@ -196,6 +196,34 @@ public extension ViewerViewModel {
                     object: nil
                 )
                 applied.append("Opened the Cohort Batch panel. Configure a run and click Run cohort.")
+
+            case .attenuationCorrectPET:
+                // Sanity check on the active volume so the chat can give a
+                // useful "load a PET first" message rather than the AC view
+                // model swallowing it silently.
+                let isPET: Bool = {
+                    if let pair = fusion,
+                       Modality.normalize(pair.overlayVolume.modality) == .PT { return true }
+                    if let v = currentVolume,
+                       Modality.normalize(v.modality) == .PT { return true }
+                    return false
+                }()
+                guard isPET else {
+                    warnings.append("Load a PET volume (or a PET/CT fusion) before running attenuation correction.")
+                    break
+                }
+                NotificationCenter.default.post(
+                    name: .assistantDidRequestPETAttenuationCorrection,
+                    object: nil
+                )
+                applied.append("Started attenuation correction on the active PET. The result will open as a new series.")
+
+            case .openPETACPanel:
+                NotificationCenter.default.post(
+                    name: .assistantDidRequestPETACPanel,
+                    object: nil
+                )
+                applied.append("Opened the PET Attenuation Correction panel. Pick a method and Run.")
             }
         }
 

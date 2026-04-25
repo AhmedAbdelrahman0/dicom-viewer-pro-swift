@@ -3371,6 +3371,175 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertFalse(interpreter.actions(for: "open this study").contains(.openCohortPanel))
     }
 
+    // MARK: - PET attenuation correction
+
+    func testPETACCatalogExposesEveryBackend() {
+        let ids = PETACCatalog.all.map(\.id)
+        XCTAssertTrue(ids.contains("deep-ac-subprocess"))
+        XCTAssertTrue(ids.contains("deep-ac-dgx"))
+        XCTAssertTrue(ids.contains("pseudo-ct-ac-subprocess"))
+        XCTAssertTrue(ids.contains("mr-ac-subprocess"))
+        XCTAssertTrue(PETACCatalog.byID("mr-ac-subprocess")?.requiresAnatomicalChannel == true)
+        XCTAssertTrue(PETACCatalog.byID("deep-ac-subprocess")?.requiresAnatomicalChannel == false)
+        // Every entry must require configuration — Tracer never ships AC weights.
+        for entry in PETACCatalog.all {
+            XCTAssertTrue(entry.requiresConfiguration,
+                          "\(entry.id) should require user configuration")
+        }
+    }
+
+    func testPETACUtilitiesRejectsNonPETInput() {
+        let ct = ImageVolume(pixels: [Float](repeating: 0, count: 8),
+                             depth: 2, height: 2, width: 2,
+                             modality: "CT")
+        XCTAssertThrowsError(
+            try PETACUtilities.validateInputs(nacPET: ct,
+                                              anatomical: nil,
+                                              requiresAnatomical: false)
+        ) { error in
+            guard case PETACError.nonPETInput = error else {
+                return XCTFail("Expected PETACError.nonPETInput, got \(error)")
+            }
+        }
+    }
+
+    func testPETACUtilitiesRejectsAnatomicalGridMismatch() {
+        let pet = ImageVolume(pixels: [Float](repeating: 0, count: 8),
+                              depth: 2, height: 2, width: 2,
+                              modality: "PT")
+        let ctMismatched = ImageVolume(pixels: [Float](repeating: 0, count: 27),
+                                       depth: 3, height: 3, width: 3,
+                                       modality: "CT")
+        XCTAssertThrowsError(
+            try PETACUtilities.validateInputs(nacPET: pet,
+                                              anatomical: ctMismatched,
+                                              requiresAnatomical: false)
+        ) { error in
+            guard case PETACError.anatomicalGridMismatch = error else {
+                return XCTFail("Expected PETACError.anatomicalGridMismatch, got \(error)")
+            }
+        }
+    }
+
+    func testPETACUtilitiesRejectsMissingAnatomicalWhenRequired() {
+        let pet = ImageVolume(pixels: [Float](repeating: 0, count: 8),
+                              depth: 2, height: 2, width: 2,
+                              modality: "PT")
+        XCTAssertThrowsError(
+            try PETACUtilities.validateInputs(nacPET: pet,
+                                              anatomical: nil,
+                                              requiresAnatomical: true)
+        ) { error in
+            guard case PETACError.anatomicalRequired = error else {
+                return XCTFail("Expected PETACError.anatomicalRequired, got \(error)")
+            }
+        }
+    }
+
+    func testPETACMakeACVolumePreservesGeometryAndAssignsFreshSeriesUID() {
+        let nac = ImageVolume(
+            pixels: (0..<8).map { Float($0) },
+            depth: 2, height: 2, width: 2,
+            spacing: (1.5, 1.6, 2.0),
+            origin: (10, 20, 30),
+            modality: "PT",
+            seriesUID: "1.2.3.original",
+            studyUID: "study-uid",
+            patientID: "PID-001",
+            patientName: "Test Patient",
+            seriesDescription: "WB FDG NAC",
+            studyDescription: "WB FDG",
+            suvScaleFactor: 1.234
+        )
+        let acPixels: [Float] = (0..<8).map { Float($0) * 2 }
+        let ac = PETACUtilities.makeACVolume(from: acPixels,
+                                             sourceNAC: nac,
+                                             correctorID: "deep-ac-test")
+        XCTAssertEqual(ac.depth, nac.depth)
+        XCTAssertEqual(ac.height, nac.height)
+        XCTAssertEqual(ac.width, nac.width)
+        XCTAssertEqual(ac.spacing.x, nac.spacing.x)
+        XCTAssertEqual(ac.origin.y, nac.origin.y)
+        XCTAssertEqual(ac.studyUID, "study-uid")
+        XCTAssertEqual(ac.patientID, "PID-001")
+        XCTAssertEqual(ac.suvScaleFactor, 1.234)
+        XCTAssertNotEqual(ac.seriesUID, nac.seriesUID,
+                          "AC must use a fresh seriesUID — collision would hide it from PACS index")
+        XCTAssertTrue(ac.seriesUID.hasPrefix("1.2.3.original.ac."),
+                      "AC seriesUID should derive from NAC for traceability")
+        XCTAssertTrue(ac.seriesDescription.contains("AC"))
+        XCTAssertTrue(ac.seriesDescription.contains("deep-ac-test"))
+    }
+
+    func testSubprocessACComposesPython3LaunchArguments() {
+        // /usr/bin/env path — the executable name is "env", so we need to
+        // prepend "python3" before the script.
+        let envArgs = SubprocessPETACCorrector.composeLaunchArguments(
+            executable: "/usr/bin/env",
+            script: "/tmp/deep_ac.py",
+            extraArgs: ["--input", "/tmp/nac.nii", "--output", "/tmp/ac.nii"]
+        )
+        XCTAssertEqual(envArgs, ["python3", "/tmp/deep_ac.py",
+                                 "--input", "/tmp/nac.nii",
+                                 "--output", "/tmp/ac.nii"])
+
+        // Direct python3 path — executable IS python, so we just hand it
+        // the script + args.
+        let pyArgs = SubprocessPETACCorrector.composeLaunchArguments(
+            executable: "/opt/homebrew/bin/python3",
+            script: "/tmp/deep_ac.py",
+            extraArgs: ["--device", "mps"]
+        )
+        XCTAssertEqual(pyArgs, ["/tmp/deep_ac.py", "--device", "mps"])
+
+        // Shell wrapper — assume it accepts script as first arg.
+        let shellArgs = SubprocessPETACCorrector.composeLaunchArguments(
+            executable: "/usr/local/bin/run_ac.sh",
+            script: "/tmp/deep_ac.py",
+            extraArgs: []
+        )
+        XCTAssertEqual(shellArgs, ["/tmp/deep_ac.py"])
+    }
+
+    func testAssistantParsesAttenuationCorrectionIntents() {
+        let interpreter = AssistantCommandInterpreter()
+        // Run intents
+        XCTAssertTrue(interpreter.actions(for: "attenuation correct this PET")
+            .contains(.attenuationCorrectPET))
+        XCTAssertTrue(interpreter.actions(for: "run AC on the PET volume")
+            .contains(.attenuationCorrectPET))
+        XCTAssertTrue(interpreter.actions(for: "produce attenuated PET from this scan")
+            .contains(.attenuationCorrectPET))
+        XCTAssertTrue(interpreter.actions(for: "do nac to ac on the current study")
+            .contains(.attenuationCorrectPET))
+        // Open intents — explicit panel-pointing phrases. We deliberately
+        // don't try to disambiguate "show me attenuation correction" (which
+        // could mean either "open the panel" or "do it"); both intents
+        // firing is acceptable for genuinely ambiguous input.
+        XCTAssertTrue(interpreter.actions(for: "open the AC panel")
+            .contains(.openPETACPanel))
+        XCTAssertTrue(interpreter.actions(for: "open attenuation correction panel")
+            .contains(.openPETACPanel))
+        // Negative — bare "ac" should NOT trigger
+        XCTAssertFalse(interpreter.actions(for: "back to the previous panel")
+            .contains(.attenuationCorrectPET))
+        XCTAssertFalse(interpreter.actions(for: "the facade looks wrong")
+            .contains(.attenuationCorrectPET))
+        XCTAssertFalse(interpreter.actions(for: "matter-of-fact CT review")
+            .contains(.attenuationCorrectPET))
+    }
+
+    @MainActor
+    func testPETACViewModelReadinessGatesEmptyScript() {
+        let vm = PETACViewModel()
+        // First entry is deepACSubprocess; default scriptPath is empty.
+        XCTAssertNotNil(vm.entryReadinessMessage)
+        XCTAssertTrue(vm.entryReadinessMessage?.lowercased().contains("script") ?? false)
+        // Set a script path → readiness clears.
+        vm.scriptPath = "/tmp/deep_ac.py"
+        XCTAssertNil(vm.entryReadinessMessage)
+    }
+
     @MainActor
     func testNNUnetAssistantReadinessPreflightsCoreMLPackages() throws {
         let nnunet = NNUnetViewModel()

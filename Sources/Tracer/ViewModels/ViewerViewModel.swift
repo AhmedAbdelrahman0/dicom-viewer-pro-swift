@@ -1283,6 +1283,30 @@ public final class ViewerViewModel: ObservableObject {
         return (volume, true)
     }
 
+    /// Install an attenuation-corrected PET produced by `PETACViewModel` —
+    /// adds it to the loaded-volumes list (so it shows up in the volume
+    /// switcher), makes it the current displayed volume if the NAC was
+    /// active, and re-fuses with the existing CT base if there was a
+    /// NAC/CT fusion in flight. The original NAC stays loaded so the user
+    /// can flip back for comparison.
+    public func installCorrectedPET(_ acVolume: ImageVolume,
+                                    replacingNAC nacVolume: ImageVolume) {
+        let result = addLoadedVolumeIfNeeded(acVolume)
+        let installed = result.volume
+        // If the NAC was the active overlay of a fusion pair, swap in the
+        // AC volume on the same base so the user keeps their layout. The
+        // base CT (or whatever the anatomical base was) is preserved.
+        if let pair = fusion,
+           pair.overlayVolume.id == nacVolume.id {
+            Task { await fusePETCT(base: pair.baseVolume, overlay: installed) }
+        }
+        // If the NAC was the primary displayed volume, swap to AC.
+        if currentVolume?.id == nacVolume.id {
+            displayVolume(installed)
+        }
+        statusMessage = "AC PET installed: \(installed.seriesDescription)"
+    }
+
     // MARK: - Recent volumes
 
     private func recordRecent(volume: ImageVolume) {

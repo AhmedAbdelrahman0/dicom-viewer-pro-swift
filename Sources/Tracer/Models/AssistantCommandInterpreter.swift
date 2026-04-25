@@ -35,6 +35,13 @@ public enum AssistantAction: Equatable {
     /// Open the Cohort Batch inspector. Shortcut for "let me set up a
     /// 2000-study run without touching the menu."
     case openCohortPanel
+    /// Run the configured PET attenuation-correction model on the current
+    /// (or fused-overlay) PET volume. Mirrors `.classifyAllLesions` —
+    /// posts a notification that ContentView routes to the AC view model.
+    case attenuationCorrectPET
+    /// Open the PET Attenuation Correction inspector. Lets the user
+    /// configure the AC method without leaving the chat.
+    case openPETACPanel
 
     public enum ClassificationExportFormat: String, Equatable, Sendable {
         case csv
@@ -55,6 +62,11 @@ public extension Notification.Name {
     /// Fired by the chat when the user asks for the cohort panel or a
     /// cohort run.
     static let assistantDidRequestCohortPanel = Notification.Name("Tracer.assistantDidRequestCohortPanel")
+    /// Fired by the chat for "attenuation correct this PET" intents.
+    /// ContentView observes and calls `petAC.run(...)` on the active PET.
+    static let assistantDidRequestPETAttenuationCorrection = Notification.Name("Tracer.assistantDidRequestPETAttenuationCorrection")
+    /// Fired by the chat for "open the AC panel" intents.
+    static let assistantDidRequestPETACPanel = Notification.Name("Tracer.assistantDidRequestPETACPanel")
 }
 
 public struct AssistantCommandInterpreter {
@@ -96,6 +108,7 @@ public struct AssistantCommandInterpreter {
         actions.append(contentsOf: segmentationActions(in: text))
         actions.append(contentsOf: classificationActions(in: text))
         actions.append(contentsOf: cohortActions(in: text))
+        actions.append(contentsOf: petACActions(in: text))
 
         return actions.removingAdjacentDuplicates()
     }
@@ -162,6 +175,51 @@ public struct AssistantCommandInterpreter {
         ]
         if text.containsAny(cohortTriggers) {
             actions.append(.openCohortPanel)
+        }
+        return actions
+    }
+
+    /// PET attenuation-correction intents. Two distinct shapes:
+    ///   • "open the AC panel" / "show me attenuation correction" → just
+    ///     opens the inspector
+    ///   • "attenuation correct this PET" / "run AC" / "AC the PET" → runs
+    ///     immediately on the active PET
+    /// We avoid bare `text.contains("ac")` because "ac" matches "back",
+    /// "facade", "vacancy", "matter-of-fact" — way too eager. Multi-word
+    /// triggers + the explicit acronym paths keep precision high.
+    private func petACActions(in text: String) -> [AssistantAction] {
+        var actions: [AssistantAction] = []
+        let openTriggers = [
+            "ac panel",
+            "attenuation correction panel",
+            "open ac",
+            "show ac",
+            "show attenuation",
+            "open attenuation correction",
+            "open attenuation",
+            "pet ac panel"
+        ]
+        let runTriggers = [
+            "attenuation correct",
+            "attenuation correction",
+            "attenuation-correct",
+            "run ac",
+            "run attenuation",
+            "ac correct",
+            "ac the pet",
+            "produce ac",
+            "produce attenuated",
+            "produce an attenuated",
+            "generate ac",
+            "nac to ac",
+            "nac->ac",
+            "nac → ac"
+        ]
+        if text.containsAny(openTriggers) {
+            actions.append(.openPETACPanel)
+        }
+        if text.containsAny(runTriggers) {
+            actions.append(.attenuationCorrectPET)
         }
         return actions
     }

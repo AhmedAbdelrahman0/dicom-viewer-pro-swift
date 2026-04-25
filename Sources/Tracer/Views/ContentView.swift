@@ -17,6 +17,7 @@ public struct ContentView: View {
     @StateObject private var classification = ClassificationViewModel()
     @StateObject private var modelManager = ModelManagerViewModel()
     @StateObject private var cohort = CohortResultsStore()
+    @StateObject private var petAC = PETACViewModel()
     @State private var showingFileImporter = false
     @State private var showingDirectoryPicker = false
     @State private var fileImporterMode: FileImporterMode = .volume
@@ -27,6 +28,7 @@ public struct ContentView: View {
     @State private var showClassificationPanel = false
     @State private var showModelManagerPanel = false
     @State private var showCohortPanel = false
+    @State private var showPETACPanel = false
     @State private var cohortStudies: [PACSWorklistStudy] = []
     @State private var showAboutWindow = false
     @State private var showOnboarding = false
@@ -145,6 +147,16 @@ public struct ContentView: View {
                     closeInspectorButton { showCohortPanel = false }
                 }
         }
+        .engineInspector(
+            isCompact: useCompactEnginePresentation,
+            isPresented: $showPETACPanel,
+            inspectorWidth: (min: 480, ideal: 540, max: 660)
+        ) {
+            PETACPanel(viewer: vm, ac: petAC)
+                .overlay(alignment: .topTrailing) {
+                    closeInspectorButton { showPETACPanel = false }
+                }
+        }
         .fileImporter(
             isPresented: $showingFileImporter,
             allowedContentTypes: [.data, .item],
@@ -186,6 +198,12 @@ public struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .assistantDidRequestCohortPanel)) { _ in
             refreshCohortStudies()
             showInspector(.cohort)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .assistantDidRequestPETAttenuationCorrection)) { _ in
+            handleAssistantPETACRequest()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .assistantDidRequestPETACPanel)) { _ in
+            showInspector(.petAC)
         }
         .onChange(of: focusModeEnabled) { _, enabled in
             if !enabled {
@@ -492,13 +510,21 @@ public struct ContentView: View {
                       systemImage: "square.3.layers.3d.down.right")
             }
             .keyboardShortcut("b", modifiers: [.command, .shift])
+
+            Button {
+                showInspector(.petAC)
+            } label: {
+                Label("PET Attenuation Correction — produce AC PET from NAC PET",
+                      systemImage: "wand.and.rays")
+            }
+            .keyboardShortcut("k", modifiers: [.command, .shift])
         } label: {
             Label("AI Engines", systemImage: "cpu")
                 .font(.system(size: 12, weight: .medium))
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .help("AI Engines\n• MONAI Label (⌘⇧M)\n• nnU-Net (⌘⇧N)\n• PET Engine (⌘⇧P)\n• Classify (⌘⇧C)\n• Model Manager (⌘⇧W)\n• Cohort Batch (⌘⇧B)\nPanels open as side inspectors — ⌘. to close.")
+        .help("AI Engines\n• MONAI Label (⌘⇧M)\n• nnU-Net (⌘⇧N)\n• PET Engine (⌘⇧P)\n• Classify (⌘⇧C)\n• Model Manager (⌘⇧W)\n• Cohort Batch (⌘⇧B)\n• PET AC (⌘⇧K)\nPanels open as side inspectors — ⌘. to close.")
     }
 
     private var orientationMenu: some View {
@@ -875,6 +901,7 @@ public struct ContentView: View {
         showClassificationPanel = false
         showModelManagerPanel = false
         showCohortPanel = false
+        showPETACPanel = false
         // Open the requested one next tick so the close animations settle.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
             switch which {
@@ -884,11 +911,12 @@ public struct ContentView: View {
             case .classification: showClassificationPanel = true
             case .modelManager: showModelManagerPanel = true
             case .cohort: showCohortPanel = true
+            case .petAC: showPETACPanel = true
             }
         }
     }
 
-    private enum EngineInspector { case monai, nnunet, pet, classification, modelManager, cohort }
+    private enum EngineInspector { case monai, nnunet, pet, classification, modelManager, cohort, petAC }
 
     /// Pull the full worklist (every indexed study in the SwiftData store)
     /// into the cohort panel. Called when the user opens the panel so the
@@ -902,6 +930,53 @@ public struct ContentView: View {
         } catch {
             vm.statusMessage = "Cohort: worklist fetch failed — \(error.localizedDescription)"
             cohortStudies = []
+        }
+    }
+
+    /// Chatbot → PET attenuation correction. Picks the active PET (the
+    /// fusion overlay if there's a fusion, else any loaded PET volume,
+    /// else the current volume if it's PET) and runs the configured AC
+    /// model. The AC volume installs as a new series; the panel doesn't
+    /// have to be open for this to work.
+    private func handleAssistantPETACRequest() {
+        let petVolume: ImageVolume? = {
+            if let pair = vm.fusion,
+               Modality.normalize(pair.overlayVolume.modality) == .PT {
+                return pair.overlayVolume
+            }
+            if let pet = vm.loadedVolumes.first(where: {
+                Modality.normalize($0.modality) == .PT
+            }) {
+                return pet
+            }
+            if let cur = vm.currentVolume,
+               Modality.normalize(cur.modality) == .PT {
+                return cur
+            }
+            return nil
+        }()
+        guard let petVolume else {
+            vm.statusMessage = "AC: load a PET volume first."
+            return
+        }
+        let anatomical: ImageVolume? = {
+            guard petAC.useAnatomicalChannel
+                  || (petAC.selectedEntry?.requiresAnatomicalChannel ?? false) else {
+                return nil
+            }
+            if let pair = vm.fusion,
+               Modality.normalize(pair.baseVolume.modality) != .PT {
+                return pair.baseVolume
+            }
+            return vm.loadedVolumes.first {
+                let m = Modality.normalize($0.modality)
+                return m == .CT || m == .MR
+            }
+        }()
+        Task {
+            _ = await petAC.run(nacPET: petVolume,
+                                anatomical: anatomical,
+                                viewer: vm)
         }
     }
 
