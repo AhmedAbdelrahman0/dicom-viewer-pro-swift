@@ -3488,6 +3488,38 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(report.tlg ?? 0, 0.12, accuracy: 1e-9)
     }
 
+    @MainActor
+    func testPETMIPProjectionBuildsAsynchronouslyAndCaches() async throws {
+        let pet = ImageVolume(
+            pixels: [
+                1, 2,
+                3, 4,
+                5, 6,
+                7, 8,
+            ],
+            depth: 2,
+            height: 2,
+            width: 2,
+            modality: "PT",
+            seriesDescription: "PET"
+        )
+        let vm = ViewerViewModel()
+        vm.displayVolume(pet)
+
+        XCTAssertNil(vm.makePETMIPImage(for: 2))
+        XCTAssertTrue(vm.isPETMIPProjectionPending(for: 2))
+        for _ in 0..<100 where vm.isPETMIPProjectionPending(for: 2) {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        let image = try XCTUnwrap(vm.makePETMIPImage(for: 2))
+        XCTAssertEqual(image.width, 2)
+        XCTAssertEqual(image.height, 2)
+        let revision = vm.petMIPCacheRevision
+        XCTAssertNotNil(vm.makePETMIPImage(for: 2))
+        XCTAssertEqual(vm.petMIPCacheRevision, revision)
+    }
+
     func testColorRendererCanInvertMIPWindowMapping() throws {
         let normal = try XCTUnwrap(PixelRenderer.makeColorImage(
             pixels: [0, 1],

@@ -1212,6 +1212,16 @@ private struct PETMIPPane: View {
                             }
                         }
                         .padding(8)
+                    } else if vm.activePETQuantificationVolume != nil {
+                        VStack(spacing: 8) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text(vm.isPETMIPProjectionPending(for: plane.axis)
+                                 ? "Preparing PET MIP"
+                                 : "PET MIP readying")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(.secondary)
+                        }
                     } else {
                         VStack(spacing: 8) {
                             Image(systemName: "flame")

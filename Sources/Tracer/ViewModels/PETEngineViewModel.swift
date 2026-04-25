@@ -110,7 +110,7 @@ public final class PETEngineViewModel: ObservableObject {
         case .medSAM2:
             return await runMedSAM(viewer: viewer, labeling: labeling)
         case .tmtv:
-            return runTMTV(viewer: viewer, labeling: labeling)
+            return await runTMTV(viewer: viewer, labeling: labeling)
         case .totalSegPrefilter:
             return await runTotalSegPrefilter(viewer: viewer,
                                               nnunet: nnunet,
@@ -230,7 +230,7 @@ public final class PETEngineViewModel: ObservableObject {
     // MARK: - TMTV
 
     private func runTMTV(viewer: ViewerViewModel,
-                         labeling: LabelingViewModel) -> String {
+                         labeling: LabelingViewModel) async -> String {
         guard let pet = viewer.activePETQuantificationVolume ?? viewer.currentVolume else {
             statusMessage = "No PET volume is loaded."
             return statusMessage
@@ -239,16 +239,17 @@ public final class PETEngineViewModel: ObservableObject {
             statusMessage = "No active label map — run a lesion model or paint a mask first."
             return statusMessage
         }
-        let suv: (Double) -> Double = { [weak viewer] raw in
-            viewer?.suvValue(rawStoredValue: raw, volume: pet) ?? raw
-        }
+        let snapshot = map.snapshot(name: "\(map.name) TMTV snapshot")
+        let settings = viewer.suvSettings
         do {
-            let report = try PETQuantification.compute(
-                petVolume: pet,
-                labelMap: map,
-                suvTransform: suv,
-                connectedComponents: true
-            )
+            let report = try await Task.detached(priority: .userInitiated) {
+                try PETQuantification.compute(
+                    petVolume: pet,
+                    labelMap: snapshot,
+                    suvTransform: { raw in settings.suv(forStoredValue: raw, volume: pet) },
+                    connectedComponents: true
+                )
+            }.value
             lastReport = report
             statusMessage = report.summary
         } catch {

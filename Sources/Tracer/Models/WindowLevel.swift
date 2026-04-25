@@ -56,13 +56,11 @@ public enum WLPresets {
 /// Compute a sensible auto window/level from data percentiles.
 public func autoWindowLevel(pixels: [Float]) -> (window: Double, level: Double) {
     guard pixels.count > 10 else { return (400, 40) }
-    var sorted = pixels
-    sorted.sort()
-    let i1 = Int(Double(sorted.count) * 0.01)
-    let i99 = Int(Double(sorted.count) * 0.99)
-    let p1 = Double(sorted[max(0, i1)])
-    let p99 = Double(sorted[min(sorted.count - 1, i99)])
-    let window = max(1, p99 - p1)
-    let level = (p99 + p1) / 2
-    return (window, level)
+    let result = HistogramAutoWindow.compute(
+        pixels: pixels,
+        preset: .balanced,
+        binCount: 512,
+        ignoreZeros: false
+    )
+    return (result.window, result.level)
 }

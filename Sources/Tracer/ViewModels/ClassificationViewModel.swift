@@ -70,14 +70,17 @@ public final class ClassificationViewModel: ObservableObject {
         // existing PETQuantification machinery — we already compute those
         // numbers for TMTV reports, so re-using them keeps the report
         // row / classification row aligned by lesion id.
+        let classifierMask = labelMap.snapshot(name: "\(labelMap.name) classification snapshot")
         let report: PETQuantification.Report
         do {
-            report = try PETQuantification.compute(
-                petVolume: volume,
-                labelMap: labelMap,
-                classes: [classID],
-                connectedComponents: true
-            )
+            report = try await Task.detached(priority: .userInitiated) {
+                try PETQuantification.compute(
+                    petVolume: volume,
+                    labelMap: classifierMask,
+                    classes: [classID],
+                    connectedComponents: true
+                )
+            }.value
         } catch {
             statusMessage = "Could not enumerate lesions: \(error.localizedDescription)"
             lastResults = []
@@ -88,7 +91,6 @@ public final class ClassificationViewModel: ObservableObject {
             lastResults = []
             return []
         }
-        let classifierMask = labelMap.snapshot(name: "\(labelMap.name) classification snapshot")
 
         // Build the concrete classifier from the entry + user config.
         let classifier: LesionClassifier

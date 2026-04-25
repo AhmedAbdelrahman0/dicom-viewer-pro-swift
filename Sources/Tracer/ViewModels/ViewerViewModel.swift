@@ -86,6 +86,79 @@ public struct VolumeOperationStatus: Identifiable, Equatable, Sendable {
     public let startedAt: Date
 }
 
+private struct PETMIPProjectionKey: Hashable, Sendable {
+    let volumeIdentity: String
+    let axis: Int
+    let width: Int
+    let height: Int
+    let depth: Int
+
+    init(volume: ImageVolume, axis: Int) {
+        self.volumeIdentity = volume.sessionIdentity
+        self.axis = axis
+        self.width = volume.width
+        self.height = volume.height
+        self.depth = volume.depth
+    }
+}
+
+private struct PETMIPProjection: Sendable {
+    let pixels: [Float]
+    let width: Int
+    let height: Int
+
+    static func compute(volume: ImageVolume, axis: Int) -> PETMIPProjection {
+        let pixels = volume.pixels
+        let width = volume.width
+        let height = volume.height
+        let depth = volume.depth
+
+        switch axis {
+        case 0:
+            var out = [Float](repeating: 0, count: depth * height)
+            for z in 0..<depth {
+                let slabStart = z * height * width
+                for y in 0..<height {
+                    let rowStart = slabStart + y * width
+                    var maxValue = -Float.greatestFiniteMagnitude
+                    for x in 0..<width {
+                        maxValue = Swift.max(maxValue, pixels[rowStart + x])
+                    }
+                    out[z * height + y] = maxValue
+                }
+            }
+            return PETMIPProjection(pixels: out, width: height, height: depth)
+
+        case 1:
+            var out = [Float](repeating: 0, count: depth * width)
+            for z in 0..<depth {
+                let slabStart = z * height * width
+                for x in 0..<width {
+                    var maxValue = -Float.greatestFiniteMagnitude
+                    for y in 0..<height {
+                        maxValue = Swift.max(maxValue, pixels[slabStart + y * width + x])
+                    }
+                    out[z * width + x] = maxValue
+                }
+            }
+            return PETMIPProjection(pixels: out, width: width, height: depth)
+
+        default:
+            var out = [Float](repeating: 0, count: height * width)
+            for y in 0..<height {
+                for x in 0..<width {
+                    var maxValue = -Float.greatestFiniteMagnitude
+                    for z in 0..<depth {
+                        maxValue = Swift.max(maxValue, pixels[z * height * width + y * width + x])
+                    }
+                    out[y * width + x] = maxValue
+                }
+            }
+            return PETMIPProjection(pixels: out, width: width, height: height)
+        }
+    }
+}
+
 @MainActor
 public final class ViewerViewModel: ObservableObject {
 
@@ -130,6 +203,7 @@ public final class ViewerViewModel: ObservableObject {
     @Published public var hangingPanes: [HangingPaneConfiguration] = HangingPaneConfiguration.defaultPETCT
     @Published public var lastVolumeMeasurementReport: VolumeMeasurementReport?
     @Published public private(set) var volumeOperationStatus: VolumeOperationStatus?
+    @Published public private(set) var petMIPCacheRevision: Int = 0
     @Published public private(set) var appUndoDepth: Int = 0
     @Published public private(set) var appRedoDepth: Int = 0
 
@@ -180,6 +254,11 @@ public final class ViewerViewModel: ObservableObject {
     private let maxAppHistoryRecords = 120
     private let maxBackgroundTrackedChangedVoxels = 5_000_000
     private var volumeOperationTask: Task<Void, Never>?
+    private var autoWindowTask: Task<Void, Never>?
+    private let maxPETMIPProjectionCacheEntries = 12
+    private var petMIPProjectionCache: [PETMIPProjectionKey: PETMIPProjection] = [:]
+    private var petMIPProjectionCacheOrder: [PETMIPProjectionKey] = []
+    private var petMIPProjectionTasks: [PETMIPProjectionKey: Task<Void, Never>] = [:]
 
     // DICOM study browser
     @Published public var loadedSeries: [DICOMSeries] = []
@@ -1242,6 +1321,8 @@ public final class ViewerViewModel: ObservableObject {
     // MARK: - Volume display
 
     public func displayVolume(_ volume: ImageVolume) {
+        autoWindowTask?.cancel()
+        autoWindowTask = nil
         currentVolume = volume
         sliceIndices = [volume.width / 2, volume.height / 2, volume.depth / 2]
 
@@ -1397,17 +1478,45 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     public func autoWL() {
-        guard let v = currentVolume else { return }
-        let before = (window, level)
-        let (w, l) = autoWindowLevel(pixels: v.pixels)
-        window = w
-        level = l
-        recordWindowLevelChange(before: before, after: (window, level), name: "Auto W/L")
+        autoWLHistogram(preset: .balanced)
     }
 
     /// Histogram-driven W/L picker, inspired by ITK-SNAP's auto-contrast.
     /// `preset` maps to a percentile clip range (see `HistogramAutoWindow.Preset`).
     public func autoWLHistogram(preset: HistogramAutoWindow.Preset = .balanced) {
+        guard let v = currentVolume else { return }
+        autoWindowTask?.cancel()
+        let before = (window, level)
+        let volumeID = v.id
+        let ignoreZeros = Modality.normalize(v.modality) == .PT
+        statusMessage = "Computing auto W/L… viewer remains responsive"
+
+        autoWindowTask = Task { [weak self, v, before, volumeID, preset, ignoreZeros] in
+            let result = await Task.detached(priority: .userInitiated) {
+                HistogramAutoWindow.compute(
+                    v,
+                    preset: preset,
+                    ignoreZeros: ignoreZeros
+                )
+            }.value
+            guard !Task.isCancelled,
+                  let self,
+                  self.currentVolume?.id == volumeID else { return }
+            self.window = result.window
+            self.level = result.level
+            self.recordWindowLevelChange(before: before,
+                                         after: (self.window, self.level),
+                                         name: "Auto W/L")
+            self.statusMessage = String(format: "Auto W/L: W=%.0f L=%.0f (%.0f–%.0f)",
+                                        result.window, result.level,
+                                        result.lowerValue, result.upperValue)
+            self.autoWindowTask = nil
+        }
+    }
+
+    /// Synchronous variant kept for tests and command paths that explicitly
+    /// need a blocking result. UI surfaces should call `autoWLHistogram`.
+    public func computeAutoWLHistogramNow(preset: HistogramAutoWindow.Preset = .balanced) {
         guard let v = currentVolume else { return }
         let before = (window, level)
         let ignoreZeros = Modality.normalize(v.modality) == .PT
@@ -2084,7 +2193,11 @@ public final class ViewerViewModel: ObservableObject {
 
     public func makePETMIPImage(for axis: Int) -> CGImage? {
         guard let pet = activePETQuantificationVolume else { return nil }
-        let mip = petMaximumIntensityProjection(pet, axis: axis)
+        let key = PETMIPProjectionKey(volume: pet, axis: axis)
+        guard let mip = petMIPProjectionCache[key] else {
+            startPETMIPProjectionIfNeeded(volume: pet, axis: axis, key: key)
+            return nil
+        }
         var pixels = SliceTransform.apply(
             mip.pixels,
             width: mip.width,
@@ -2102,6 +2215,11 @@ public final class ViewerViewModel: ObservableObject {
             baseAlpha: 1.0,
             invert: invertPETMIP
         )
+    }
+
+    public func isPETMIPProjectionPending(for axis: Int) -> Bool {
+        guard let pet = activePETQuantificationVolume else { return false }
+        return petMIPProjectionTasks[PETMIPProjectionKey(volume: pet, axis: axis)] != nil
     }
 
     public func petSUVDisplayRange(for volume: ImageVolume) -> (min: Double, max: Double) {
@@ -2127,47 +2245,24 @@ public final class ViewerViewModel: ObservableObject {
         return pixels.map { Float(suvValue(rawStoredValue: Double($0), volume: volume)) }
     }
 
-    private func petMaximumIntensityProjection(
-        _ volume: ImageVolume,
-        axis: Int
-    ) -> (pixels: [Float], width: Int, height: Int) {
-        switch axis {
-        case 0:
-            var out = [Float](repeating: 0, count: volume.depth * volume.height)
-            for z in 0..<volume.depth {
-                for y in 0..<volume.height {
-                    var maxValue = -Float.greatestFiniteMagnitude
-                    for x in 0..<volume.width {
-                        maxValue = Swift.max(maxValue, volume.intensity(z: z, y: y, x: x))
-                    }
-                    out[z * volume.height + y] = maxValue
-                }
+    private func startPETMIPProjectionIfNeeded(volume: ImageVolume,
+                                               axis: Int,
+                                               key: PETMIPProjectionKey) {
+        guard petMIPProjectionTasks[key] == nil else { return }
+        petMIPProjectionTasks[key] = Task { [weak self, volume, axis, key] in
+            let projection = await Task.detached(priority: .userInitiated) {
+                PETMIPProjection.compute(volume: volume, axis: axis)
+            }.value
+            guard !Task.isCancelled, let self else { return }
+            self.petMIPProjectionTasks[key] = nil
+            self.petMIPProjectionCache[key] = projection
+            self.petMIPProjectionCacheOrder.removeAll { $0 == key }
+            self.petMIPProjectionCacheOrder.append(key)
+            while self.petMIPProjectionCacheOrder.count > self.maxPETMIPProjectionCacheEntries {
+                let evicted = self.petMIPProjectionCacheOrder.removeFirst()
+                self.petMIPProjectionCache.removeValue(forKey: evicted)
             }
-            return (out, volume.height, volume.depth)
-        case 1:
-            var out = [Float](repeating: 0, count: volume.depth * volume.width)
-            for z in 0..<volume.depth {
-                for x in 0..<volume.width {
-                    var maxValue = -Float.greatestFiniteMagnitude
-                    for y in 0..<volume.height {
-                        maxValue = Swift.max(maxValue, volume.intensity(z: z, y: y, x: x))
-                    }
-                    out[z * volume.width + x] = maxValue
-                }
-            }
-            return (out, volume.width, volume.depth)
-        default:
-            var out = [Float](repeating: 0, count: volume.height * volume.width)
-            for y in 0..<volume.height {
-                for x in 0..<volume.width {
-                    var maxValue = -Float.greatestFiniteMagnitude
-                    for z in 0..<volume.depth {
-                        maxValue = Swift.max(maxValue, volume.intensity(z: z, y: y, x: x))
-                    }
-                    out[y * volume.width + x] = maxValue
-                }
-            }
-            return (out, volume.width, volume.height)
+            self.petMIPCacheRevision += 1
         }
     }
 }

@@ -45,7 +45,7 @@ public extension ViewerViewModel {
                     warnings.append("Load a volume before auto window/level.")
                 } else {
                     autoWL()
-                    applied.append("Auto window/level recalculated from the current volume.")
+                    applied.append("Started auto window/level from the current volume.")
                 }
 
             case .setViewerTool(let tool):
