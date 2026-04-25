@@ -383,7 +383,8 @@ public final class MONAILabelClient: @unchecked Sendable {
     }
 
     private static func pathString(_ path: [CodingKey]) -> String {
-        path.map(\.stringValue).joined(separator: ".")
+        let joined = path.map(\.stringValue).joined(separator: ".")
+        return joined.isEmpty ? "<root>" : joined
     }
 
     private func buildMultipartBody(boundary: String,

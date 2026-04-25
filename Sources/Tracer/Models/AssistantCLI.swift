@@ -191,17 +191,17 @@ public struct AssistantCLIRunner: Sendable {
 
             try process.run()
 
-            let deadline = Date().addingTimeInterval(45)
-            while process.isRunning {
-                if Date() > deadline {
-                    process.terminate()
-                    throw AssistantCLIError.failed("CLI response timed out after 45 seconds.")
-                }
-                try await Task.sleep(nanoseconds: 100_000_000)
-            }
+            let timedOut = await ProcessWaiter.wait(for: process, timeoutSeconds: 45)
 
             let stdout = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
             let stderr = String(data: error.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+
+            if timedOut {
+                let message = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                throw AssistantCLIError.failed(
+                    "CLI response timed out after 45 seconds.\(message.isEmpty ? "" : " Last stderr: \(message)")"
+                )
+            }
 
             guard process.terminationStatus == 0 else {
                 let message = stderr.isEmpty ? stdout : stderr

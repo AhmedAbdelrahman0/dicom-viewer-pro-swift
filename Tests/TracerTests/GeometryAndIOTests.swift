@@ -2670,6 +2670,35 @@ final class GeometryAndIOTests: XCTestCase {
                        "top-level failure")
     }
 
+    func testDecodingErrorFormatterNamesRootPath() {
+        let malformed = #"[]"#.data(using: .utf8)!
+        do {
+            _ = try JSONDecoder().decode([String: Int].self, from: malformed)
+            XCTFail("Should have thrown DecodingError")
+        } catch {
+            let message = MONAILabelClient.describeDecodingError(error)
+            XCTAssertTrue(message.contains("<root>"))
+        }
+    }
+
+    func testProcessWaiterEscalatesIgnoredSIGTERM() async throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", "trap '' TERM; while :; do :; done"]
+
+        try process.run()
+        let start = Date()
+        let timedOut = await ProcessWaiter.wait(
+            for: process,
+            timeoutSeconds: 0.1,
+            terminationGraceSeconds: 0.1
+        )
+
+        XCTAssertTrue(timedOut)
+        XCTAssertFalse(process.isRunning)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 2.0)
+    }
+
     // MARK: - Hardening: atomic writes
 
     func testLabelIOWritesAtomicallyViaExchange() throws {

@@ -396,22 +396,10 @@ public final class NNUnetRunner: @unchecked Sendable {
             throw RunError.subprocessFailed(exitCode: -1, stderr: "\(error)")
         }
 
-        // Optional timeout via Task.detached.
-        let timeoutTask: Task<Void, Never>? = configuration.timeoutSeconds.map { secs in
-            Task.detached { [weak proc] in
-                try? await Task.sleep(nanoseconds: UInt64(secs * 1_000_000_000))
-                proc?.terminate()
-            }
-        }
-
-        // Wait off the main actor.
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            DispatchQueue.global(qos: .userInitiated).async {
-                proc.waitUntilExit()
-                continuation.resume()
-            }
-        }
-        timeoutTask?.cancel()
+        let timedOut = await ProcessWaiter.wait(
+            for: proc,
+            timeoutSeconds: configuration.timeoutSeconds
+        )
 
         // Drain.
         stderrPipe.fileHandleForReading.readabilityHandler = nil
@@ -428,6 +416,12 @@ public final class NNUnetRunner: @unchecked Sendable {
 
         if wasCancelled {
             throw RunError.cancelled
+        }
+
+        if timedOut {
+            let seconds = configuration.timeoutSeconds.map { "\(Int($0))s" } ?? "the configured timeout"
+            throw RunError.subprocessFailed(exitCode: proc.terminationStatus,
+                                            stderr: "nnU-Net timed out after \(seconds): \(stderrBuffer.flush())")
         }
 
         let exit = proc.terminationStatus

@@ -142,6 +142,7 @@ public final class ModelDownloadManager: ObservableObject {
                 delegateQueue: OperationQueue.main
             )
             let task = progressSession.downloadTask(with: url) { url, response, error in
+                defer { progressSession.finishTasksAndInvalidate() }
                 if let error {
                     continuation.resume(throwing: error)
                     return

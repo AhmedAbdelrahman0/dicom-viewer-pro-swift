@@ -30,6 +30,7 @@ public final class RemoteExecutor: @unchecked Sendable {
         case uploadFailed(String)
         case downloadFailed(String)
         case binaryMissing(String)
+        case timedOut(binary: String, seconds: TimeInterval, stderr: String)
 
         public var errorDescription: String? {
             switch self {
@@ -44,6 +45,9 @@ public final class RemoteExecutor: @unchecked Sendable {
                 return "scp download failed: \(m)"
             case .binaryMissing(let name):
                 return "Local binary not found: \(name) (is OpenSSH installed?)"
+            case .timedOut(let binary, let seconds, let stderr):
+                let clipped = stderr.count > 600 ? String(stderr.suffix(600)) : stderr
+                return "\(binary) timed out after \(Int(seconds))s.\(clipped.isEmpty ? "" : " Last stderr: \(clipped)")"
             }
         }
     }
@@ -201,16 +205,10 @@ public final class RemoteExecutor: @unchecked Sendable {
 
         try process.run()
 
-        let timer: DispatchSourceTimer? = timeoutSeconds.map {
-            let t = DispatchSource.makeTimerSource(queue: .global())
-            t.schedule(deadline: .now() + $0)
-            t.setEventHandler { [weak process] in process?.terminate() }
-            t.resume()
-            return t
-        }
-
-        process.waitUntilExit()
-        timer?.cancel()
+        let timedOut = ProcessWaiter.waitSynchronously(
+            for: process,
+            timeoutSeconds: timeoutSeconds
+        )
 
         stdoutPipe.fileHandleForReading.readabilityHandler = nil
         stderrPipe.fileHandleForReading.readabilityHandler = nil
@@ -219,6 +217,9 @@ public final class RemoteExecutor: @unchecked Sendable {
 
         let stdout = stdoutBuffer.data()
         let stderr = stderrBuffer.string()
+        if timedOut {
+            throw Error.timedOut(binary: path, seconds: timeoutSeconds ?? 0, stderr: stderr)
+        }
         return RunResult(exitCode: process.terminationStatus,
                          stdout: stdout,
                          stderr: stderr)

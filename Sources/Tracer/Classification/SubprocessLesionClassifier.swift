@@ -147,20 +147,10 @@ public final class SubprocessLesionClassifier: LesionClassifier, @unchecked Send
         try stdinPipe.fileHandleForWriting.write(contentsOf: stdinData)
         try stdinPipe.fileHandleForWriting.close()
 
-        // Timeout guard.
-        let timeoutTask = Task.detached { [weak process, spec] in
-            try? await Task.sleep(nanoseconds: UInt64(spec.timeoutSeconds * 1_000_000_000))
-            process?.terminate()
-        }
-
-        // Wait on a background queue so we don't block MainActor.
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            DispatchQueue.global(qos: .userInitiated).async {
-                process.waitUntilExit()
-                cont.resume()
-            }
-        }
-        timeoutTask.cancel()
+        let timedOut = await ProcessWaiter.wait(
+            for: process,
+            timeoutSeconds: spec.timeoutSeconds
+        )
 
         stdoutPipe.fileHandleForReading.readabilityHandler = nil
         stderrPipe.fileHandleForReading.readabilityHandler = nil
@@ -168,6 +158,12 @@ public final class SubprocessLesionClassifier: LesionClassifier, @unchecked Send
         stderrBuffer.append(stderrPipe.fileHandleForReading.readDataToEndOfFile())
         let stdoutData = stdoutBuffer.data()
         let stderr = stderrBuffer.string()
+
+        if timedOut {
+            throw ClassificationError.inferenceFailed(
+                "subprocess timed out after \(Int(spec.timeoutSeconds))s\(stderr.isEmpty ? "" : ": \(stderr)")"
+            )
+        }
 
         guard process.terminationStatus == 0 else {
             throw ClassificationError.inferenceFailed(

@@ -169,18 +169,10 @@ public final class MedGemmaClassifier: LesionClassifier, @unchecked Sendable {
             throw ClassificationError.inferenceFailed("launch failed: \(error)")
         }
 
-        // Timeout watchdog.
-        let timeoutTask = Task.detached { [weak process, spec] in
-            try? await Task.sleep(nanoseconds: UInt64(spec.timeoutSeconds * 1_000_000_000))
-            process?.terminate()
-        }
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            DispatchQueue.global(qos: .userInitiated).async {
-                process.waitUntilExit()
-                cont.resume()
-            }
-        }
-        timeoutTask.cancel()
+        let timedOut = await ProcessWaiter.wait(
+            for: process,
+            timeoutSeconds: spec.timeoutSeconds
+        )
 
         stdoutPipe.fileHandleForReading.readabilityHandler = nil
         stderrPipe.fileHandleForReading.readabilityHandler = nil
@@ -188,6 +180,11 @@ public final class MedGemmaClassifier: LesionClassifier, @unchecked Sendable {
         stderrBuffer.append(stderrPipe.fileHandleForReading.readDataToEndOfFile())
         let stdoutData = stdoutBuffer.data()
         let stderr = stderrBuffer.string()
+        if timedOut {
+            throw ClassificationError.inferenceFailed(
+                "llama-cli timed out after \(Int(spec.timeoutSeconds))s\(stderr.isEmpty ? "" : ": \(stderr)")"
+            )
+        }
         guard process.terminationStatus == 0 else {
             throw ClassificationError.inferenceFailed(
                 "llama-cli exited \(process.terminationStatus): \(stderr)"
