@@ -3371,6 +3371,370 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertFalse(interpreter.actions(for: "open this study").contains(.openCohortPanel))
     }
 
+    // MARK: - Cohort form config + view model + presets
+
+    func testCohortFormConfigBuildJobMapsEveryField() {
+        let config = CohortFormConfig(
+            jobName: "  My Run  ",
+            outputRoot: "~/cohort-out",
+            modalityFilter: "PT",
+            maxConcurrent: 4,
+            skipIfResultsExist: false,
+            nnunetEntryID: "dataset-221-autopet",
+            segmentationMode: .dgxRemote,
+            useFullEnsemble: true,
+            disableTTA: false,
+            classifierEntryID: "lung-nodule-radiomics",
+            petACEntryID: "deep-ac-subprocess",
+            petACScriptPath: "~/scripts/ac.py",
+            petACPythonExecutable: "/opt/python3",
+            petACEnvironment: "CUDA_VISIBLE_DEVICES=0",
+            petACExtraArgs: "--device cuda:0",
+            petACTimeoutSeconds: 900,
+            petACUseAnatomicalChannel: true,
+            petACFallbackToNACOnFailure: false
+        )
+        let job = config.buildJob()
+        XCTAssertEqual(job.name, "My Run", "jobName must be trimmed")
+        XCTAssertTrue(job.outputRoot.path.hasSuffix("/cohort-out"),
+                      "tilde must be expanded to home dir")
+        XCTAssertEqual(job.nnunetEntryID, "dataset-221-autopet")
+        XCTAssertEqual(job.segmentationMode, .dgxRemote)
+        XCTAssertTrue(job.useFullEnsemble)
+        XCTAssertFalse(job.disableTTA)
+        XCTAssertEqual(job.classifierEntryID, "lung-nodule-radiomics")
+        XCTAssertEqual(job.modalityAllowList, ["PT"])
+        XCTAssertEqual(job.maxConcurrent, 4)
+        XCTAssertFalse(job.skipIfResultsExist)
+        XCTAssertEqual(job.petACEntryID, "deep-ac-subprocess")
+        XCTAssertEqual(job.petACPythonExecutable, "/opt/python3")
+        XCTAssertEqual(job.petACTimeoutSeconds, 900)
+        XCTAssertTrue(job.petACUseAnatomicalChannel)
+        XCTAssertFalse(job.petACFallbackToNACOnFailure)
+    }
+
+    func testCohortFormConfigBuildJobHandlesEmptyOptionals() {
+        let config = CohortFormConfig(
+            jobName: "",
+            outputRoot: "/tmp/out",
+            classifierEntryID: "",
+            petACEntryID: ""
+        )
+        let job = config.buildJob()
+        XCTAssertEqual(job.name, "Cohort run", "Empty jobName falls back to default")
+        XCTAssertNil(job.classifierEntryID, "Empty classifier id → nil (skip)")
+        XCTAssertNil(job.petACEntryID, "Empty AC id → nil (skip)")
+        XCTAssertTrue(job.modalityAllowList.isEmpty,
+                      "modalityFilter == 'All' produces empty allow-list")
+    }
+
+    func testCohortFormConfigValidationErrorOrder() {
+        var config = CohortFormConfig()
+        config.outputRoot = ""
+        XCTAssertEqual(config.validationError(filteredStudyCount: 5),
+                       "Pick an output folder for cohort results.")
+        config.outputRoot = "/tmp/out"
+        XCTAssertEqual(config.validationError(filteredStudyCount: 0),
+                       "No studies match the current filters.")
+        config.nnunetEntryID = ""
+        XCTAssertEqual(config.validationError(filteredStudyCount: 5),
+                       "Pick an nnU-Net dataset to segment with.")
+        config.nnunetEntryID = "dataset-221-autopet"
+        config.petACEntryID = "deep-ac-subprocess"
+        XCTAssertEqual(config.validationError(filteredStudyCount: 5),
+                       "AC step is on but no script path is set.")
+        config.petACScriptPath = "/tmp/ac.py"
+        XCTAssertNil(config.validationError(filteredStudyCount: 5),
+                     "Fully-configured form passes validation")
+    }
+
+    func testCohortFormConfigDecodesV1JSONWithoutACFields() throws {
+        // A "v1" config from before the AC fields existed.
+        let oldJSON = """
+        {
+          "jobName": "old",
+          "outputRoot": "/tmp",
+          "modalityFilter": "All",
+          "maxConcurrent": 2,
+          "skipIfResultsExist": true,
+          "nnunetEntryID": "dataset-221-autopet",
+          "segmentationMode": "subprocess",
+          "useFullEnsemble": false,
+          "disableTTA": true,
+          "classifierEntryID": ""
+        }
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(CohortFormConfig.self, from: oldJSON)
+        XCTAssertEqual(decoded.jobName, "old")
+        XCTAssertEqual(decoded.petACEntryID, "")
+        XCTAssertEqual(decoded.petACTimeoutSeconds, 600)
+        XCTAssertTrue(decoded.petACFallbackToNACOnFailure)
+    }
+
+    func testCohortPresetCodableRoundTrip() throws {
+        let preset = CohortPreset(
+            name: "AutoPET DGX",
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            updatedAt: Date(timeIntervalSince1970: 1_700_001_000),
+            config: CohortFormConfig(jobName: "AutoPET",
+                                     outputRoot: "/tmp",
+                                     petACEntryID: "deep-ac-dgx")
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let data = try encoder.encode(preset)
+        let decoded = try decoder.decode(CohortPreset.self, from: data)
+        XCTAssertEqual(decoded, preset)
+    }
+
+    /// Use a private suite so each test gets a clean UserDefaults — no
+    /// cross-test contamination, no real-pref pollution.
+    @MainActor
+    private func makeIsolatedFormVM(now: @escaping @Sendable () -> Date = { Date() })
+        -> (CohortFormViewModel, UserDefaults, String) {
+        let domain = "tracer.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: domain)!
+        let vm = CohortFormViewModel(defaults: defaults, now: now)
+        return (vm, defaults, domain)
+    }
+
+    @MainActor
+    func testCohortFormVMHydratesFromDefaultsThenPersistsDraft() async {
+        let (vm, defaults, domain) = makeIsolatedFormVM()
+        defer { defaults.removePersistentDomain(forName: domain) }
+
+        // Initially defaults — no draft yet.
+        XCTAssertEqual(vm.jobName, "Cohort run")
+        XCTAssertNil(defaults.data(forKey: CohortFormViewModel.draftDefaultsKey),
+                     "No draft persisted before any user edits")
+
+        // Mutate a field, then bypass the 500ms debounce by triggering
+        // the apply path (which saves immediately).
+        vm.apply(CohortFormConfig(jobName: "Edited",
+                                  outputRoot: "/tmp/run1"))
+
+        // Draft should be on disk now.
+        let raw = defaults.data(forKey: CohortFormViewModel.draftDefaultsKey)
+        XCTAssertNotNil(raw, "apply() must save draft immediately")
+        let decoded = try? JSONDecoder().decode(CohortFormConfig.self, from: raw!)
+        XCTAssertEqual(decoded?.jobName, "Edited")
+        XCTAssertEqual(decoded?.outputRoot, "/tmp/run1")
+
+        // A FRESH VM bound to the same defaults must hydrate from the draft.
+        let vm2 = CohortFormViewModel(defaults: defaults)
+        XCTAssertEqual(vm2.jobName, "Edited",
+                       "Second VM must rehydrate from persisted draft")
+        XCTAssertEqual(vm2.outputRoot, "/tmp/run1")
+    }
+
+    @MainActor
+    func testCohortFormVMDiscardsCorruptDraftWithoutCrashing() {
+        let domain = "tracer.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: domain)!
+        defer { defaults.removePersistentDomain(forName: domain) }
+        // Plant garbage at the draft key.
+        defaults.set("not valid json".data(using: .utf8)!,
+                     forKey: CohortFormViewModel.draftDefaultsKey)
+        let vm = CohortFormViewModel(defaults: defaults)
+        // Should fall back to defaults and clear the corrupt blob.
+        XCTAssertEqual(vm.jobName, "Cohort run")
+        XCTAssertNil(defaults.data(forKey: CohortFormViewModel.draftDefaultsKey),
+                     "Corrupt draft must be cleared on load failure")
+    }
+
+    @MainActor
+    func testCohortFormVMSaveAsPresetThenLoadRoundTrip() {
+        let (vm, defaults, domain) = makeIsolatedFormVM()
+        defer { defaults.removePersistentDomain(forName: domain) }
+
+        vm.jobName = "AutoPET cohort"
+        vm.outputRoot = "/tmp/autopet"
+        vm.petACEntryID = "deep-ac-dgx"
+        vm.petACScriptPath = "~/scripts/ac.py"
+
+        let preset = vm.saveAsPreset(named: "AutoPET DGX")
+        XCTAssertNotNil(preset)
+        XCTAssertEqual(vm.activePresetName, "AutoPET DGX")
+        XCTAssertEqual(vm.presets.count, 1)
+
+        // Load a different config, then load the preset back.
+        vm.reset()
+        XCTAssertEqual(vm.jobName, "Cohort run")
+        XCTAssertNil(vm.activePresetName)
+
+        guard let loaded = vm.presets.first else {
+            return XCTFail("Preset disappeared after reset")
+        }
+        vm.loadPreset(loaded)
+        XCTAssertEqual(vm.jobName, "AutoPET cohort")
+        XCTAssertEqual(vm.outputRoot, "/tmp/autopet")
+        XCTAssertEqual(vm.petACEntryID, "deep-ac-dgx")
+        XCTAssertEqual(vm.activePresetName, "AutoPET DGX")
+        XCTAssertFalse(vm.hasUnsavedPresetChanges)
+
+        // Edit — divergence should flip true.
+        vm.jobName = "AutoPET cohort modified"
+        XCTAssertTrue(vm.hasUnsavedPresetChanges)
+    }
+
+    @MainActor
+    func testCohortFormVMRejectsEmptyAndDuplicatePresetNames() {
+        let (vm, defaults, domain) = makeIsolatedFormVM()
+        defer { defaults.removePersistentDomain(forName: domain) }
+
+        vm.jobName = "X"
+        XCTAssertNil(vm.saveAsPreset(named: ""), "Empty name rejected")
+        XCTAssertNil(vm.saveAsPreset(named: "    "), "Whitespace-only name rejected")
+        XCTAssertNotNil(vm.saveAsPreset(named: "Run A"))
+        XCTAssertNil(vm.saveAsPreset(named: "Run A"), "Exact duplicate rejected")
+        XCTAssertNil(vm.saveAsPreset(named: "RUN A"),
+                     "Duplicate is case-insensitive")
+    }
+
+    @MainActor
+    func testCohortFormVMUpdateActivePresetOverwritesConfig() {
+        let (vm, defaults, domain) = makeIsolatedFormVM()
+        defer { defaults.removePersistentDomain(forName: domain) }
+
+        vm.jobName = "Initial"
+        let saved = vm.saveAsPreset(named: "Test")!
+        let originalUpdatedAt = saved.updatedAt
+
+        vm.jobName = "Updated"
+        // Tiny sleep so updatedAt actually advances on the clock.
+        Thread.sleep(forTimeInterval: 0.01)
+        let updated = vm.updateActivePreset()
+        XCTAssertEqual(updated?.config.jobName, "Updated")
+        XCTAssertGreaterThan(updated!.updatedAt, originalUpdatedAt,
+                             "updatedAt must advance on update")
+        XCTAssertFalse(vm.hasUnsavedPresetChanges,
+                       "After update the form matches the preset again")
+    }
+
+    @MainActor
+    func testCohortFormVMDuplicatePresetGeneratesUniqueName() {
+        let (vm, defaults, domain) = makeIsolatedFormVM()
+        defer { defaults.removePersistentDomain(forName: domain) }
+        vm.jobName = "Base"
+        let original = vm.saveAsPreset(named: "Base")!
+        let dup1 = vm.duplicatePreset(original)
+        XCTAssertEqual(dup1.name, "Base (copy)")
+        let dup2 = vm.duplicatePreset(original)
+        XCTAssertEqual(dup2.name, "Base (copy) 2",
+                       "Second duplicate must increment to avoid collision")
+    }
+
+    @MainActor
+    func testCohortFormVMDeleteActivePresetClearsBindingButKeepsForm() {
+        let (vm, defaults, domain) = makeIsolatedFormVM()
+        defer { defaults.removePersistentDomain(forName: domain) }
+        vm.jobName = "X"
+        let preset = vm.saveAsPreset(named: "Doomed")!
+        XCTAssertEqual(vm.activePresetID, preset.id)
+        vm.deletePreset(preset)
+        XCTAssertNil(vm.activePresetID, "Deleting active preset clears the binding")
+        XCTAssertNil(vm.activePresetName)
+        XCTAssertEqual(vm.jobName, "X",
+                       "Form contents survive a preset delete")
+        XCTAssertTrue(vm.presets.isEmpty)
+    }
+
+    @MainActor
+    func testCohortFormVMRenameActivePresetRejectsCollisions() {
+        let (vm, defaults, domain) = makeIsolatedFormVM()
+        defer { defaults.removePersistentDomain(forName: domain) }
+        vm.jobName = "A"
+        _ = vm.saveAsPreset(named: "Alpha")
+        vm.reset()
+        vm.jobName = "B"
+        let beta = vm.saveAsPreset(named: "Beta")!
+        vm.loadPreset(beta)
+
+        // Rename to the OTHER preset's name → reject.
+        XCTAssertFalse(vm.renameActivePreset(to: "Alpha"))
+        XCTAssertEqual(vm.activePresetName, "Beta",
+                       "Failed rename leaves preset name unchanged")
+
+        // Rename to its own current name → no-op success.
+        XCTAssertTrue(vm.renameActivePreset(to: "beta"))   // case-insensitive same id
+        XCTAssertEqual(vm.activePresetName, "beta")
+
+        // Rename to a brand new name → success.
+        XCTAssertTrue(vm.renameActivePreset(to: "Gamma"))
+        XCTAssertEqual(vm.activePresetName, "Gamma")
+    }
+
+    @MainActor
+    func testCohortFormVMPresetsSurviveProcessRestart() {
+        let domain = "tracer.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: domain)!
+        defer { defaults.removePersistentDomain(forName: domain) }
+
+        do {
+            let vm = CohortFormViewModel(defaults: defaults)
+            vm.jobName = "Persisted"
+            vm.outputRoot = "/tmp/p"
+            _ = vm.saveAsPreset(named: "P1")
+            _ = vm.reset()
+            vm.jobName = "Different"
+            _ = vm.saveAsPreset(named: "P2")
+        }
+        // Fresh VM in the same defaults — should see both presets, sorted.
+        let vm2 = CohortFormViewModel(defaults: defaults)
+        XCTAssertEqual(vm2.presets.count, 2)
+        XCTAssertEqual(vm2.presets.map(\.name), ["P1", "P2"])
+    }
+
+    @MainActor
+    func testCohortFormVMCorruptPresetsArchivedNotLost() {
+        let domain = "tracer.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: domain)!
+        defer { defaults.removePersistentDomain(forName: domain) }
+        let corruptBlob = "{ this is not valid }".data(using: .utf8)!
+        defaults.set(corruptBlob, forKey: CohortFormViewModel.presetsDefaultsKey)
+
+        let vm = CohortFormViewModel(defaults: defaults)
+        XCTAssertTrue(vm.presets.isEmpty,
+                      "Corrupt presets blob clears the active list")
+        XCTAssertNil(defaults.data(forKey: CohortFormViewModel.presetsDefaultsKey),
+                     "Active presets key cleared")
+        // Corrupt blob archived under sidecar key for manual recovery.
+        let archived = defaults
+            .dictionaryRepresentation()
+            .keys
+            .filter { $0.hasPrefix(CohortFormViewModel.presetsDefaultsKey + ".corrupt-") }
+        XCTAssertEqual(archived.count, 1,
+                       "Corrupt blob should be archived to a .corrupt-<ts> sidecar key")
+    }
+
+    @MainActor
+    func testCohortFormVMHasUnsavedPresetChangesFalseWithoutActivePreset() {
+        let (vm, defaults, domain) = makeIsolatedFormVM()
+        defer { defaults.removePersistentDomain(forName: domain) }
+        XCTAssertFalse(vm.hasUnsavedPresetChanges,
+                       "No active preset → no unsaved-changes claim")
+        vm.jobName = "Edited"
+        XCTAssertFalse(vm.hasUnsavedPresetChanges,
+                       "Edits without an active preset are NOT 'unsaved preset changes'")
+    }
+
+    @MainActor
+    func testCohortFormVMConfigSnapshotMatchesPublishedFields() {
+        let (vm, defaults, domain) = makeIsolatedFormVM()
+        defer { defaults.removePersistentDomain(forName: domain) }
+        vm.jobName = "Snap test"
+        vm.maxConcurrent = 7
+        vm.petACEntryID = "deep-ac-subprocess"
+        vm.petACTimeoutSeconds = 1234
+        let snap = vm.config
+        XCTAssertEqual(snap.jobName, "Snap test")
+        XCTAssertEqual(snap.maxConcurrent, 7)
+        XCTAssertEqual(snap.petACEntryID, "deep-ac-subprocess")
+        XCTAssertEqual(snap.petACTimeoutSeconds, 1234)
+    }
+
     // MARK: - Cohort PET AC integration
 
     func testCohortJobDecodesOldCheckpointWithoutACFields() throws {

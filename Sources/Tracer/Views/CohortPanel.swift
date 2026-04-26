@@ -5,44 +5,36 @@ import AppKit
 
 /// The one pane that turns Tracer from a single-study viewer into a
 /// cohort-processing tool. Drives `CohortBatchProcessor` via
-/// `CohortResultsStore` — config form at the top, live progress in the
-/// middle, sortable per-study results table at the bottom.
+/// `CohortResultsStore`.
+///
+/// Architecture: this view is **presentational**. Form state lives on a
+/// `CohortFormViewModel` owned by `ContentView`, which auto-persists a
+/// draft to UserDefaults and supports named presets. The only `@State`
+/// the panel keeps is for transient UI affordances (sort column, the
+/// "save preset" sheet's text field) that don't belong in a saveable job
+/// configuration.
 ///
 /// Opens as an inspector drawer from the AI Engines menu (⌘⇧B). Takes the
 /// fully-indexed worklist from `ContentView`; the user filters it further
-/// inside the panel (by modality, status, search text) before kicking off
-/// a run.
+/// inside the panel before kicking off a run.
 public struct CohortPanel: View {
     @ObservedObject public var store: CohortResultsStore
     @ObservedObject public var classifier: ClassificationViewModel
+    @ObservedObject public var form: CohortFormViewModel
 
-    /// Everything indexed under "Study Browser". The cohort panel shows
-    /// this as the "available studies" count and lets the user filter
-    /// before running.
+    /// Everything indexed under "Study Browser". Display-only;
+    /// `form.modalityFilter` decides which subset becomes a cohort.
     public let availableStudies: [PACSWorklistStudy]
 
-    @State private var jobName: String = "Cohort run"
-    @State private var outputRoot: String = ""
-    @State private var modalityFilter: String = "All"
-    @State private var nnunetEntryID: String = NNUnetCatalog.all.first?.id ?? ""
-    @State private var segmentationMode: SegmentationMode = .subprocess
-    @State private var useFullEnsemble: Bool = false
-    @State private var disableTTA: Bool = true
-    @State private var classifierEntryID: String = ""
-    @State private var maxConcurrent: Int = 2
-    @State private var skipIfResultsExist: Bool = true
+    // MARK: - Transient UI state (not part of the saveable job config)
+
     @State private var sortColumn: SortColumn = .studyDate
     @State private var sortAscending: Bool = false
-
-    // PET attenuation correction (optional pre-segmentation step)
-    @State private var petACEntryID: String = ""           // empty = skip AC
-    @State private var petACScriptPath: String = ""
-    @State private var petACPythonExecutable: String = "/usr/bin/env"
-    @State private var petACEnvironment: String = ""
-    @State private var petACExtraArgs: String = ""
-    @State private var petACTimeoutSeconds: Double = 600
-    @State private var petACUseAnatomicalChannel: Bool = false
-    @State private var petACFallbackToNACOnFailure: Bool = true
+    @State private var showingSavePresetSheet: Bool = false
+    @State private var pendingPresetName: String = ""
+    @State private var showingRenameSheet: Bool = false
+    @State private var pendingRenameValue: String = ""
+    @State private var showingDeleteConfirm: Bool = false
 
     enum SortColumn: String, CaseIterable, Identifiable {
         case studyDate
@@ -65,15 +57,19 @@ public struct CohortPanel: View {
 
     public init(store: CohortResultsStore,
                 classifier: ClassificationViewModel,
+                form: CohortFormViewModel,
                 availableStudies: [PACSWorklistStudy]) {
         self.store = store
         self.classifier = classifier
+        self.form = form
         self.availableStudies = availableStudies
     }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             header
+            Divider()
+            presetBar
             Divider()
             jobForm
             Divider()
@@ -83,6 +79,14 @@ public struct CohortPanel: View {
         }
         .padding(14)
         .frame(minWidth: 560)
+        .sheet(isPresented: $showingSavePresetSheet) { savePresetSheet }
+        .sheet(isPresented: $showingRenameSheet) { renamePresetSheet }
+        .alert("Delete preset?", isPresented: $showingDeleteConfirm) {
+            Button("Cancel", role: .cancel) {}
+            Button("Delete", role: .destructive) { deleteActivePreset() }
+        } message: {
+            Text("This removes \"\(form.activePresetName ?? "")\" from your saved presets. The current form contents stay as-is.")
+        }
     }
 
     // MARK: - Sections
@@ -103,10 +107,125 @@ public struct CohortPanel: View {
         }
     }
 
+    // MARK: - Preset bar
+
+    /// Top-of-panel row that drives named-preset workflows. Picker for
+    /// loading any saved preset; menu for save / save-as / rename / delete /
+    /// duplicate. Shows a "•" next to the preset name when the form has
+    /// drifted from the loaded preset (helps the user spot when they need
+    /// to hit "Update preset").
+    private var presetBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "square.stack")
+                .foregroundColor(.secondary)
+                .font(.system(size: 11))
+
+            Menu {
+                Button {
+                    form.reset()
+                } label: {
+                    Label("New (defaults)", systemImage: "doc.badge.plus")
+                }
+                if !form.presets.isEmpty {
+                    Divider()
+                    ForEach(form.presets) { preset in
+                        Button {
+                            form.loadPreset(preset)
+                        } label: {
+                            HStack {
+                                Image(systemName: form.activePresetID == preset.id
+                                      ? "checkmark.circle.fill"
+                                      : "circle")
+                                Text(preset.name)
+                            }
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Text(activePresetDisplay)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(form.activePresetID == nil ? .secondary : .primary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if form.hasUnsavedPresetChanges {
+                        Text("•")
+                            .foregroundColor(.orange)
+                            .help("Unsaved changes since this preset was loaded")
+                    }
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(RoundedRectangle(cornerRadius: 5)
+                    .fill(Color.secondary.opacity(0.1)))
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+
+            Spacer()
+
+            Menu {
+                Button {
+                    pendingPresetName = form.activePresetName ?? form.jobName
+                    showingSavePresetSheet = true
+                } label: {
+                    Label("Save as new preset…", systemImage: "square.and.arrow.down")
+                }
+                .disabled(!form.hasUserEdits)
+
+                Button {
+                    _ = form.updateActivePreset()
+                } label: {
+                    Label(form.hasUnsavedPresetChanges
+                          ? "Update \"\(form.activePresetName ?? "")\""
+                          : "Update active preset",
+                          systemImage: "arrow.up.circle")
+                }
+                .disabled(form.activePresetID == nil || !form.hasUnsavedPresetChanges)
+
+                if let active = form.presets.first(where: { $0.id == form.activePresetID }) {
+                    Divider()
+                    Button {
+                        pendingRenameValue = active.name
+                        showingRenameSheet = true
+                    } label: {
+                        Label("Rename…", systemImage: "pencil")
+                    }
+                    Button {
+                        _ = form.duplicatePreset(active)
+                    } label: {
+                        Label("Duplicate", systemImage: "plus.square.on.square")
+                    }
+                    Divider()
+                    Button(role: .destructive) {
+                        showingDeleteConfirm = true
+                    } label: {
+                        Label("Delete preset", systemImage: "trash")
+                    }
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 12))
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Preset management")
+        }
+    }
+
+    private var activePresetDisplay: String {
+        if let name = form.activePresetName { return name }
+        if form.presets.isEmpty { return "Untitled (no presets yet)" }
+        return "Untitled draft"
+    }
+
     // MARK: - Form
 
     private var filteredStudies: [PACSWorklistStudy] {
-        let lowered = modalityFilter
+        let lowered = form.modalityFilter
         return availableStudies.filter { study in
             if lowered == "All" { return true }
             return study.modalities.contains(lowered)
@@ -134,12 +253,12 @@ public struct CohortPanel: View {
                     .foregroundColor(.secondary)
             }
 
-            TextField("Cohort name", text: $jobName)
+            TextField("Cohort name", text: $form.jobName)
                 .textFieldStyle(.roundedBorder)
 
             HStack {
                 TextField("Output folder (e.g. ~/tracer-cohort/autopet-2024)",
-                          text: $outputRoot)
+                          text: $form.outputRoot)
                     .textFieldStyle(.roundedBorder)
                 #if canImport(AppKit)
                 Button("Browse…") { pickOutputFolder() }
@@ -149,42 +268,42 @@ public struct CohortPanel: View {
             }
 
             HStack {
-                Picker("Modality", selection: $modalityFilter) {
+                Picker("Modality", selection: $form.modalityFilter) {
                     ForEach(allModalityOptions, id: \.self) { Text($0).tag($0) }
                 }
                 .pickerStyle(.menu)
                 .frame(maxWidth: 180)
 
-                Stepper("Workers: \(maxConcurrent)",
-                        value: $maxConcurrent, in: 1...16)
+                Stepper("Workers: \(form.maxConcurrent)",
+                        value: $form.maxConcurrent, in: 1...16)
                     .controlSize(.small)
 
-                Toggle("Skip if results exist", isOn: $skipIfResultsExist)
+                Toggle("Skip if results exist", isOn: $form.skipIfResultsExist)
                     .toggleStyle(.switch)
                     .controlSize(.small)
             }
 
-            Picker("nnU-Net", selection: $nnunetEntryID) {
+            Picker("nnU-Net", selection: $form.nnunetEntryID) {
                 ForEach(NNUnetCatalog.all, id: \.id) { Text($0.displayName).tag($0.id) }
             }
             .pickerStyle(.menu)
 
             HStack {
-                Picker("Mode", selection: $segmentationMode) {
+                Picker("Mode", selection: $form.segmentationMode) {
                     ForEach(SegmentationMode.allCases, id: \.self) { Text($0.displayName).tag($0) }
                 }
                 .pickerStyle(.segmented)
-                Toggle("5-fold", isOn: $useFullEnsemble)
+                Toggle("5-fold", isOn: $form.useFullEnsemble)
                     .toggleStyle(.switch)
                     .controlSize(.small)
-                Toggle("No TTA", isOn: $disableTTA)
+                Toggle("No TTA", isOn: $form.disableTTA)
                     .toggleStyle(.switch)
                     .controlSize(.small)
             }
 
             petACSection
 
-            Picker("Classify with", selection: $classifierEntryID) {
+            Picker("Classify with", selection: $form.classifierEntryID) {
                 Text("— skip classification —").tag("")
                 ForEach(LesionClassifierCatalog.all, id: \.id) {
                     Text($0.displayName).tag($0.id)
@@ -192,40 +311,46 @@ public struct CohortPanel: View {
             }
             .pickerStyle(.menu)
 
-            HStack {
-                Button {
-                    startCohort()
-                } label: {
-                    Label("Run cohort", systemImage: "play.fill")
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(store.isRunning || outputRoot.isEmpty || filteredStudies.isEmpty)
-
-                Button {
-                    store.markFailedForRetry()
-                } label: {
-                    Label("Retry failed", systemImage: "arrow.counterclockwise")
-                }
-                .disabled(store.checkpoint?.failedCount ?? 0 == 0)
-
-                Button {
-                    exportCSV()
-                } label: {
-                    Label("Export CSV", systemImage: "square.and.arrow.up")
-                }
-                .disabled(store.checkpoint == nil)
-
-                Spacer()
-            }
-            .controlSize(.small)
+            actionRow
         }
+    }
+
+    private var actionRow: some View {
+        HStack {
+            Button {
+                startCohort()
+            } label: {
+                Label("Run cohort", systemImage: "play.fill")
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(store.isRunning
+                      || form.validationError(filteredStudyCount: filteredStudies.count) != nil)
+            .help(form.validationError(filteredStudyCount: filteredStudies.count) ?? "Run the cohort")
+
+            Button {
+                store.markFailedForRetry()
+            } label: {
+                Label("Retry failed", systemImage: "arrow.counterclockwise")
+            }
+            .disabled((store.checkpoint?.failedCount ?? 0) == 0)
+
+            Button {
+                exportCSV()
+            } label: {
+                Label("Export CSV", systemImage: "square.and.arrow.up")
+            }
+            .disabled(store.checkpoint == nil)
+
+            Spacer()
+        }
+        .controlSize(.small)
     }
 
     // MARK: - PET AC step (optional)
 
     @ViewBuilder
     private var petACSection: some View {
-        Picker("AC step (NAC → AC PET)", selection: $petACEntryID) {
+        Picker("AC step (NAC → AC PET)", selection: $form.petACEntryID) {
             Text("— skip AC —").tag("")
             ForEach(PETACCatalog.all, id: \.id) { entry in
                 Text(entry.displayName).tag(entry.id)
@@ -233,9 +358,9 @@ public struct CohortPanel: View {
         }
         .pickerStyle(.menu)
 
-        if !petACEntryID.isEmpty {
+        if !form.petACEntryID.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
-                if let entry = PETACCatalog.byID(petACEntryID) {
+                if let entry = PETACCatalog.byID(form.petACEntryID) {
                     Text(entry.description)
                         .font(.system(size: 10))
                         .foregroundColor(.secondary)
@@ -248,21 +373,21 @@ public struct CohortPanel: View {
                     }
                 }
 
-                let entry = PETACCatalog.byID(petACEntryID)
+                let entry = PETACCatalog.byID(form.petACEntryID)
                 let isRemote = entry?.backend == .dgxRemote
 
                 HStack {
                     TextField(isRemote
                               ? "~/scripts/deep_ac.py (on the DGX)"
                               : "path/to/deep_ac.py",
-                              text: $petACScriptPath)
+                              text: $form.petACScriptPath)
                         .textFieldStyle(.roundedBorder)
                         .disableAutocorrection(true)
                 }
 
                 if !isRemote {
                     TextField("Python interpreter (default /usr/bin/env)",
-                              text: $petACPythonExecutable)
+                              text: $form.petACPythonExecutable)
                         .textFieldStyle(.roundedBorder)
                         .disableAutocorrection(true)
                 }
@@ -272,31 +397,31 @@ public struct CohortPanel: View {
                      : "Environment overrides (KEY=VALUE per line)")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundColor(.secondary)
-                TextEditor(text: $petACEnvironment)
+                TextEditor(text: $form.petACEnvironment)
                     .font(.system(size: 11, design: .monospaced))
                     .frame(height: 50)
                     .background(RoundedRectangle(cornerRadius: 4)
                         .stroke(Color.secondary.opacity(0.3)))
 
-                TextField("Extra script arguments (optional)", text: $petACExtraArgs)
+                TextField("Extra script arguments (optional)", text: $form.petACExtraArgs)
                     .textFieldStyle(.roundedBorder)
                     .disableAutocorrection(true)
 
                 HStack {
                     Toggle("Use anatomical channel",
-                           isOn: $petACUseAnatomicalChannel)
+                           isOn: $form.petACUseAnatomicalChannel)
                         .toggleStyle(.switch)
                         .controlSize(.small)
                         .disabled(entry?.requiresAnatomicalChannel == true)
-                    Stepper("AC timeout: \(Int(petACTimeoutSeconds))s",
-                            value: $petACTimeoutSeconds,
+                    Stepper("AC timeout: \(Int(form.petACTimeoutSeconds))s",
+                            value: $form.petACTimeoutSeconds,
                             in: 30...3600,
                             step: 30)
                         .controlSize(.small)
                 }
 
                 Toggle("Fall back to NAC if AC fails (recommended)",
-                       isOn: $petACFallbackToNACOnFailure)
+                       isOn: $form.petACFallbackToNACOnFailure)
                     .toggleStyle(.switch)
                     .controlSize(.small)
                     .help("On: AC failure is logged, segmentation runs on the original NAC, study is flagged in the CSV. Off: AC failure marks the study failedAttenuationCorrection and skips segmentation/classification.")
@@ -304,6 +429,90 @@ public struct CohortPanel: View {
             .padding(8)
             .background(RoundedRectangle(cornerRadius: 4)
                 .fill(Color.accentColor.opacity(0.06)))
+        }
+    }
+
+    // MARK: - Save / rename preset sheets
+
+    private var savePresetSheet: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Save current cohort form as a preset")
+                .font(.headline)
+            TextField("Preset name", text: $pendingPresetName)
+                .textFieldStyle(.roundedBorder)
+            if presetNameCollision(pendingPresetName) {
+                Label("A preset with that name already exists.",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11))
+                    .foregroundColor(.orange)
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { showingSavePresetSheet = false }
+                Button("Save") {
+                    if form.saveAsPreset(named: pendingPresetName) != nil {
+                        showingSavePresetSheet = false
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(pendingPresetName.trimmingCharacters(in: .whitespaces).isEmpty
+                          || presetNameCollision(pendingPresetName))
+            }
+        }
+        .padding(20)
+        .frame(width: 360)
+    }
+
+    private var renamePresetSheet: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Rename preset")
+                .font(.headline)
+            TextField("Preset name", text: $pendingRenameValue)
+                .textFieldStyle(.roundedBorder)
+            if renameCollision(pendingRenameValue) {
+                Label("A different preset already uses that name.",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11))
+                    .foregroundColor(.orange)
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { showingRenameSheet = false }
+                Button("Rename") {
+                    if form.renameActivePreset(to: pendingRenameValue) {
+                        showingRenameSheet = false
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(pendingRenameValue.trimmingCharacters(in: .whitespaces).isEmpty
+                          || renameCollision(pendingRenameValue))
+            }
+        }
+        .padding(20)
+        .frame(width: 360)
+    }
+
+    private func presetNameCollision(_ candidate: String) -> Bool {
+        let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        return form.presets.contains {
+            $0.name.caseInsensitiveCompare(trimmed) == .orderedSame
+        }
+    }
+
+    private func renameCollision(_ candidate: String) -> Bool {
+        let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        return form.presets.contains {
+            $0.id != form.activePresetID
+            && $0.name.caseInsensitiveCompare(trimmed) == .orderedSame
+        }
+    }
+
+    private func deleteActivePreset() {
+        if let id = form.activePresetID,
+           let preset = form.presets.first(where: { $0.id == id }) {
+            form.deletePreset(preset)
         }
     }
 
@@ -371,8 +580,6 @@ public struct CohortPanel: View {
     }
 
     private func color(for label: String) -> Color {
-        // Deterministic but varied colour per label. Hash into HSB space so
-        // similar labels don't collide onto the same bar colour.
         let hash = abs(label.hashValue)
         let hue = Double(hash % 360) / 360.0
         return Color(hue: hue, saturation: 0.65, brightness: 0.85)
@@ -509,31 +716,7 @@ public struct CohortPanel: View {
     // MARK: - Actions
 
     private func startCohort() {
-        let expanded = (outputRoot as NSString).expandingTildeInPath
-        let outputURL = URL(fileURLWithPath: expanded)
-        var modalityAllow: [String] = []
-        if modalityFilter != "All" { modalityAllow = [modalityFilter] }
-
-        var job = CohortJob(
-            name: jobName.isEmpty ? "Cohort run" : jobName,
-            outputRoot: outputURL,
-            nnunetEntryID: nnunetEntryID,
-            segmentationMode: segmentationMode,
-            useFullEnsemble: useFullEnsemble,
-            disableTTA: disableTTA,
-            classifierEntryID: classifierEntryID.isEmpty ? nil : classifierEntryID,
-            maxConcurrent: maxConcurrent,
-            skipIfResultsExist: skipIfResultsExist,
-            modalityAllowList: modalityAllow,
-            petACEntryID: petACEntryID.isEmpty ? nil : petACEntryID,
-            petACScriptPath: petACScriptPath,
-            petACPythonExecutable: petACPythonExecutable,
-            petACEnvironment: petACEnvironment,
-            petACExtraArgs: petACExtraArgs,
-            petACTimeoutSeconds: petACTimeoutSeconds,
-            petACUseAnatomicalChannel: petACUseAnatomicalChannel,
-            petACFallbackToNACOnFailure: petACFallbackToNACOnFailure
-        )
+        var job = form.buildJob()
         if job.classifierEntryID != nil {
             classifier.applyCohortConfiguration(to: &job)
         }
@@ -549,13 +732,13 @@ public struct CohortPanel: View {
         panel.canCreateDirectories = true
         panel.message = "Pick the output folder for cohort results"
         if panel.runModal() == .OK, let url = panel.url {
-            outputRoot = url.path
+            form.outputRoot = url.path
         }
     }
 
     private func exportCSV() {
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = "\(jobName.isEmpty ? "cohort" : jobName).csv"
+        panel.nameFieldStringValue = "\(form.jobName.isEmpty ? "cohort" : form.jobName).csv"
         panel.canCreateDirectories = true
         if panel.runModal() == .OK, let url = panel.url {
             do {

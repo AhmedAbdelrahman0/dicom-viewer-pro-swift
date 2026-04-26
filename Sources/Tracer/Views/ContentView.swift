@@ -17,6 +17,7 @@ public struct ContentView: View {
     @StateObject private var classification = ClassificationViewModel()
     @StateObject private var modelManager = ModelManagerViewModel()
     @StateObject private var cohort = CohortResultsStore()
+    @StateObject private var cohortForm = CohortFormViewModel()
     @StateObject private var petAC = PETACViewModel()
     @State private var showingFileImporter = false
     @State private var showingDirectoryPicker = false
@@ -142,6 +143,7 @@ public struct ContentView: View {
         ) {
             CohortPanel(store: cohort,
                         classifier: classification,
+                        form: cohortForm,
                         availableStudies: cohortStudies)
                 .overlay(alignment: .topTrailing) {
                     closeInspectorButton { showCohortPanel = false }
