@@ -3677,7 +3677,7 @@ final class GeometryAndIOTests: XCTestCase {
             vm.jobName = "Persisted"
             vm.outputRoot = "/tmp/p"
             _ = vm.saveAsPreset(named: "P1")
-            _ = vm.reset()
+            vm.reset()
             vm.jobName = "Different"
             _ = vm.saveAsPreset(named: "P2")
         }
