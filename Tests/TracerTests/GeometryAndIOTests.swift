@@ -3163,6 +3163,67 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertTrue(vm.statusMessage.contains("SUV sphere ROI"))
     }
 
+    func testSphericalIntensityROIMeasuresHUStats() throws {
+        let ct = ImageVolume(
+            pixels: (1...27).map(Float.init),
+            depth: 3,
+            height: 3,
+            width: 3,
+            spacing: (1, 1, 1),
+            modality: "CT",
+            seriesDescription: "CT"
+        )
+
+        let roi = try XCTUnwrap(IntensityROICalculator.spherical(
+            volume: ct,
+            center: VoxelCoordinate(z: 1, y: 1, x: 1),
+            radiusMM: 1.1
+        ))
+
+        XCTAssertEqual(roi.voxelCount, 7)
+        XCTAssertEqual(roi.valueMax, 23, accuracy: 1e-9)
+        XCTAssertEqual(roi.valueMean, 14, accuracy: 1e-9)
+        XCTAssertEqual(roi.unit, "HU")
+        XCTAssertTrue(roi.compactSummary.contains("HUmax"))
+    }
+
+    @MainActor
+    func testViewerAddsSphericalHUROIAtWorldPoint() throws {
+        let vm = ViewerViewModel()
+        vm.suvSphereRadiusMM = 1.1
+        let ct = ImageVolume(
+            pixels: (1...27).map(Float.init),
+            depth: 3,
+            height: 3,
+            width: 3,
+            spacing: (1, 1, 1),
+            modality: "CT",
+            seriesDescription: "CT"
+        )
+        vm.displayVolume(ct)
+
+        let roi = try XCTUnwrap(vm.addSphericalIntensityROI(
+            at: ct.worldPoint(z: 1, y: 1, x: 1),
+            in: ct
+        ))
+
+        XCTAssertEqual(vm.intensityROIMeasurements.count, 1)
+        XCTAssertEqual(vm.lastIntensityROIMeasurement?.id, roi.id)
+        XCTAssertEqual(roi.valueMean, 14, accuracy: 1e-9)
+        XCTAssertTrue(vm.statusMessage.contains("HU sphere ROI"))
+    }
+
+    @MainActor
+    func testViewerToolSelectionClearsLabelingMode() {
+        let vm = ViewerViewModel()
+        vm.labeling.labelingTool = .brush
+
+        vm.setActiveViewerTool(.suvSphere)
+
+        XCTAssertEqual(vm.activeTool, .suvSphere)
+        XCTAssertEqual(vm.labeling.labelingTool, .none)
+    }
+
     func testDynamicStudyBuilderUsesMatchingNuclearFrames() throws {
         let frameA = ImageVolume(
             pixels: [1, 2, 3, 4],

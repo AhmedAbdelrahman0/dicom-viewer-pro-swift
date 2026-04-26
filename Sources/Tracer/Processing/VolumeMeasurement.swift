@@ -205,6 +205,66 @@ public struct SUVROIMeasurement: Identifiable, Equatable, Sendable {
     }
 }
 
+public struct IntensityROIMeasurement: Identifiable, Equatable, Sendable {
+    public let id: UUID
+    public let sourceVolumeIdentity: String
+    public let sourceDescription: String
+    public let modality: String
+    public let center: VoxelCoordinate
+    public let centerWorld: SIMD3<Double>
+    public let radiusMM: Double
+    public let voxelCount: Int
+    public let volumeMM3: Double
+    public let sphereVolumeMM3: Double
+    public let valueMin: Double
+    public let valueMax: Double
+    public let valueMean: Double
+    public let valueStd: Double
+
+    public init(id: UUID = UUID(),
+                sourceVolumeIdentity: String,
+                sourceDescription: String,
+                modality: String,
+                center: VoxelCoordinate,
+                centerWorld: SIMD3<Double>,
+                radiusMM: Double,
+                voxelCount: Int,
+                volumeMM3: Double,
+                sphereVolumeMM3: Double,
+                valueMin: Double,
+                valueMax: Double,
+                valueMean: Double,
+                valueStd: Double) {
+        self.id = id
+        self.sourceVolumeIdentity = sourceVolumeIdentity
+        self.sourceDescription = sourceDescription
+        self.modality = modality
+        self.center = center
+        self.centerWorld = centerWorld
+        self.radiusMM = radiusMM
+        self.voxelCount = voxelCount
+        self.volumeMM3 = volumeMM3
+        self.sphereVolumeMM3 = sphereVolumeMM3
+        self.valueMin = valueMin
+        self.valueMax = valueMax
+        self.valueMean = valueMean
+        self.valueStd = valueStd
+    }
+
+    public var volumeML: Double { volumeMM3 / 1_000 }
+    public var sphereVolumeML: Double { sphereVolumeMM3 / 1_000 }
+    public var unit: String {
+        Modality.normalize(modality) == .CT ? "HU" : "raw"
+    }
+
+    public var compactSummary: String {
+        if Modality.normalize(modality) == .CT {
+            return String(format: "HUmax %.1f  HUmean %.1f  %.2f mL", valueMax, valueMean, volumeML)
+        }
+        return String(format: "Max %.2f  Mean %.2f  %.2f mL", valueMax, valueMean, volumeML)
+    }
+}
+
 public enum SUVROICalculator {
     public static func spherical(
         volume: ImageVolume,
@@ -296,6 +356,86 @@ public enum SUVROICalculator {
             suvMax: suvMax,
             suvMean: suvMean,
             suvStd: sqrt(suvVariance)
+        )
+    }
+}
+
+public enum IntensityROICalculator {
+    public static func spherical(
+        volume: ImageVolume,
+        center: VoxelCoordinate,
+        radiusMM: Double
+    ) -> IntensityROIMeasurement? {
+        guard radiusMM > 0,
+              center.x >= 0, center.x < volume.width,
+              center.y >= 0, center.y < volume.height,
+              center.z >= 0, center.z < volume.depth else {
+            return nil
+        }
+
+        let centerWorld = volume.worldPoint(z: center.z, y: center.y, x: center.x)
+        let rx = Int(ceil(radiusMM / max(volume.spacing.x, 1e-9))) + 1
+        let ry = Int(ceil(radiusMM / max(volume.spacing.y, 1e-9))) + 1
+        let rz = Int(ceil(radiusMM / max(volume.spacing.z, 1e-9))) + 1
+        let box = VoxelBox(
+            minZ: max(0, center.z - rz),
+            maxZ: min(volume.depth - 1, center.z + rz),
+            minY: max(0, center.y - ry),
+            maxY: min(volume.height - 1, center.y + ry),
+            minX: max(0, center.x - rx),
+            maxX: min(volume.width - 1, center.x + rx)
+        )
+
+        var count = 0
+        var valueMin = Double.greatestFiniteMagnitude
+        var valueMax = -Double.greatestFiniteMagnitude
+        var valueSum = 0.0
+        var valueSquareSum = 0.0
+        let radiusWithTolerance = radiusMM + 1e-6
+
+        for z in box.minZ...box.maxZ {
+            for y in box.minY...box.maxY {
+                let rowStart = z * volume.height * volume.width + y * volume.width
+                for x in box.minX...box.maxX {
+                    let world = volume.worldPoint(z: z, y: y, x: x)
+                    guard simd_distance(world, centerWorld) <= radiusWithTolerance else {
+                        continue
+                    }
+                    let value = Double(volume.pixels[rowStart + x])
+                    guard value.isFinite else { continue }
+                    count += 1
+                    valueMin = min(valueMin, value)
+                    valueMax = max(valueMax, value)
+                    valueSum += value
+                    valueSquareSum += value * value
+                }
+            }
+        }
+
+        guard count > 0 else { return nil }
+        let n = Double(count)
+        let valueMean = valueSum / n
+        let valueVariance = max(0, valueSquareSum / n - valueMean * valueMean)
+        let voxelVolume = volume.spacing.x * volume.spacing.y * volume.spacing.z
+        let sphereVolume = 4.0 / 3.0 * Double.pi * pow(radiusMM, 3)
+        let description = volume.seriesDescription.isEmpty
+            ? Modality.normalize(volume.modality).displayName
+            : volume.seriesDescription
+
+        return IntensityROIMeasurement(
+            sourceVolumeIdentity: volume.sessionIdentity,
+            sourceDescription: description,
+            modality: volume.modality,
+            center: center,
+            centerWorld: centerWorld,
+            radiusMM: radiusMM,
+            voxelCount: count,
+            volumeMM3: n * voxelVolume,
+            sphereVolumeMM3: sphereVolume,
+            valueMin: valueMin,
+            valueMax: valueMax,
+            valueMean: valueMean,
+            valueStd: sqrt(valueVariance)
         )
     }
 }

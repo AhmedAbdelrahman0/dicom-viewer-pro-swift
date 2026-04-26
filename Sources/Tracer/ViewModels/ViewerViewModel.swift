@@ -16,7 +16,7 @@ public enum ViewerTool: String, CaseIterable, Identifiable {
         case .distance: return "Distance"
         case .angle: return "Angle"
         case .area: return "Area"
-        case .suvSphere: return "SUV Sphere"
+        case .suvSphere: return "Sphere ROI"
         }
     }
     public var systemImage: String {
@@ -66,9 +66,9 @@ public enum ViewerTool: String, CaseIterable, Identifiable {
                  + "Shows the enclosed area in mm² / cm².\n"
                  + "Shortcut: R"
         case .suvSphere:
-            return "Spherical SUV ROI\n"
-                 + "Click PET or fused images to place a 3D spherical VOI.\n"
-                 + "Reports SUVmax, SUVmean, and sampled volume.\n"
+            return "Spherical SUV / HU ROI\n"
+                 + "Click PET or fused images for SUVmax/SUVmean.\n"
+                 + "Click CT/MR panes for HU or raw intensity stats.\n"
                  + "Shortcut: S"
         }
     }
@@ -245,6 +245,8 @@ public final class ViewerViewModel: ObservableObject {
     @Published public var suvSphereRadiusMM: Double = 6.2
     @Published public var suvROIMeasurements: [SUVROIMeasurement] = []
     @Published public var lastSUVROIMeasurement: SUVROIMeasurement?
+    @Published public var intensityROIMeasurements: [IntensityROIMeasurement] = []
+    @Published public var lastIntensityROIMeasurement: IntensityROIMeasurement?
     @Published public var dynamicStudy: DynamicImageStudy?
     @Published public var selectedDynamicFrameIndex: Int = 0
     @Published public var dynamicPlaybackFPS: Double = 2.0
@@ -300,6 +302,8 @@ public final class ViewerViewModel: ObservableObject {
         var suvSphereRadiusMM: Double
         var suvROIs: [SUVROIMeasurement]
         var lastSUVROI: SUVROIMeasurement?
+        var intensityROIs: [IntensityROIMeasurement]
+        var lastIntensityROI: IntensityROIMeasurement?
         var labelVoxels: [UUID: [UInt16]]
     }
 
@@ -366,6 +370,19 @@ public final class ViewerViewModel: ObservableObject {
 
     public var activePETSourceVolume: ImageVolume? {
         fusion?.overlayVolume ?? activePETQuantificationVolume
+    }
+
+    public func setActiveViewerTool(_ tool: ViewerTool) {
+        activeTool = tool
+        labeling.labelingTool = .none
+        switch tool {
+        case .suvSphere:
+            statusMessage = "Spherical ROI armed: click PET/fusion for SUV or CT/MR for intensity stats"
+        case .distance, .angle, .area:
+            statusMessage = "\(tool.displayName) armed"
+        default:
+            statusMessage = "\(tool.displayName) tool active"
+        }
     }
 
     public var petOverlayRangeMin: Double {
@@ -780,6 +797,8 @@ public final class ViewerViewModel: ObservableObject {
         annotations.removeAll()
         suvROIMeasurements.removeAll()
         lastSUVROIMeasurement = nil
+        intensityROIMeasurements.removeAll()
+        lastIntensityROIMeasurement = nil
         lastVolumeMeasurementReport = nil
         resetAllViewportTransforms()
         invertColors = false
@@ -901,6 +920,60 @@ public final class ViewerViewModel: ObservableObject {
             self?.lastSUVROIMeasurement = nil
         }
         statusMessage = "Cleared \(before.count) SUV ROI measurements"
+    }
+
+    @discardableResult
+    public func addSphericalIntensityROI(at worldPoint: SIMD3<Double>,
+                                         in volume: ImageVolume,
+                                         radiusMM: Double? = nil) -> IntensityROIMeasurement? {
+        let radius = max(0.5, radiusMM ?? suvSphereRadiusMM)
+        let voxel = volume.voxelIndex(from: worldPoint)
+        let center = VoxelCoordinate(z: voxel.z, y: voxel.y, x: voxel.x)
+        guard let measurement = IntensityROICalculator.spherical(
+            volume: volume,
+            center: center,
+            radiusMM: radius
+        ) else {
+            statusMessage = "Could not measure spherical ROI at that point"
+            return nil
+        }
+
+        intensityROIMeasurements.append(measurement)
+        lastIntensityROIMeasurement = measurement
+        let id = measurement.id
+        recordHistoryIfNeeded(name: "Intensity sphere ROI", changed: true) { [weak self] in
+            guard let self else { return }
+            self.intensityROIMeasurements.removeAll { $0.id == id }
+            self.lastIntensityROIMeasurement = self.intensityROIMeasurements.last
+        } redo: { [weak self] in
+            guard let self,
+                  !self.intensityROIMeasurements.contains(where: { $0.id == id }) else { return }
+            self.intensityROIMeasurements.append(measurement)
+            self.lastIntensityROIMeasurement = measurement
+        }
+        let modality = Modality.normalize(volume.modality)
+        let label = modality == .CT ? "HU sphere ROI" : "\(modality.displayName) sphere ROI"
+        statusMessage = "\(label): \(measurement.compactSummary)"
+        return measurement
+    }
+
+    public func clearIntensityROIMeasurements() {
+        let before = intensityROIMeasurements
+        let beforeLast = lastIntensityROIMeasurement
+        guard !before.isEmpty else {
+            statusMessage = "No intensity ROI measurements to clear"
+            return
+        }
+        intensityROIMeasurements.removeAll()
+        lastIntensityROIMeasurement = nil
+        recordHistoryIfNeeded(name: "Clear intensity ROIs", changed: true) { [weak self] in
+            self?.intensityROIMeasurements = before
+            self?.lastIntensityROIMeasurement = beforeLast
+        } redo: { [weak self] in
+            self?.intensityROIMeasurements.removeAll()
+            self?.lastIntensityROIMeasurement = nil
+        }
+        statusMessage = "Cleared \(before.count) intensity ROI measurements"
     }
 
     public var dynamicCandidateVolumes: [ImageVolume] {
@@ -1120,6 +1193,8 @@ public final class ViewerViewModel: ObservableObject {
             suvSphereRadiusMM: suvSphereRadiusMM,
             suvROIs: suvROIMeasurements,
             lastSUVROI: lastSUVROIMeasurement,
+            intensityROIs: intensityROIMeasurements,
+            lastIntensityROI: lastIntensityROIMeasurement,
             labelVoxels: labeling.labelMaps.reduce(into: [:]) { voxelsByMapID, map in
                 voxelsByMapID[map.id] = map.voxels
             }
@@ -1150,6 +1225,8 @@ public final class ViewerViewModel: ObservableObject {
         suvSphereRadiusMM = snapshot.suvSphereRadiusMM
         suvROIMeasurements = snapshot.suvROIs
         lastSUVROIMeasurement = snapshot.lastSUVROI
+        intensityROIMeasurements = snapshot.intensityROIs
+        lastIntensityROIMeasurement = snapshot.lastIntensityROI
         for map in labeling.labelMaps {
             if let voxels = snapshot.labelVoxels[map.id], voxels.count == map.voxels.count {
                 map.voxels = voxels

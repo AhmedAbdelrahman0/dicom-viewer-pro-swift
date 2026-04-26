@@ -1,6 +1,9 @@
 import SwiftUI
 import SwiftData
 import UniformTypeIdentifiers
+#if os(macOS)
+import AppKit
+#endif
 
 private enum StudyBrowserMode: String, CaseIterable, Identifiable {
     case worklist
@@ -47,6 +50,9 @@ struct StudyBrowserView: View {
     @State private var studyStatuses: [String: WorklistStudyStatus] = [:]
     @State private var expandedStudyIDs: Set<String> = []
     @State private var isDropTargeted: Bool = false
+    @State private var fileBrowserCurrentURL: URL?
+    @State private var fileBrowserEntries: [LocalFileBrowserEntry] = []
+    @State private var fileBrowserError: String?
 
     private let indexPageSize = 25_000
     private let statusDefaultsKey = "Tracer.WorklistStudyStatuses"
@@ -360,7 +366,7 @@ struct StudyBrowserView: View {
         case .archives:
             return "Search archives..."
         case .viewer:
-            return "Search viewer session..."
+            return "Search viewer session or files..."
         }
     }
 
@@ -509,6 +515,15 @@ struct StudyBrowserView: View {
             }
 
             Button {
+                openFileBrowserRootPanel()
+            } label: {
+                Label("Browse Directory", systemImage: "folder.badge.gearshape")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+
+            Button {
                 onImportOverlay()
             } label: {
                 Label("Overlay", systemImage: "square.2.stack.3d")
@@ -645,6 +660,35 @@ struct StudyBrowserView: View {
 
     private var viewerContent: some View {
         List {
+            if fileBrowserCurrentURL != nil {
+                Section("Directory Browser") {
+                    fileBrowserHeaderRow
+
+                    if let fileBrowserError {
+                        Text(fileBrowserError)
+                            .font(.system(size: 10))
+                            .foregroundColor(.red)
+                    }
+
+                    if filteredFileBrowserEntries.isEmpty {
+                        EmptyBrowserRow(
+                            systemImage: "folder",
+                            title: "No matching files",
+                            subtitle: "Adjust search or choose another directory"
+                        )
+                    } else {
+                        ForEach(filteredFileBrowserEntries) { entry in
+                            FileBrowserEntryRow(
+                                entry: entry,
+                                onOpen: { openFileBrowserEntry(entry) },
+                                onLoad: { loadFileBrowserEntry(entry) },
+                                onIndex: { indexFileBrowserEntry(entry) }
+                            )
+                        }
+                    }
+                }
+            }
+
             if !filteredLoadedVolumes.isEmpty {
                 Section("Viewer Volumes") {
                     ForEach(filteredLoadedVolumes) { volume in
@@ -671,7 +715,7 @@ struct StudyBrowserView: View {
                 }
             }
 
-            if filteredLoadedVolumes.isEmpty && filteredSeries.isEmpty {
+            if fileBrowserCurrentURL == nil && filteredLoadedVolumes.isEmpty && filteredSeries.isEmpty {
                 EmptyBrowserRow(
                     systemImage: "rectangle.3.group",
                     title: "No viewer session",
@@ -744,6 +788,74 @@ struct StudyBrowserView: View {
         }
     }
 
+    private var filteredFileBrowserEntries: [LocalFileBrowserEntry] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return fileBrowserEntries }
+        return fileBrowserEntries.filter {
+            $0.name.localizedCaseInsensitiveContains(query)
+            || $0.kindLabel.localizedCaseInsensitiveContains(query)
+            || $0.url.path.localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    private var fileBrowserHeaderRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "folder")
+                    .foregroundColor(TracerTheme.accent)
+                Text(fileBrowserCurrentURL?.lastPathComponent ?? "Directory")
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+                Spacer()
+                Button {
+                    navigateFileBrowserUp()
+                } label: {
+                    Image(systemName: "arrow.up")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .help("Go to parent directory")
+                Button {
+                    reloadFileBrowserEntries()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .help("Refresh directory")
+            }
+
+            Text(fileBrowserCurrentURL?.path ?? "")
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundColor(.secondary)
+                .lineLimit(2)
+
+            HStack(spacing: 6) {
+                Button {
+                    loadFileBrowserCurrentDirectory()
+                } label: {
+                    Label("Load", systemImage: "rectangle.3.group")
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+
+                Button {
+                    indexFileBrowserCurrentDirectory()
+                } label: {
+                    Label("Index", systemImage: "externaldrive.badge.plus")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(vm.isIndexing)
+
+                Spacer()
+                Text("\(filteredFileBrowserEntries.count)/\(fileBrowserEntries.count) items")
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
     private func expansionBinding(for id: String) -> Binding<Bool> {
         Binding(
             get: { expandedStudyIDs.contains(id) },
@@ -768,6 +880,99 @@ struct StudyBrowserView: View {
         vm.statusMessage = "Indexing \(shortcut.title)..."
         Task { @MainActor in
             await vm.indexDirectory(url: shortcut.url, modelContext: modelContext)
+            reloadIndexResults()
+        }
+    }
+
+    private func openFileBrowserRootPanel() {
+        #if os(macOS)
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Browse"
+        panel.message = "Choose a study archive, patient folder, or DICOM directory to browse inside Tracer."
+        if panel.runModal() == .OK, let url = panel.url {
+            setFileBrowserDirectory(url)
+            browserMode = .viewer
+        }
+        #else
+        vm.statusMessage = "Directory browsing is available on macOS."
+        #endif
+    }
+
+    private func setFileBrowserDirectory(_ url: URL) {
+        fileBrowserCurrentURL = url
+        reloadFileBrowserEntries()
+    }
+
+    private func reloadFileBrowserEntries() {
+        guard let url = fileBrowserCurrentURL else { return }
+        do {
+            let contents = try FileManager.default.contentsOfDirectory(
+                at: url,
+                includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .fileSizeKey, .contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            )
+            fileBrowserEntries = contents
+                .compactMap { try? LocalFileBrowserEntry(url: $0) }
+                .sorted { lhs, rhs in
+                    if lhs.isDirectory != rhs.isDirectory {
+                        return lhs.isDirectory && !rhs.isDirectory
+                    }
+                    return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+                }
+            fileBrowserError = nil
+        } catch {
+            fileBrowserEntries = []
+            fileBrowserError = error.localizedDescription
+        }
+    }
+
+    private func navigateFileBrowserUp() {
+        guard let current = fileBrowserCurrentURL else { return }
+        let parent = current.deletingLastPathComponent()
+        guard parent.path != current.path else { return }
+        setFileBrowserDirectory(parent)
+    }
+
+    private func openFileBrowserEntry(_ entry: LocalFileBrowserEntry) {
+        if entry.isDirectory {
+            setFileBrowserDirectory(entry.url)
+        } else {
+            loadFileBrowserEntry(entry)
+        }
+    }
+
+    private func loadFileBrowserEntry(_ entry: LocalFileBrowserEntry) {
+        Task { @MainActor in
+            if entry.isDirectory {
+                await vm.loadDICOMDirectory(url: entry.url)
+            } else {
+                await dispatchDroppedURL(entry.url)
+            }
+        }
+    }
+
+    private func loadFileBrowserCurrentDirectory() {
+        guard let url = fileBrowserCurrentURL else { return }
+        Task { @MainActor in
+            await vm.loadDICOMDirectory(url: url)
+        }
+    }
+
+    private func indexFileBrowserEntry(_ entry: LocalFileBrowserEntry) {
+        guard entry.isDirectory, !vm.isIndexing else { return }
+        Task { @MainActor in
+            await vm.indexDirectory(url: entry.url, modelContext: modelContext)
+            reloadIndexResults()
+        }
+    }
+
+    private func indexFileBrowserCurrentDirectory() {
+        guard let url = fileBrowserCurrentURL, !vm.isIndexing else { return }
+        Task { @MainActor in
+            await vm.indexDirectory(url: url, modelContext: modelContext)
             reloadIndexResults()
         }
     }
@@ -1147,6 +1352,140 @@ private struct PACSArchiveScope: Identifiable, Hashable {
 
     private static func pathComponents(_ path: String) -> [String] {
         path.split(separator: "/").map(String.init)
+    }
+}
+
+private struct LocalFileBrowserEntry: Identifiable, Hashable {
+    let id: String
+    let url: URL
+    let name: String
+    let isDirectory: Bool
+    let isRegularFile: Bool
+    let fileSize: Int64?
+    let modifiedAt: Date?
+
+    init(url: URL) throws {
+        let values = try url.resourceValues(forKeys: [
+            .isDirectoryKey,
+            .isRegularFileKey,
+            .fileSizeKey,
+            .contentModificationDateKey
+        ])
+        self.url = url
+        self.id = url.resolvingSymlinksInPath().standardizedFileURL.path
+        self.name = url.lastPathComponent.isEmpty ? url.path : url.lastPathComponent
+        self.isDirectory = values.isDirectory ?? false
+        self.isRegularFile = values.isRegularFile ?? false
+        self.fileSize = values.fileSize.map(Int64.init)
+        self.modifiedAt = values.contentModificationDate
+    }
+
+    var kindLabel: String {
+        if isDirectory { return "Folder" }
+        let lower = name.lowercased()
+        if lower.hasSuffix(".nii") || lower.hasSuffix(".nii.gz") { return "NIfTI" }
+        if lower.hasSuffix(".dcm") || lower.hasSuffix(".ima") || lower.hasSuffix(".dicom") {
+            return "DICOM"
+        }
+        return url.pathExtension.isEmpty ? "File" : url.pathExtension.uppercased()
+    }
+
+    var detailText: String {
+        if isDirectory { return "Folder" }
+        guard let fileSize else { return kindLabel }
+        return "\(kindLabel) · \(ByteCountFormatter.string(fromByteCount: fileSize, countStyle: .file))"
+    }
+
+    var systemImage: String {
+        if isDirectory { return "folder" }
+        switch kindLabel {
+        case "NIfTI": return "cube.box"
+        case "DICOM": return "square.stack.3d.up"
+        default: return "doc"
+        }
+    }
+}
+
+private struct FileBrowserEntryRow: View {
+    let entry: LocalFileBrowserEntry
+    let onOpen: () -> Void
+    let onLoad: () -> Void
+    let onIndex: () -> Void
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: entry.systemImage)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(entry.isDirectory ? TracerTheme.accent : .secondary)
+                .frame(width: 20)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.name)
+                    .font(.system(size: 11, weight: entry.isDirectory ? .semibold : .regular))
+                    .lineLimit(1)
+                Text(entry.detailText)
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 4)
+
+            Button {
+                onOpen()
+            } label: {
+                Image(systemName: entry.isDirectory ? "chevron.right" : "arrow.up.right.square")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .help(entry.isDirectory ? "Open folder" : "Open file")
+
+            Button {
+                onLoad()
+            } label: {
+                Image(systemName: "rectangle.3.group")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .help(entry.isDirectory ? "Load this directory as a study" : "Load this file")
+
+            if entry.isDirectory {
+                Button {
+                    onIndex()
+                } label: {
+                    Image(systemName: "externaldrive.badge.plus")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .help("Index this directory")
+            }
+        }
+        .padding(.vertical, 2)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            onOpen()
+        }
+        .contextMenu {
+            Button {
+                onOpen()
+            } label: {
+                Label(entry.isDirectory ? "Open Folder" : "Open File",
+                      systemImage: entry.isDirectory ? "folder" : "arrow.up.right.square")
+            }
+            Button {
+                onLoad()
+            } label: {
+                Label(entry.isDirectory ? "Load Directory as Study" : "Load File",
+                      systemImage: "rectangle.3.group")
+            }
+            if entry.isDirectory {
+                Button {
+                    onIndex()
+                } label: {
+                    Label("Index Directory", systemImage: "externaldrive.badge.plus")
+                }
+            }
+        }
     }
 }
 

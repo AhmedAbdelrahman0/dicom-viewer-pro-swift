@@ -402,12 +402,22 @@ public struct SliceView: View {
     }
 
     private func sampleVoxel(at location: CGPoint, in viewSize: CGSize) -> HoverSample? {
-        guard let volume = vm.volumeForDisplayMode(displayMode),
-              let cg = vm.makeImage(for: axis, mode: displayMode) else {
+        guard let volume = vm.volumeForDisplayMode(displayMode) else {
             return nil
         }
-        let imgW = CGFloat(cg.width)
-        let imgH = CGFloat(cg.height)
+        let imgW: CGFloat
+        let imgH: CGFloat
+        switch axis {
+        case 0:
+            imgW = CGFloat(volume.height)
+            imgH = CGFloat(volume.depth)
+        case 1:
+            imgW = CGFloat(volume.width)
+            imgH = CGFloat(volume.depth)
+        default:
+            imgW = CGFloat(volume.width)
+            imgH = CGFloat(volume.height)
+        }
         let baseFit = min(viewSize.width / imgW, viewSize.height / imgH)
         let fit = baseFit * zoom
         guard fit > 0 else { return nil }
@@ -514,26 +524,25 @@ public struct SliceView: View {
 
         Section("Tools") {
             Button {
-                vm.activeTool = .distance
+                vm.setActiveViewerTool(.distance)
             } label: {
                 Label("Distance measurement", systemImage: "ruler")
             }
             Button {
-                vm.activeTool = .angle
+                vm.setActiveViewerTool(.angle)
             } label: {
                 Label("Angle measurement", systemImage: "angle")
             }
             Button {
-                vm.activeTool = .area
+                vm.setActiveViewerTool(.area)
             } label: {
                 Label("Area / ROI", systemImage: "skew")
             }
             Button {
-                vm.activeTool = .suvSphere
+                vm.setActiveViewerTool(.suvSphere)
             } label: {
-                Label("Spherical SUV ROI", systemImage: "flame.circle")
+                Label("Spherical SUV / HU ROI", systemImage: "scope")
             }
-            .disabled(vm.activePETQuantificationVolume == nil)
             Button {
                 vm.activeTool = .wl
                 vm.labeling.labelingTool = .brush
@@ -936,7 +945,14 @@ public struct SliceView: View {
 
         if vm.activeTool == .suvSphere {
             let center = CGPoint(x: pixel.0, y: pixel.1)
-            _ = vm.addSphericalSUVROI(at: worldPoint(for: center, volume: volume))
+            let world = worldPoint(for: center, volume: volume)
+            let shouldMeasureSUV = Modality.normalize(volume.modality) == .PT
+                || (displayMode == .fused && vm.activePETQuantificationVolume != nil)
+            if shouldMeasureSUV {
+                _ = vm.addSphericalSUVROI(at: world)
+            } else {
+                _ = vm.addSphericalIntensityROI(at: world, in: volume)
+            }
             return
         }
 
@@ -1026,14 +1042,23 @@ public struct SliceView: View {
 
     private func suvROICanvas(scale: CGFloat, imageSize: CGSize) -> some View {
         Canvas { context, _ in
-            guard let displayVolume = vm.volumeForDisplayMode(displayMode),
-                  let pet = vm.activePETQuantificationVolume else { return }
-            for roi in vm.suvROIMeasurements where roi.sourceVolumeIdentity == pet.sessionIdentity {
-                drawSUVROI(roi,
-                           displayVolume: displayVolume,
-                           in: context,
-                           scale: scale,
-                           imageSize: imageSize)
+            guard let displayVolume = vm.volumeForDisplayMode(displayMode) else { return }
+            if let pet = vm.activePETQuantificationVolume {
+                for roi in vm.suvROIMeasurements where roi.sourceVolumeIdentity == pet.sessionIdentity {
+                    drawSUVROI(roi,
+                               displayVolume: displayVolume,
+                               in: context,
+                               scale: scale,
+                               imageSize: imageSize)
+                }
+            }
+            for roi in vm.intensityROIMeasurements
+                where roi.sourceVolumeIdentity == displayVolume.sessionIdentity {
+                drawIntensityROI(roi,
+                                 displayVolume: displayVolume,
+                                 in: context,
+                                 scale: scale,
+                                 imageSize: imageSize)
             }
         }
         .allowsHitTesting(false)
@@ -1214,12 +1239,46 @@ public struct SliceView: View {
                             in context: GraphicsContext,
                             scale: CGFloat,
                             imageSize: CGSize) {
-        let centerVoxel = displayVolume.voxelCoordinates(from: roi.centerWorld)
+        drawSphericalROI(centerWorld: roi.centerWorld,
+                         radiusMM: roi.radiusMM,
+                         label: roi.compactSummary,
+                         color: TracerTheme.pet,
+                         displayVolume: displayVolume,
+                         in: context,
+                         scale: scale,
+                         imageSize: imageSize)
+    }
+
+    private func drawIntensityROI(_ roi: IntensityROIMeasurement,
+                                  displayVolume: ImageVolume,
+                                  in context: GraphicsContext,
+                                  scale: CGFloat,
+                                  imageSize: CGSize) {
+        let color = Modality.normalize(roi.modality) == .CT ? TracerTheme.accentBright : .yellow
+        drawSphericalROI(centerWorld: roi.centerWorld,
+                         radiusMM: roi.radiusMM,
+                         label: roi.compactSummary,
+                         color: color,
+                         displayVolume: displayVolume,
+                         in: context,
+                         scale: scale,
+                         imageSize: imageSize)
+    }
+
+    private func drawSphericalROI(centerWorld: SIMD3<Double>,
+                                  radiusMM: Double,
+                                  label: String,
+                                  color: Color,
+                                  displayVolume: ImageVolume,
+                                  in context: GraphicsContext,
+                                  scale: CGFloat,
+                                  imageSize: CGSize) {
+        let centerVoxel = displayVolume.voxelCoordinates(from: centerWorld)
         guard centerVoxel.x.isFinite,
               centerVoxel.y.isFinite,
               centerVoxel.z.isFinite else { return }
 
-        let currentSlice = Double(vm.sliceIndices[axis])
+        let currentSlice = Double(vm.displayedSliceIndex(axis: axis, mode: displayMode))
         let sliceCoordinate: Double
         let sliceSpacing: Double
         let rawCenter: CGPoint
@@ -1248,21 +1307,21 @@ public struct SliceView: View {
         }
 
         let planeDistanceMM = abs(currentSlice - sliceCoordinate) * sliceSpacing
-        guard planeDistanceMM <= roi.radiusMM else { return }
+        guard planeDistanceMM <= radiusMM else { return }
 
-        let inPlaneRadiusMM = sqrt(max(0, roi.radiusMM * roi.radiusMM - planeDistanceMM * planeDistanceMM))
+        let inPlaneRadiusMM = sqrt(max(0, radiusMM * radiusMM - planeDistanceMM * planeDistanceMM))
         let rx = CGFloat(inPlaneRadiusMM / max(horizontalSpacing, 1e-9)) * scale
         let ry = CGFloat(inPlaneRadiusMM / max(verticalSpacing, 1e-9)) * scale
         guard rx > 0.25, ry > 0.25 else { return }
 
         let displayCenter = displayPoint(for: rawCenter, imageSize: imageSize)
         let center = CGPoint(x: displayCenter.x * scale, y: displayCenter.y * scale)
-        let alpha = max(0.30, 1.0 - planeDistanceMM / max(roi.radiusMM, 1e-9) * 0.55)
+        let alpha = max(0.30, 1.0 - planeDistanceMM / max(radiusMM, 1e-9) * 0.55)
         let rect = CGRect(x: center.x - rx, y: center.y - ry, width: rx * 2, height: ry * 2)
         let ellipse = Path(ellipseIn: rect)
-        context.fill(ellipse, with: .color(TracerTheme.pet.opacity(0.12 * alpha)))
+        context.fill(ellipse, with: .color(color.opacity(0.12 * alpha)))
         context.stroke(ellipse,
-                       with: .color(TracerTheme.pet.opacity(0.92 * alpha)),
+                       with: .color(color.opacity(0.92 * alpha)),
                        style: StrokeStyle(lineWidth: 1.6, lineCap: .round, dash: [5, 3]))
 
         let crossSize: CGFloat = 4
@@ -1271,10 +1330,10 @@ public struct SliceView: View {
         cross.addLine(to: CGPoint(x: center.x + crossSize, y: center.y))
         cross.move(to: CGPoint(x: center.x, y: center.y - crossSize))
         cross.addLine(to: CGPoint(x: center.x, y: center.y + crossSize))
-        context.stroke(cross, with: .color(TracerTheme.pet.opacity(alpha)), lineWidth: 1.2)
+        context.stroke(cross, with: .color(color.opacity(alpha)), lineWidth: 1.2)
 
         if abs(currentSlice - sliceCoordinate) <= 0.5 {
-            drawText(roi.compactSummary, at: center, in: context, color: TracerTheme.pet)
+            drawText(label, at: center, in: context, color: color)
         }
     }
 
@@ -1380,9 +1439,7 @@ private struct SliceScrollWheelBridge: NSViewRepresentable {
                 let point = convert(event.locationInWindow, from: nil)
                 guard bounds.contains(point) else { return event }
                 let capturedEvent = SliceScrollWheelEvent(event)
-                DispatchQueue.main.async { [weak self] in
-                    self?.coordinator?.onScroll(capturedEvent)
-                }
+                coordinator?.onScroll(capturedEvent)
                 return nil
             }
         }

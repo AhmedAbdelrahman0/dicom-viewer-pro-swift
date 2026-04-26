@@ -367,7 +367,7 @@ public struct ContentView: View {
             ToolButton(
                 tool: tool,
                 isActive: vm.activeTool == tool,
-                action: { vm.activeTool = tool }
+                action: { vm.setActiveViewerTool(tool) }
             )
         }
 

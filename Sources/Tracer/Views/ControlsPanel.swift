@@ -1347,7 +1347,7 @@ private struct FusionTab: View {
                 }
 
                 Slider(value: $vm.suvSphereRadiusMM, in: 2...30, step: 0.5)
-                    .help("3D spherical PET VOI radius. A 6.2 mm radius is approximately a 1 mL sphere.")
+                    .help("3D spherical ROI radius. PET/fusion reports SUV; CT reports HU.")
 
                 HStack(spacing: 6) {
                     Button {
@@ -1359,22 +1359,26 @@ private struct FusionTab: View {
                     .help("Approximate PERCIST-style 1 mL sphere")
 
                     Button {
-                        vm.activeTool = .suvSphere
+                        vm.setActiveViewerTool(.suvSphere)
                     } label: {
-                        Label("Place", systemImage: "flame.circle")
+                        Label("Place", systemImage: "scope")
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
-                    .disabled(vm.activePETQuantificationVolume == nil)
 
                     Button {
-                        vm.clearSUVROIMeasurements()
+                        if !vm.suvROIMeasurements.isEmpty {
+                            vm.clearSUVROIMeasurements()
+                        }
+                        if !vm.intensityROIMeasurements.isEmpty {
+                            vm.clearIntensityROIMeasurements()
+                        }
                     } label: {
                         Label("Clear", systemImage: "trash")
                     }
                     .buttonStyle(.borderless)
                     .controlSize(.small)
-                    .disabled(vm.suvROIMeasurements.isEmpty)
+                    .disabled(vm.suvROIMeasurements.isEmpty && vm.intensityROIMeasurements.isEmpty)
                 }
 
                 if let roi = vm.lastSUVROIMeasurement {
@@ -1384,6 +1388,15 @@ private struct FusionTab: View {
                     ControlStatRow("SUVmax", String(format: "%.3f", roi.suvMax))
                     ControlStatRow("SUVmean", String(format: "%.3f", roi.suvMean))
                     ControlStatRow("SUVsd", String(format: "%.3f", roi.suvStd))
+                }
+
+                if let roi = vm.lastIntensityROIMeasurement {
+                    ControlStatRow("Intensity ROI", roi.sourceDescription)
+                    ControlStatRow("Radius", String(format: "%.1f mm", roi.radiusMM))
+                    ControlStatRow("Volume", String(format: "%.3f mL", roi.volumeML))
+                    ControlStatRow("\(roi.unit) max", String(format: "%.2f", roi.valueMax))
+                    ControlStatRow("\(roi.unit) mean", String(format: "%.2f", roi.valueMean))
+                    ControlStatRow("\(roi.unit) sd", String(format: "%.2f", roi.valueStd))
                 }
             }
 
@@ -1475,7 +1488,10 @@ private struct DisplayTab: View {
 
             Text("Active Tool")
                 .font(.subheadline)
-            ResponsivePicker("Active Tool", selection: $vm.activeTool, menuBreakpoint: 300) {
+            ResponsivePicker("Active Tool", selection: Binding(
+                get: { vm.activeTool },
+                set: { vm.setActiveViewerTool($0) }
+            ), menuBreakpoint: 300) {
                 ForEach(ViewerTool.allCases) { t in
                     Label(t.displayName, systemImage: t.systemImage)
                         .tag(t)
@@ -1498,7 +1514,7 @@ private struct DisplayTab: View {
         case .distance: return "Tap two points to measure distance"
         case .angle: return "Tap three points for an angle measurement"
         case .area: return "Tap three+ points, close to measure area"
-        case .suvSphere: return "Tap PET/fused image to place a spherical SUV ROI"
+        case .suvSphere: return "Tap PET/fusion for SUV or CT/MR for intensity ROI"
         }
     }
 }
