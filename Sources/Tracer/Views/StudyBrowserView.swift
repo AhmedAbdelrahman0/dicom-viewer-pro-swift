@@ -71,7 +71,7 @@ struct StudyBrowserView: View {
                     viewerContent
                 }
             }
-            .searchable(text: $searchText, prompt: browserMode == .worklist ? "Search worklist..." : "Search viewer session...")
+            .searchable(text: $searchText, prompt: searchPrompt)
         }
         .navigationTitle(browserMode.displayName)
         .tint(TracerTheme.accent)
@@ -353,6 +353,17 @@ struct StudyBrowserView: View {
         }
     }
 
+    private var searchPrompt: String {
+        switch browserMode {
+        case .worklist:
+            return "Search worklist..."
+        case .archives:
+            return "Search archives..."
+        case .viewer:
+            return "Search viewer session..."
+        }
+    }
+
     private var worklistControls: some View {
         VStack(spacing: 8) {
             HStack(spacing: 8) {
@@ -580,6 +591,20 @@ struct StudyBrowserView: View {
 
     private var archivesContent: some View {
         List {
+            if !availableLocalArchiveShortcuts.isEmpty {
+                Section("Local Datasets") {
+                    ForEach(availableLocalArchiveShortcuts) { shortcut in
+                        Button {
+                            indexLocalArchive(shortcut)
+                        } label: {
+                            LocalArchiveShortcutRow(shortcut: shortcut)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(vm.isIndexing)
+                    }
+                }
+            }
+
             if !filteredArchiveScopes.isEmpty {
                 Section("Indexed Archives") {
                     ForEach(filteredArchiveScopes) { scope in
@@ -681,6 +706,10 @@ struct StudyBrowserView: View {
         PACSArchiveScope.grouped(from: worklistStudies)
     }
 
+    private var availableLocalArchiveShortcuts: [LocalArchiveShortcut] {
+        LocalArchiveShortcut.known.filter(\.exists)
+    }
+
     private var filteredArchiveScopes: [PACSArchiveScope] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !query.isEmpty else { return archiveScopes }
@@ -731,6 +760,16 @@ struct StudyBrowserView: View {
     private func openStudy(_ study: PACSWorklistStudy) {
         setStatus(.inProgress, for: study)
         Task { await vm.openWorklistStudy(study) }
+    }
+
+    private func indexLocalArchive(_ shortcut: LocalArchiveShortcut) {
+        guard !vm.isIndexing else { return }
+        browserMode = .archives
+        vm.statusMessage = "Indexing \(shortcut.title)..."
+        Task { @MainActor in
+            await vm.indexDirectory(url: shortcut.url, modelContext: modelContext)
+            reloadIndexResults()
+        }
     }
 
     private func reloadIndexResults() {
@@ -1108,6 +1147,80 @@ private struct PACSArchiveScope: Identifiable, Hashable {
 
     private static func pathComponents(_ path: String) -> [String] {
         path.split(separator: "/").map(String.init)
+    }
+}
+
+private struct LocalArchiveShortcut: Identifiable, Hashable {
+    let id: String
+    let title: String
+    let subtitle: String
+    let path: String
+
+    var url: URL {
+        URL(fileURLWithPath: path, isDirectory: true)
+    }
+
+    var exists: Bool {
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
+            && isDirectory.boolValue
+    }
+
+    static let known: [LocalArchiveShortcut] = [
+        LocalArchiveShortcut(
+            id: "fdg-pet-ct-lesions",
+            title: "FDG PET/CT Lesions",
+            subtitle: "NIfTI lesion archive",
+            path: "/Users/ahmedabdelrahman/Desktop/Datasets/FDG-PET-CT-Lesions"
+        ),
+        LocalArchiveShortcut(
+            id: "pet-all-10-16-ncia",
+            title: "PET all 10/16 NCIA",
+            subtitle: "Large TCIA PET archive",
+            path: "/Users/ahmedabdelrahman/Desktop/Datasets/PET all 10 16 ncia"
+        ),
+        LocalArchiveShortcut(
+            id: "prostate-ncia",
+            title: "Prostate NCIA",
+            subtitle: "CMB-PCA prostate archive",
+            path: "/Users/ahmedabdelrahman/Desktop/Datasets/Prostate ncia/manifest-1759972609262"
+        )
+    ]
+}
+
+private struct LocalArchiveShortcutRow: View {
+    let shortcut: LocalArchiveShortcut
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "externaldrive.badge.plus")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(TracerTheme.accentBright)
+                .frame(width: 20)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(shortcut.title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+
+                Text(shortcut.subtitle)
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+
+                Text(shortcut.path)
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 6)
+
+            Image(systemName: "chevron.right")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(.secondary)
+        }
+        .padding(.vertical, 3)
     }
 }
 

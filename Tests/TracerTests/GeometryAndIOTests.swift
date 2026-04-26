@@ -2096,6 +2096,39 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertTrue(studies.contains { $0.series.contains { Modality.normalize($0.modality) == .CT } })
     }
 
+    func testProstateNCIADatasetIndexingScaleSmoke() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard env["TRACER_RUN_PROSTATE_NCIA_DATASET_TESTS"] == "1" else {
+            throw XCTSkip("Set TRACER_RUN_PROSTATE_NCIA_DATASET_TESTS=1 to run the local prostate NCIA scale smoke.")
+        }
+
+        let rootPath = env["TRACER_PROSTATE_NCIA_DATASET_ROOT"]
+            ?? "/Users/ahmedabdelrahman/Desktop/Datasets/Prostate ncia/manifest-1759972609262"
+        let root = URL(fileURLWithPath: rootPath, isDirectory: true)
+        guard FileManager.default.fileExists(atPath: root.path) else {
+            throw XCTSkip("Prostate NCIA archive not found at \(root.path)")
+        }
+
+        let start = Date()
+        let result = PACSDirectoryIndexer.scan(
+            url: root,
+            progressStride: 5_000,
+            seriesDirectoryFastPath: true
+        )
+        let elapsed = Date().timeIntervalSince(start)
+        print("Prostate NCIA scale index: \(result.records.count) series, \(result.scannedFiles) files, \(result.dicomInstances) DICOM, \(String(format: "%.2f", elapsed))s")
+
+        XCTAssertFalse(result.cancelled)
+        XCTAssertGreaterThanOrEqual(result.scannedFiles, 25_000)
+        XCTAssertGreaterThanOrEqual(result.dicomInstances, 25_000)
+        XCTAssertGreaterThan(result.records.count, 100)
+
+        let studies = PACSWorklistStudy.grouped(from: result.records)
+        XCTAssertGreaterThan(studies.count, 10)
+        XCTAssertTrue(studies.contains { $0.series.contains { Modality.normalize($0.modality) == .MR } })
+        XCTAssertTrue(studies.contains { $0.series.contains { Modality.normalize($0.modality) == .CT } })
+    }
+
     func testVolumeResamplerUsesWorldGeometry() {
         let overlay = ImageVolume(
             pixels: [

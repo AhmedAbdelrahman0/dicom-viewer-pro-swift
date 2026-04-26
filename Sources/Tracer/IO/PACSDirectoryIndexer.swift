@@ -151,7 +151,10 @@ public enum PACSDirectoryIndexer {
         }
 
         let stride = max(1, progressStride)
-        let fastPathMinimum = max(2, fastPathMinimumDICOMFilesPerDirectory)
+        let prefersPathDerivedFastPath = shouldPreferPathDerivedFastPath(root: url)
+        let fastPathMinimum = prefersPathDerivedFastPath
+            ? 1
+            : max(2, fastPathMinimumDICOMFilesPerDirectory)
         let fastPathSamples = max(1, fastPathSampleCount)
 
         func mergeDICOMAccumulator(_ accumulator: DICOMSeriesIndexAccumulator) {
@@ -187,7 +190,10 @@ public enum PACSDirectoryIndexer {
                 if seriesDirectoryFastPath,
                    !fastIndexedDICOMDirectories.contains(directoryPath),
                    !fastPathRejectedDICOMDirectories.contains(directoryPath) {
-                    let candidates = dicomCandidateFiles(in: fileURL)
+                    let candidates = dicomCandidateFiles(
+                        in: fileURL,
+                        requireKnownDICOMExtension: prefersPathDerivedFastPath
+                    )
                     if candidates.count >= fastPathMinimum {
                         fastPathDirectoryJobs.append(candidates)
                         scannedFiles += candidates.count
@@ -220,7 +226,10 @@ public enum PACSDirectoryIndexer {
             } else if shouldAttemptDICOM(fileURL) {
                 if seriesDirectoryFastPath,
                    !fastPathRejectedDICOMDirectories.contains(parentPath) {
-                    let candidates = dicomCandidateFiles(in: fileURL.deletingLastPathComponent())
+                    let candidates = dicomCandidateFiles(
+                        in: fileURL.deletingLastPathComponent(),
+                        requireKnownDICOMExtension: prefersPathDerivedFastPath
+                    )
                     if candidates.count >= fastPathMinimum,
                        let fast = fastPathAccumulator(
                         files: candidates,
@@ -269,6 +278,7 @@ public enum PACSDirectoryIndexer {
                 currentPath: rootPath
             ))
             let shouldUsePathDerivedFastPath =
+                prefersPathDerivedFastPath ||
                 fastPathDirectoryJobs.count > pathDerivedFastPathSeriesThreshold ||
                 scannedFiles > pathDerivedFastPathFileThreshold
 
@@ -391,7 +401,8 @@ public enum PACSDirectoryIndexer {
         return !ignored.contains(ext)
     }
 
-    private static func dicomCandidateFiles(in directory: URL) -> [URL] {
+    private static func dicomCandidateFiles(in directory: URL,
+                                            requireKnownDICOMExtension: Bool = false) -> [URL] {
         guard let children = try? FileManager.default.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: [.isRegularFileKey],
@@ -400,17 +411,25 @@ public enum PACSDirectoryIndexer {
             return []
         }
         return children
-            .filter { isDICOMCandidateChild($0) }
+            .filter { isDICOMCandidateChild($0, requireKnownDICOMExtension: requireKnownDICOMExtension) }
             .sorted { $0.path < $1.path }
     }
 
-    private static func isDICOMCandidateChild(_ url: URL) -> Bool {
+    private static func isDICOMCandidateChild(_ url: URL,
+                                              requireKnownDICOMExtension: Bool = false) -> Bool {
         let ext = url.pathExtension.lowercased()
         if ext == "dcm" || ext == "ima" || ext == "dicom" {
             return true
         }
+        if requireKnownDICOMExtension {
+            return false
+        }
         guard shouldAttemptDICOM(url) else { return false }
         return isRegularFile(url)
+    }
+
+    private static func shouldPreferPathDerivedFastPath(root: URL) -> Bool {
+        root.pathComponents.contains { $0.hasPrefix("manifest-") }
     }
 
     private static func fastPathAccumulator(files: [URL],
@@ -632,7 +651,10 @@ private struct PathDerivedDICOMSeriesMetadata {
         if upper.contains("CT") {
             return "CT"
         }
-        if upper.contains("MR") || upper.contains("MRI") {
+        if upper.contains("MR") || upper.contains("MRI")
+            || upper.contains("DWI") || upper.contains("ADC")
+            || upper.contains("T1") || upper.contains("T2")
+            || upper.contains("LAVA") || upper.contains("PROP") {
             return "MR"
         }
         if upper.contains("SEG") {
