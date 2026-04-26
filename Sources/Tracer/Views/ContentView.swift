@@ -17,6 +17,7 @@ public struct ContentView: View {
     @StateObject private var classification = ClassificationViewModel()
     @StateObject private var modelManager = ModelManagerViewModel()
     @StateObject private var cohort = CohortResultsStore()
+    @StateObject private var lesionDetector = LesionDetectorViewModel()
     @State private var showingFileImporter = false
     @State private var showingDirectoryPicker = false
     @State private var fileImporterMode: FileImporterMode = .volume
@@ -27,6 +28,7 @@ public struct ContentView: View {
     @State private var showClassificationPanel = false
     @State private var showModelManagerPanel = false
     @State private var showCohortPanel = false
+    @State private var showLesionDetectorPanel = false
     @State private var cohortStudies: [PACSWorklistStudy] = []
     @State private var showAboutWindow = false
     @State private var showOnboarding = false
@@ -145,6 +147,16 @@ public struct ContentView: View {
                     closeInspectorButton { showCohortPanel = false }
                 }
         }
+        .engineInspector(
+            isCompact: useCompactEnginePresentation,
+            isPresented: $showLesionDetectorPanel,
+            inspectorWidth: (min: 480, ideal: 540, max: 700)
+        ) {
+            LesionDetectorPanel(viewer: vm, detector: lesionDetector)
+                .overlay(alignment: .topTrailing) {
+                    closeInspectorButton { showLesionDetectorPanel = false }
+                }
+        }
         .fileImporter(
             isPresented: $showingFileImporter,
             allowedContentTypes: [.data, .item],
@@ -186,6 +198,12 @@ public struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .assistantDidRequestCohortPanel)) { _ in
             refreshCohortStudies()
             showInspector(.cohort)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .assistantDidRequestLesionDetection)) { _ in
+            handleAssistantLesionDetection()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .assistantDidRequestLesionDetectorPanel)) { _ in
+            showInspector(.lesionDetector)
         }
         .onChange(of: focusModeEnabled) { _, enabled in
             if !enabled {
@@ -492,13 +510,21 @@ public struct ContentView: View {
                       systemImage: "square.3.layers.3d.down.right")
             }
             .keyboardShortcut("b", modifiers: [.command, .shift])
+
+            Button {
+                showInspector(.lesionDetector)
+            } label: {
+                Label("Lesion Detection — boxes + classes in one pass",
+                      systemImage: "viewfinder.circle")
+            }
+            .keyboardShortcut("d", modifiers: [.command, .shift])
         } label: {
             Label("AI Engines", systemImage: "cpu")
                 .font(.system(size: 12, weight: .medium))
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .help("AI Engines\n• MONAI Label (⌘⇧M)\n• nnU-Net (⌘⇧N)\n• PET Engine (⌘⇧P)\n• Classify (⌘⇧C)\n• Model Manager (⌘⇧W)\n• Cohort Batch (⌘⇧B)\nPanels open as side inspectors — ⌘. to close.")
+        .help("AI Engines\n• MONAI Label (⌘⇧M)\n• nnU-Net (⌘⇧N)\n• PET Engine (⌘⇧P)\n• Classify (⌘⇧C)\n• Model Manager (⌘⇧W)\n• Cohort Batch (⌘⇧B)\n• Lesion Detection (⌘⇧D)\nPanels open as side inspectors — ⌘. to close.")
     }
 
     private var orientationMenu: some View {
@@ -875,6 +901,7 @@ public struct ContentView: View {
         showClassificationPanel = false
         showModelManagerPanel = false
         showCohortPanel = false
+        showLesionDetectorPanel = false
         // Open the requested one next tick so the close animations settle.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
             switch which {
@@ -884,11 +911,12 @@ public struct ContentView: View {
             case .classification: showClassificationPanel = true
             case .modelManager: showModelManagerPanel = true
             case .cohort: showCohortPanel = true
+            case .lesionDetector: showLesionDetectorPanel = true
             }
         }
     }
 
-    private enum EngineInspector { case monai, nnunet, pet, classification, modelManager, cohort }
+    private enum EngineInspector { case monai, nnunet, pet, classification, modelManager, cohort, lesionDetector }
 
     /// Pull the full worklist (every indexed study in the SwiftData store)
     /// into the cohort panel. Called when the user opens the panel so the
@@ -902,6 +930,34 @@ public struct ContentView: View {
         } catch {
             vm.statusMessage = "Cohort: worklist fetch failed — \(error.localizedDescription)"
             cohortStudies = []
+        }
+    }
+
+    /// Chatbot → lesion detector. Picks the active volume + an
+    /// auxiliary anatomical channel (when configured) and runs the
+    /// LesionDetectorViewModel. Detection results land in the panel,
+    /// which the user can open separately to see + jump to.
+    private func handleAssistantLesionDetection() {
+        guard let volume = vm.currentVolume else {
+            vm.statusMessage = "Detection: load a volume first."
+            return
+        }
+        let anatomical: ImageVolume? = {
+            guard lesionDetector.useAnatomicalChannel
+                  || (lesionDetector.selectedEntry?.requiresAnatomicalChannel ?? false) else {
+                return nil
+            }
+            if let pair = vm.fusion, pair.baseVolume.id != volume.id {
+                return pair.baseVolume
+            }
+            return vm.loadedVolumes.first {
+                $0.id != volume.id
+                && (Modality.normalize($0.modality) == .CT
+                    || Modality.normalize($0.modality) == .MR)
+            }
+        }()
+        Task {
+            _ = await lesionDetector.run(volume: volume, anatomical: anatomical)
         }
     }
 

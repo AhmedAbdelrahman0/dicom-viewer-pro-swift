@@ -196,6 +196,24 @@ public extension ViewerViewModel {
                     object: nil
                 )
                 applied.append("Opened the Cohort Batch panel. Configure a run and click Run cohort.")
+
+            case .detectLesions:
+                guard currentVolume != nil else {
+                    warnings.append("Load a volume before running detection.")
+                    break
+                }
+                NotificationCenter.default.post(
+                    name: .assistantDidRequestLesionDetection,
+                    object: nil
+                )
+                applied.append("Started lesion detection on the current volume. Results will appear in the Lesion Detection panel.")
+
+            case .openLesionDetectorPanel:
+                NotificationCenter.default.post(
+                    name: .assistantDidRequestLesionDetectorPanel,
+                    object: nil
+                )
+                applied.append("Opened the Lesion Detection panel. Pick a model and Detect.")
             }
         }
 

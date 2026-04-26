@@ -35,6 +35,13 @@ public enum AssistantAction: Equatable {
     /// Open the Cohort Batch inspector. Shortcut for "let me set up a
     /// 2000-study run without touching the menu."
     case openCohortPanel
+    /// Run the configured lesion detector on the current volume. Mirrors
+    /// `.classifyAllLesions` — posts a notification that ContentView
+    /// routes to the LesionDetectorViewModel.
+    case detectLesions
+    /// Open the Lesion Detection inspector. Lets the user configure a
+    /// detector without leaving the chat.
+    case openLesionDetectorPanel
 
     public enum ClassificationExportFormat: String, Equatable, Sendable {
         case csv
@@ -55,6 +62,11 @@ public extension Notification.Name {
     /// Fired by the chat when the user asks for the cohort panel or a
     /// cohort run.
     static let assistantDidRequestCohortPanel = Notification.Name("Tracer.assistantDidRequestCohortPanel")
+    /// Fired for "detect lesions" intents. ContentView observes and
+    /// runs the LesionDetectorViewModel on the active volume.
+    static let assistantDidRequestLesionDetection = Notification.Name("Tracer.assistantDidRequestLesionDetection")
+    /// Fired for "open the detection panel" intents.
+    static let assistantDidRequestLesionDetectorPanel = Notification.Name("Tracer.assistantDidRequestLesionDetectorPanel")
 }
 
 public struct AssistantCommandInterpreter {
@@ -96,6 +108,7 @@ public struct AssistantCommandInterpreter {
         actions.append(contentsOf: segmentationActions(in: text))
         actions.append(contentsOf: classificationActions(in: text))
         actions.append(contentsOf: cohortActions(in: text))
+        actions.append(contentsOf: detectionActions(in: text))
 
         return actions.removingAdjacentDuplicates()
     }
@@ -162,6 +175,44 @@ public struct AssistantCommandInterpreter {
         ]
         if text.containsAny(cohortTriggers) {
             actions.append(.openCohortPanel)
+        }
+        return actions
+    }
+
+    /// Lesion-detection intents. "Detect lesions" / "find lesions" /
+    /// "run nndetection" → run; "open the detection panel" → open.
+    /// We avoid bare `text.contains("detect")` as the only run
+    /// trigger because users say "I detected something earlier" or
+    /// "what did the model detect?" without wanting to fire an
+    /// inference. The trigger list keeps precision high.
+    private func detectionActions(in text: String) -> [AssistantAction] {
+        var actions: [AssistantAction] = []
+        let openTriggers = [
+            "detection panel",
+            "lesion detector",
+            "open detection",
+            "open detector",
+            "open lesion detection",
+            "show detector",
+            "show detection panel"
+        ]
+        let runTriggers = [
+            "detect lesions",
+            "find lesions",
+            "run detection",
+            "run detector",
+            "run nndetection",
+            "run deeplesion",
+            "lesion detection on",
+            "find every lesion",
+            "find all lesions",
+            "detect findings"
+        ]
+        if text.containsAny(openTriggers) {
+            actions.append(.openLesionDetectorPanel)
+        }
+        if text.containsAny(runTriggers) {
+            actions.append(.detectLesions)
         }
         return actions
     }
