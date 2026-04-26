@@ -21,6 +21,7 @@ public enum PETSegmentation {
               volume.width == label.width else { return 0 }
 
         let bb = boundingBox ?? VoxelBox.all(in: volume)
+        var voxels = label.voxels
         var count = 0
         for z in bb.minZ...bb.maxZ {
             for y in bb.minY...bb.maxY {
@@ -30,19 +31,13 @@ public enum PETSegmentation {
                     let p = valueTransform?(raw) ?? raw
                     if p >= threshold {
                         let idx = rowStart + x
-                        switch mode {
-                        case .paint: label.voxels[idx] = classID
-                        case .erase: label.voxels[idx] = 0
-                        case .eraseClass:
-                            if label.voxels[idx] == classID {
-                                label.voxels[idx] = 0
-                            }
-                        }
+                        apply(mode: mode, to: &voxels, index: idx, classID: classID)
                         count += 1
                     }
                 }
             }
         }
+        label.voxels = voxels
         return count
     }
 
@@ -65,6 +60,7 @@ public enum PETSegmentation {
         let lo = min(lower, upper)
         let hi = max(lower, upper)
         let bb = boundingBox ?? VoxelBox.all(in: volume)
+        var voxels = label.voxels
         var count = 0
         for z in bb.minZ...bb.maxZ {
             for y in bb.minY...bb.maxY {
@@ -74,18 +70,12 @@ public enum PETSegmentation {
                     let value = valueTransform?(raw) ?? raw
                     guard value >= lo, value <= hi else { continue }
                     let idx = rowStart + x
-                    switch mode {
-                    case .paint: label.voxels[idx] = classID
-                    case .erase: label.voxels[idx] = 0
-                    case .eraseClass:
-                        if label.voxels[idx] == classID {
-                            label.voxels[idx] = 0
-                        }
-                    }
+                    apply(mode: mode, to: &voxels, index: idx, classID: classID)
                     count += 1
                 }
             }
         }
+        label.voxels = voxels
         return count
     }
 
@@ -138,6 +128,7 @@ public enum PETSegmentation {
         var queue: [(Int, Int, Int)] = [seed]
         var visited = [Bool](repeating: false, count: volume.pixels.count)
         visited[seedIdx] = true
+        var voxels = label.voxels
         var count = 0
 
         while !queue.isEmpty && count < maxVoxels {
@@ -145,7 +136,7 @@ public enum PETSegmentation {
             let idx = label.index(z: z, y: y, x: x)
             let v = Double(volume.pixels[idx])
             if v < minV || v > maxV { continue }
-            label.voxels[idx] = classID
+            voxels[idx] = classID
             count += 1
 
             let neighbors: [(Int, Int, Int)] = [
@@ -164,6 +155,7 @@ public enum PETSegmentation {
                 }
             }
         }
+        label.voxels = voxels
         return count
     }
 
@@ -177,10 +169,18 @@ public enum PETSegmentation {
                                                  classID: UInt16,
                                                  maxVoxels: Int = 10_000_000,
                                                  valueTransform: ((Double) -> Double)? = nil) -> Int {
+        guard volume.depth == label.depth,
+              volume.height == label.height,
+              volume.width == label.width else { return 0 }
+        guard seed.z >= 0, seed.z < volume.depth,
+              seed.y >= 0, seed.y < volume.height,
+              seed.x >= 0, seed.x < volume.width else { return 0 }
+
         var queue: [(Int, Int, Int)] = [seed]
         var visited = [Bool](repeating: false, count: volume.pixels.count)
         let seedIdx = label.index(z: seed.z, y: seed.y, x: seed.x)
         visited[seedIdx] = true
+        var voxels = label.voxels
         var count = 0
 
         while !queue.isEmpty && count < maxVoxels {
@@ -188,7 +188,7 @@ public enum PETSegmentation {
             let idx = label.index(z: z, y: y, x: x)
             let raw = Double(volume.pixels[idx])
             if (valueTransform?(raw) ?? raw) < threshold { continue }
-            label.voxels[idx] = classID
+            voxels[idx] = classID
             count += 1
 
             for n in [(z+1, y, x), (z-1, y, x),
@@ -204,6 +204,7 @@ public enum PETSegmentation {
                 }
             }
         }
+        label.voxels = voxels
         return count
     }
 
@@ -231,6 +232,7 @@ public enum PETSegmentation {
         var queue: [(Int, Int, Int)] = [seed]
         var visited = [Bool](repeating: false, count: volume.pixels.count)
         visited[label.index(z: seed.z, y: seed.y, x: seed.x)] = true
+        var voxels = label.voxels
         var count = 0
 
         while !queue.isEmpty && count < maxVoxels {
@@ -239,7 +241,7 @@ public enum PETSegmentation {
             let raw = Double(volume.pixels[idx])
             let value = valueTransform?(raw) ?? raw
             guard value >= lo, value <= hi else { continue }
-            label.voxels[idx] = classID
+            voxels[idx] = classID
             count += 1
 
             for n in [(z+1, y, x), (z-1, y, x),
@@ -254,6 +256,7 @@ public enum PETSegmentation {
                 queue.append(n)
             }
         }
+        label.voxels = voxels
         return count
     }
 
@@ -310,6 +313,7 @@ public enum PETSegmentation {
         var visited = [Bool](repeating: false, count: localCount)
         var queue: [(z: Int, y: Int, x: Int)] = [seed]
         visited[localIndex(seed, box: box, width: boxWidth, height: boxHeight)] = true
+        var voxels = label.voxels
         var count = 0
         var stoppedAtEdge = false
 
@@ -319,7 +323,7 @@ public enum PETSegmentation {
             let value = transformedValue(volume: volume, z: voxel.z, y: voxel.y, x: voxel.x, transform: valueTransform)
             guard value >= minimumValue else { continue }
 
-            label.voxels[idx] = classID
+            voxels[idx] = classID
             count += 1
 
             let gradient = gradientMagnitude(volume: volume,
@@ -344,6 +348,7 @@ public enum PETSegmentation {
                 queue.append(neighbor)
             }
         }
+        label.voxels = voxels
 
         return PETGradientSegmentationResult(
             voxelCount: count,
@@ -362,6 +367,7 @@ public enum PETSegmentation {
     public static func dilate(label: LabelMap, classID: UInt16, iterations: Int = 1) {
         for _ in 0..<iterations {
             let original = label.voxels
+            var voxels = original
             for z in 0..<label.depth {
                 for y in 0..<label.height {
                     let rowStart = z * label.height * label.width + y * label.width
@@ -375,13 +381,14 @@ public enum PETSegmentation {
                                   n.1 >= 0, n.1 < label.height,
                                   n.2 >= 0, n.2 < label.width else { continue }
                             if original[label.index(z: n.0, y: n.1, x: n.2)] == classID {
-                                label.voxels[idx] = classID
+                                voxels[idx] = classID
                                 break
                             }
                         }
                     }
                 }
             }
+            label.voxels = voxels
         }
     }
 
@@ -389,6 +396,7 @@ public enum PETSegmentation {
     public static func erode(label: LabelMap, classID: UInt16, iterations: Int = 1) {
         for _ in 0..<iterations {
             let original = label.voxels
+            var voxels = original
             for z in 0..<label.depth {
                 for y in 0..<label.height {
                     let rowStart = z * label.height * label.width + y * label.width
@@ -402,17 +410,18 @@ public enum PETSegmentation {
                                   n.1 >= 0, n.1 < label.height,
                                   n.2 >= 0, n.2 < label.width else {
                                 // Border voxel - erode it
-                                label.voxels[idx] = 0
+                                voxels[idx] = 0
                                 break
                             }
                             if original[label.index(z: n.0, y: n.1, x: n.2)] != classID {
-                                label.voxels[idx] = 0
+                                voxels[idx] = 0
                                 break
                             }
                         }
                     }
                 }
             }
+            label.voxels = voxels
         }
     }
 
@@ -521,6 +530,22 @@ public enum PETSegmentation {
             (voxel.z, voxel.y + 1, voxel.x), (voxel.z, voxel.y - 1, voxel.x),
             (voxel.z, voxel.y, voxel.x + 1), (voxel.z, voxel.y, voxel.x - 1),
         ]
+    }
+
+    private static func apply(mode: BrushTool.Mode,
+                              to voxels: inout [UInt16],
+                              index: Int,
+                              classID: UInt16) {
+        switch mode {
+        case .paint:
+            voxels[index] = classID
+        case .erase:
+            voxels[index] = 0
+        case .eraseClass:
+            if voxels[index] == classID {
+                voxels[index] = 0
+            }
+        }
     }
 
     private static func localIndex(_ voxel: (z: Int, y: Int, x: Int),

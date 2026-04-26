@@ -51,12 +51,21 @@ public enum NIfTILoader {
             throw NIfTILoaderError.fileNotFound(url.path)
         }
 
-        var data = try Data(contentsOf: url)
         let ext = url.lastPathComponent.lowercased()
 
-        // Decompress .gz if needed
+        let data: Data
         if ext.hasSuffix(".nii.gz") || ext.hasSuffix(".gz") {
-            data = try gunzip(data)
+            #if os(macOS)
+            // Real-world NIfTI payloads often exceed hundreds of MB. On
+            // macOS, stream through the system gzip implementation instead
+            // of first trying a large in-memory Compression.framework decode
+            // that can be slow or reject valid gzip members.
+            data = try systemGunzip(sourceURL: url)
+            #else
+            data = try gunzip(try Data(contentsOf: url), sourceURL: url)
+            #endif
+        } else {
+            data = try Data(contentsOf: url)
         }
 
         return try parseNIfTI(data: data, filename: url.lastPathComponent,
@@ -355,7 +364,7 @@ public enum NIfTILoader {
 
     // MARK: - Gzip decompression (using Compression framework)
 
-    private static func gunzip(_ data: Data) throws -> Data {
+    private static func gunzip(_ data: Data, sourceURL: URL? = nil) throws -> Data {
         // The gzip format has a 10-byte header; the compressed payload uses raw DEFLATE.
         // Compression framework's COMPRESSION_ZLIB expects zlib wrapper, not gzip.
         // We'll strip the gzip header manually and use COMPRESSION_ZLIB raw.
@@ -436,7 +445,7 @@ public enum NIfTILoader {
                 }
                 sz *= 2
             }
-            guard let retriedBuffer else { throw NIfTILoaderError.decompressionFailed }
+            guard let retriedBuffer else { return try systemGunzip(sourceURL: sourceURL) }
             dstBuffer = retriedBuffer
         }
 
@@ -447,10 +456,45 @@ public enum NIfTILoader {
         // common "truncated mid-stream" failure mode.)
         if produced <= Int(UInt32.max),
            UInt32(produced) != declaredSize {
-            throw NIfTILoaderError.decompressionFailed
+            return try systemGunzip(sourceURL: sourceURL)
         }
 
         return dstBuffer.prefix(produced)
+    }
+
+    private static func systemGunzip(sourceURL: URL?) throws -> Data {
+        #if os(macOS)
+        guard let sourceURL else { throw NIfTILoaderError.decompressionFailed }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/gzip")
+        process.arguments = ["-dc", sourceURL.path]
+
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+
+        do {
+            try process.run()
+        } catch {
+            throw NIfTILoaderError.decompressionFailed
+        }
+
+        let decoded = stdout.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
+
+        guard process.terminationStatus == 0, !decoded.isEmpty else {
+            if !stderrData.isEmpty,
+               let message = String(data: stderrData, encoding: .utf8) {
+                NSLog("NIfTI gzip fallback failed: %@", message)
+            }
+            throw NIfTILoaderError.decompressionFailed
+        }
+        return decoded
+        #else
+        throw NIfTILoaderError.decompressionFailed
+        #endif
     }
 
     // MARK: - Modality inference from filename
