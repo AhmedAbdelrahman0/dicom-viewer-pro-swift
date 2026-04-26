@@ -1184,6 +1184,12 @@ private struct LocalArchiveShortcut: Identifiable, Hashable {
             title: "Prostate NCIA",
             subtitle: "CMB-PCA prostate archive",
             path: "/Users/ahmedabdelrahman/Desktop/Datasets/Prostate ncia/manifest-1759972609262"
+        ),
+        LocalArchiveShortcut(
+            id: "openneuro-ds004054",
+            title: "OpenNeuro ds004054",
+            subtitle: "Aerobic Glycolysis PET/MRI BIDS",
+            path: "/Users/ahmedabdelrahman/Desktop/Datasets/ds004054-1.0.0"
         )
     ]
 }

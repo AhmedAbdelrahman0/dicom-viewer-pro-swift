@@ -450,6 +450,26 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(snapshot.displayName, "CT - Chest CT")
     }
 
+    func testPACSIndexBuilderGroupsBIDSNIfTIBySubject() {
+        let t1 = URL(fileURLWithPath: "/tmp/ds004054-1.0.0/sub-control01/anat/sub-control01_T1w.nii.gz")
+        let pet = URL(fileURLWithPath: "/tmp/ds004054-1.0.0/sub-control01/pet/sub-control01_pet.nii.gz")
+
+        let records = [
+            PACSIndexBuilder.snapshotForNIfTI(url: t1, indexedAt: Date(timeIntervalSince1970: 0)),
+            PACSIndexBuilder.snapshotForNIfTI(url: pet, indexedAt: Date(timeIntervalSince1970: 0))
+        ]
+        let studies = PACSWorklistStudy.grouped(from: records)
+
+        XCTAssertEqual(studies.count, 1)
+        let study = studies[0]
+        XCTAssertEqual(study.patientID, "sub-control01")
+        XCTAssertEqual(study.patientName, "sub-control01")
+        XCTAssertEqual(study.studyDescription, "ds004054-1.0.0")
+        XCTAssertEqual(study.seriesCount, 2)
+        XCTAssertTrue(study.modalities.contains("MR"))
+        XCTAssertTrue(study.modalities.contains("PET"))
+    }
+
     func testPACSWorklistGroupsSeriesByStudyAndFilters() {
         let now = Date(timeIntervalSince1970: 0)
         let ct = PACSIndexedSeriesSnapshot(
@@ -2127,6 +2147,43 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertGreaterThan(studies.count, 10)
         XCTAssertTrue(studies.contains { $0.series.contains { Modality.normalize($0.modality) == .MR } })
         XCTAssertTrue(studies.contains { $0.series.contains { Modality.normalize($0.modality) == .CT } })
+    }
+
+    func testOpenNeuroDS004054DatasetIndexingScaleSmoke() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard env["TRACER_RUN_OPENNEURO_DS004054_TESTS"] == "1" else {
+            throw XCTSkip("Set TRACER_RUN_OPENNEURO_DS004054_TESTS=1 to run the local OpenNeuro ds004054 scale smoke.")
+        }
+
+        let rootPath = env["TRACER_OPENNEURO_DS004054_ROOT"]
+            ?? "/Users/ahmedabdelrahman/Desktop/Datasets/ds004054-1.0.0"
+        let root = URL(fileURLWithPath: rootPath, isDirectory: true)
+        guard FileManager.default.fileExists(atPath: root.path) else {
+            throw XCTSkip("OpenNeuro ds004054 dataset not found at \(root.path)")
+        }
+
+        let start = Date()
+        let result = PACSDirectoryIndexer.scan(
+            url: root,
+            progressStride: 1_000,
+            seriesDirectoryFastPath: true
+        )
+        let elapsed = Date().timeIntervalSince(start)
+        print("OpenNeuro ds004054 index: \(result.records.count) series, \(result.scannedFiles) files, \(result.niftiVolumes) NIfTI, \(String(format: "%.2f", elapsed))s")
+
+        XCTAssertFalse(result.cancelled)
+        XCTAssertGreaterThanOrEqual(result.scannedFiles, 340)
+        XCTAssertEqual(result.niftiVolumes, 336)
+        XCTAssertEqual(result.records.count, 336)
+
+        let studies = PACSWorklistStudy.grouped(from: result.records)
+        XCTAssertEqual(studies.count, 42)
+        XCTAssertTrue(studies.allSatisfy { $0.seriesCount == 8 })
+        XCTAssertTrue(studies.contains { study in
+            study.patientID == "sub-control01" &&
+            study.series.contains { Modality.normalize($0.modality) == .PT } &&
+            study.series.contains { Modality.normalize($0.modality) == .MR }
+        })
     }
 
     func testVolumeResamplerUsesWorldGeometry() {

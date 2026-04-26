@@ -309,16 +309,17 @@ public enum PACSIndexBuilder {
         )
         let sourcePath = NIfTILoader.canonicalSourcePath(for: url)
         let id = "nifti:\(sourcePath)"
+        let bids = bidsMetadata(for: url)
         return PACSIndexedSeriesSnapshot(
             id: id,
             kind: .nifti,
             seriesUID: id,
-            studyUID: "NIFTI_STUDY",
+            studyUID: bids?.studyUID ?? "NIFTI_STUDY",
             modality: modality,
-            patientID: "NIFTI_Import",
-            patientName: "NIfTI Import",
+            patientID: bids?.patientID ?? "NIFTI_Import",
+            patientName: bids?.patientName ?? "NIfTI Import",
             accessionNumber: "",
-            studyDescription: url.deletingLastPathComponent().lastPathComponent,
+            studyDescription: bids?.studyDescription ?? url.deletingLastPathComponent().lastPathComponent,
             studyDate: "",
             studyTime: "",
             referringPhysicianName: "",
@@ -346,5 +347,52 @@ public enum PACSIndexBuilder {
             }
         }
         return n
+    }
+
+    private static func bidsMetadata(for url: URL) -> (studyUID: String,
+                                                       patientID: String,
+                                                       patientName: String,
+                                                       studyDescription: String)? {
+        let components = url.standardizedFileURL.pathComponents
+        guard let subjectIndex = components.firstIndex(where: { $0.hasPrefix("sub-") }) else {
+            return nil
+        }
+
+        let subject = components[subjectIndex]
+        let datasetName: String
+        if subjectIndex > 1,
+           components[subjectIndex - 1] == "derivatives" {
+            datasetName = components[subjectIndex - 2]
+        } else {
+            datasetName = subjectIndex > 0 ? components[subjectIndex - 1] : "BIDS"
+        }
+        let session: String?
+        if components.indices.contains(subjectIndex + 1),
+           components[subjectIndex + 1].hasPrefix("ses-") {
+            session = components[subjectIndex + 1]
+        } else {
+            session = nil
+        }
+
+        var studyKeyComponents = [datasetName, subject]
+        if let session {
+            studyKeyComponents.append(session)
+        }
+        let studyKey = studyKeyComponents.joined(separator: "/")
+        let description = session.map { "\(datasetName) \($0)" } ?? datasetName
+        return (
+            studyUID: "bids:\(stableHash(for: studyKey))",
+            patientID: subject,
+            patientName: subject,
+            studyDescription: description
+        )
+    }
+
+    private static func stableHash(for value: String) -> String {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in value.utf8 {
+            hash = (hash ^ UInt64(byte)) &* 1_099_511_628_211
+        }
+        return String(hash)
     }
 }
