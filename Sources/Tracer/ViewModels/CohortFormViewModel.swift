@@ -395,6 +395,235 @@ public final class CohortFormViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Export / import (sharing across machines)
+
+    /// Versioned envelope that wraps an exported preset list. Versioning
+    /// matters because the file format leaves the local app — a user
+    /// might mail a preset file to someone running an older Tracer
+    /// build, and we want a clean refusal rather than a partial decode.
+    public struct Bundle: Codable, Sendable {
+        /// File-format version. Bump when the schema changes in a
+        /// non-backward-compatible way.
+        public let version: Int
+        public let exportedAt: Date
+        public let presets: [CohortPreset]
+
+        public static let currentVersion = 1
+
+        public init(presets: [CohortPreset],
+                    exportedAt: Date = Date(),
+                    version: Int = currentVersion) {
+            self.version = version
+            self.exportedAt = exportedAt
+            self.presets = presets
+        }
+    }
+
+    public enum ImportConflictPolicy: String, Sendable {
+        /// Drop incoming presets whose name already exists. Safest default.
+        case skip
+        /// Append "(imported)" / "(imported) 2" / … to the incoming
+        /// preset's name until it's unique. Always succeeds.
+        case rename
+        /// Replace the existing preset's config with the imported one.
+        /// Preserves the existing preset's id (so any UI / chat state
+        /// that referenced the old id keeps working).
+        case overwrite
+    }
+
+    public struct ImportSummary: Equatable, Sendable {
+        public var imported: Int
+        public var skipped: Int
+        public var renamed: Int
+        public var overwritten: Int
+        public var built_inSkipped: Int
+
+        public init(imported: Int = 0,
+                    skipped: Int = 0,
+                    renamed: Int = 0,
+                    overwritten: Int = 0,
+                    built_inSkipped: Int = 0) {
+            self.imported = imported
+            self.skipped = skipped
+            self.renamed = renamed
+            self.overwritten = overwritten
+            self.built_inSkipped = built_inSkipped
+        }
+
+        public var totalApplied: Int {
+            imported + renamed + overwritten
+        }
+
+        /// Compact summary for the panel's status bar.
+        public var statusMessage: String {
+            var parts: [String] = []
+            if imported > 0 { parts.append("\(imported) added") }
+            if renamed > 0 { parts.append("\(renamed) renamed") }
+            if overwritten > 0 { parts.append("\(overwritten) updated") }
+            if skipped > 0 { parts.append("\(skipped) skipped (already exist)") }
+            if built_inSkipped > 0 { parts.append("\(built_inSkipped) skipped (built-in)") }
+            return parts.isEmpty ? "Nothing imported." : parts.joined(separator: ", ")
+        }
+    }
+
+    public enum ImportError: Swift.Error, LocalizedError, Sendable {
+        case decodeFailed(String)
+        case unsupportedVersion(Int)
+
+        public var errorDescription: String? {
+            switch self {
+            case .decodeFailed(let m):
+                return "Could not parse preset file: \(m)"
+            case .unsupportedVersion(let v):
+                return "Preset file version \(v) is newer than this Tracer build supports. Update Tracer or ask the sender for a v\(Bundle.currentVersion) export."
+            }
+        }
+    }
+
+    /// Encode the supplied presets as a versioned JSON bundle ready to
+    /// write to a `.cohortpreset.json` file. Built-ins are accepted but
+    /// re-export with their stable id so the recipient sees them as
+    /// the same built-in (not a user-mutable duplicate).
+    public static func encodeExport(_ presets: [CohortPreset],
+                                    exportedAt: Date = Date()) throws -> Data {
+        let bundle = Bundle(presets: presets, exportedAt: exportedAt)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return try encoder.encode(bundle)
+    }
+
+    /// Convenience: encode every user preset in this VM. (Built-ins are
+    /// not exported — they live in code on every machine.)
+    public func exportAllUserPresets(exportedAt: Date? = nil) throws -> Data {
+        try Self.encodeExport(presets, exportedAt: exportedAt ?? now())
+    }
+
+    /// Convenience: encode a single preset.
+    public func exportPreset(_ preset: CohortPreset,
+                             exportedAt: Date? = nil) throws -> Data {
+        try Self.encodeExport([preset], exportedAt: exportedAt ?? now())
+    }
+
+    /// Import from a previously-exported bundle. Returns a summary the
+    /// panel surfaces in its status line. Atomic: the import is built
+    /// up in a local copy and only assigned to `presets` once decoding
+    /// succeeded for every entry.
+    @discardableResult
+    public func importPresets(from data: Data,
+                              conflictPolicy: ImportConflictPolicy = .skip) throws -> ImportSummary {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let bundle: Bundle
+        do {
+            bundle = try decoder.decode(Bundle.self, from: data)
+        } catch {
+            throw ImportError.decodeFailed(error.localizedDescription)
+        }
+        if bundle.version > Bundle.currentVersion {
+            throw ImportError.unsupportedVersion(bundle.version)
+        }
+
+        var working = presets
+        var summary = ImportSummary()
+
+        for incoming in bundle.presets {
+            // Skip built-in re-imports — they're code-defined on every
+            // machine, importing one is a no-op (and we don't want to
+            // accidentally let a built-in name become a user preset).
+            if incoming.isBuiltIn {
+                summary.built_inSkipped += 1
+                continue
+            }
+
+            // Collision check covers built-ins so users can't sneak a
+            // preset called "Defaults" in via import either.
+            let allNames = builtInPresets.map(\.name) + working.map(\.name)
+            let nameExists = allNames.contains {
+                $0.caseInsensitiveCompare(incoming.name) == .orderedSame
+            }
+
+            if !nameExists {
+                // Stamp updatedAt so cross-machine sort-by-recency works.
+                let saved = CohortPreset(
+                    id: incoming.id,
+                    name: incoming.name,
+                    createdAt: incoming.createdAt,
+                    updatedAt: now(),
+                    config: incoming.config
+                )
+                working.append(saved)
+                summary.imported += 1
+                continue
+            }
+
+            switch conflictPolicy {
+            case .skip:
+                summary.skipped += 1
+
+            case .rename:
+                let baseName = incoming.name + " (imported)"
+                var newName = baseName
+                var counter = 2
+                let hasCollision: (String) -> Bool = { candidate in
+                    let combined = self.builtInPresets.map(\.name) + working.map(\.name)
+                    return combined.contains {
+                        $0.caseInsensitiveCompare(candidate) == .orderedSame
+                    }
+                }
+                while hasCollision(newName) {
+                    newName = "\(baseName) \(counter)"
+                    counter += 1
+                }
+                // Fresh id for renamed import so we don't risk colliding
+                // with an existing preset that happens to share the
+                // incoming id (rare but possible if the user re-imports
+                // a file they already imported before).
+                let renamed = CohortPreset(
+                    id: UUID(),
+                    name: newName,
+                    createdAt: incoming.createdAt,
+                    updatedAt: now(),
+                    config: incoming.config
+                )
+                working.append(renamed)
+                summary.renamed += 1
+
+            case .overwrite:
+                // Find the existing user preset by name (case-insensitive).
+                // Built-in name collisions can't be overwritten — they're
+                // not in `working`, so the search misses and we skip
+                // those rather than appending a new one.
+                if let idx = working.firstIndex(where: {
+                    $0.name.caseInsensitiveCompare(incoming.name) == .orderedSame
+                }) {
+                    let existing = working[idx]
+                    // Rebuild via init since id + createdAt are `let`.
+                    // Preserves the existing id (so any in-flight UI /
+                    // chat state that referenced the old id keeps
+                    // working) and the original createdAt timestamp.
+                    let replacement = CohortPreset(
+                        id: existing.id,
+                        name: existing.name,
+                        createdAt: existing.createdAt,
+                        updatedAt: now(),
+                        config: incoming.config
+                    )
+                    working[idx] = replacement
+                    summary.overwritten += 1
+                } else {
+                    // Built-in name collision — skip, can't overwrite a built-in.
+                    summary.built_inSkipped += 1
+                }
+            }
+        }
+
+        working.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        presets = working
+        savePresets()
+        return summary
+    }
+
     private static func loadPresets(from defaults: UserDefaults) -> [CohortPreset] {
         guard let data = defaults.data(forKey: presetsDefaultsKey) else { return [] }
         let decoder = JSONDecoder()

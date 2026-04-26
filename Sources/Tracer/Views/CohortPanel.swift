@@ -220,12 +220,41 @@ public struct CohortPanel: View {
                         } label: {
                             Label("Rename…", systemImage: "pencil")
                         }
-                        Divider()
-                        Button(role: .destructive) {
-                            showingDeleteConfirm = true
-                        } label: {
-                            Label("Delete preset", systemImage: "trash")
-                        }
+                    }
+                }
+
+                // Sharing: export the active (single) preset, or every
+                // user preset, as a .cohortpreset.json file.
+                #if canImport(AppKit)
+                Divider()
+                if let active = form.preset(id: form.activePresetID ?? UUID()), !active.isBuiltIn {
+                    Button {
+                        exportPreset(active)
+                    } label: {
+                        Label("Export \"\(active.name)\"…", systemImage: "square.and.arrow.up")
+                    }
+                }
+                Button {
+                    exportAllPresets()
+                } label: {
+                    Label("Export all presets…", systemImage: "square.and.arrow.up.on.square")
+                }
+                .disabled(form.presets.isEmpty)
+                Button {
+                    importPresetsFromFile()
+                } label: {
+                    Label("Import presets…", systemImage: "square.and.arrow.down.on.square")
+                }
+                #endif
+
+                // Delete is its own block, always last + destructive.
+                if let active = form.preset(id: form.activePresetID ?? UUID()),
+                   !active.isBuiltIn {
+                    Divider()
+                    Button(role: .destructive) {
+                        showingDeleteConfirm = true
+                    } label: {
+                        Label("Delete preset", systemImage: "trash")
                     }
                 }
             } label: {
@@ -770,6 +799,84 @@ public struct CohortPanel: View {
                 store.statusMessage = "Export failed: \(error.localizedDescription)"
             }
         }
+    }
+
+    /// Export the active preset as a single-entry `.cohortpreset.json`.
+    /// File name defaults to the sanitised preset name so multiple
+    /// exports don't clobber each other in the user's Downloads folder.
+    private func exportPreset(_ preset: CohortPreset) {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "\(sanitiseFilename(preset.name)).cohortpreset.json"
+        panel.canCreateDirectories = true
+        panel.message = "Export the \"\(preset.name)\" cohort preset as a sharable JSON file"
+        if panel.runModal() == .OK, let url = panel.url {
+            do {
+                let data = try form.exportPreset(preset)
+                try data.write(to: url, options: [.atomic])
+                store.statusMessage = "Exported preset → \(url.lastPathComponent)"
+            } catch {
+                store.statusMessage = "Preset export failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// Export EVERY user preset as one bundle file. Built-ins aren't
+    /// included — they're code-defined on every Tracer install.
+    private func exportAllPresets() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "tracer-cohort-presets.cohortpreset.json"
+        panel.canCreateDirectories = true
+        panel.message = "Export every saved cohort preset as one sharable JSON file"
+        if panel.runModal() == .OK, let url = panel.url {
+            do {
+                let data = try form.exportAllUserPresets()
+                try data.write(to: url, options: [.atomic])
+                store.statusMessage = "Exported \(form.presets.count) preset(s) → \(url.lastPathComponent)"
+            } catch {
+                store.statusMessage = "Preset export failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// Read one or more `.cohortpreset.json` files and merge into the
+    /// user's library. Default conflict policy is `.skip` — safe and
+    /// reversible. Future enhancement: an "Import options…" sheet that
+    /// lets the user pick `.rename` or `.overwrite` per import.
+    private func importPresetsFromFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = [.json]
+        panel.message = "Import cohort presets from one or more .cohortpreset.json files"
+        guard panel.runModal() == .OK else { return }
+
+        var totals = CohortFormViewModel.ImportSummary()
+        for url in panel.urls {
+            do {
+                let data = try Data(contentsOf: url)
+                let summary = try form.importPresets(from: data, conflictPolicy: .skip)
+                totals.imported += summary.imported
+                totals.skipped += summary.skipped
+                totals.renamed += summary.renamed
+                totals.overwritten += summary.overwritten
+                totals.built_inSkipped += summary.built_inSkipped
+            } catch {
+                store.statusMessage = "Import failed for \(url.lastPathComponent): \(error.localizedDescription)"
+                return
+            }
+        }
+        store.statusMessage = "Preset import: \(totals.statusMessage)"
+    }
+
+    /// Trim filesystem-hostile characters out of a preset name when
+    /// using it as a default filename. Mirrors the same set we use in
+    /// `CohortJob.outputDirectory`.
+    private func sanitiseFilename(_ name: String) -> String {
+        let disallowed: Set<Character> = ["/", "\\", ":", "*", "?", "\"", "<", ">", "|"]
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleaned = String(trimmed.map { disallowed.contains($0) ? "_" : $0 })
+        return cleaned.isEmpty ? "preset" : cleaned
     }
     #else
     private func pickOutputFolder() { /* iPad stub */ }

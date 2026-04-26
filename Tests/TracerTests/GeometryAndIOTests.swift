@@ -3720,6 +3720,173 @@ final class GeometryAndIOTests: XCTestCase {
                        "Edits without an active preset are NOT 'unsaved preset changes'")
     }
 
+    // MARK: - Cohort form VM: export / import
+
+    @MainActor
+    func testCohortFormVMExportProducesParseableBundle() throws {
+        let (vm, defaults, domain) = makeIsolatedFormVM()
+        defer { defaults.removePersistentDomain(forName: domain) }
+        vm.jobName = "ExpRun"
+        _ = vm.saveAsPreset(named: "Alpha")
+        let data = try vm.exportAllUserPresets()
+        // Must decode back as a Bundle with the expected version.
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let bundle = try decoder.decode(CohortFormViewModel.Bundle.self, from: data)
+        XCTAssertEqual(bundle.version, CohortFormViewModel.Bundle.currentVersion)
+        XCTAssertEqual(bundle.presets.count, 1)
+        XCTAssertEqual(bundle.presets[0].name, "Alpha")
+    }
+
+    @MainActor
+    func testCohortFormVMImportSkipPolicyDropsNameCollisions() throws {
+        let (vm, defaults, domain) = makeIsolatedFormVM()
+        defer { defaults.removePersistentDomain(forName: domain) }
+        vm.jobName = "Existing"
+        _ = vm.saveAsPreset(named: "AutoPET")
+
+        // Build an export bundle locally that conflicts on name.
+        let conflicting = CohortPreset(name: "AutoPET",
+                                       config: CohortFormConfig(jobName: "Different"))
+        let data = try CohortFormViewModel.encodeExport([conflicting])
+
+        let summary = try vm.importPresets(from: data, conflictPolicy: .skip)
+        XCTAssertEqual(summary.imported, 0)
+        XCTAssertEqual(summary.skipped, 1)
+        XCTAssertEqual(vm.presets.count, 1)
+        XCTAssertEqual(vm.presets[0].config.jobName, "Existing",
+                       "Skip policy preserves the existing preset's config")
+    }
+
+    @MainActor
+    func testCohortFormVMImportRenamePolicyAppendsImportedSuffix() throws {
+        let (vm, defaults, domain) = makeIsolatedFormVM()
+        defer { defaults.removePersistentDomain(forName: domain) }
+        _ = vm.saveAsPreset(named: "AutoPET")
+
+        let conflicting = CohortPreset(name: "AutoPET",
+                                       config: CohortFormConfig(jobName: "From file"))
+        let data = try CohortFormViewModel.encodeExport([conflicting])
+
+        let summary = try vm.importPresets(from: data, conflictPolicy: .rename)
+        XCTAssertEqual(summary.renamed, 1)
+        XCTAssertEqual(vm.presets.count, 2)
+        XCTAssertTrue(vm.presets.contains { $0.name == "AutoPET (imported)" },
+                      "First collision becomes 'AutoPET (imported)'")
+
+        // Second import of the same name → should bump to "(imported) 2"
+        _ = try vm.importPresets(from: data, conflictPolicy: .rename)
+        XCTAssertTrue(vm.presets.contains { $0.name == "AutoPET (imported) 2" },
+                      "Second collision bumps the suffix counter")
+    }
+
+    @MainActor
+    func testCohortFormVMImportOverwritePolicyReplacesConfig() throws {
+        let (vm, defaults, domain) = makeIsolatedFormVM()
+        defer { defaults.removePersistentDomain(forName: domain) }
+        vm.jobName = "Original"
+        let original = vm.saveAsPreset(named: "AutoPET")!
+        let originalCreatedAt = original.createdAt
+
+        let updated = CohortPreset(name: "AutoPET",
+                                   config: CohortFormConfig(jobName: "Updated"))
+        let data = try CohortFormViewModel.encodeExport([updated])
+
+        // Tiny sleep so the new updatedAt advances.
+        Thread.sleep(forTimeInterval: 0.01)
+        let summary = try vm.importPresets(from: data, conflictPolicy: .overwrite)
+        XCTAssertEqual(summary.overwritten, 1)
+        XCTAssertEqual(vm.presets.count, 1, "No new preset created")
+        let after = vm.presets[0]
+        XCTAssertEqual(after.id, original.id, "id is preserved on overwrite")
+        XCTAssertEqual(after.createdAt, originalCreatedAt,
+                       "createdAt is preserved on overwrite")
+        XCTAssertEqual(after.config.jobName, "Updated",
+                       "Config is replaced with the imported one")
+        XCTAssertGreaterThan(after.updatedAt, originalCreatedAt)
+    }
+
+    @MainActor
+    func testCohortFormVMImportRejectsBuiltInNameAndShadowing() throws {
+        let (vm, defaults, domain) = makeIsolatedFormVM()
+        defer { defaults.removePersistentDomain(forName: domain) }
+        // (a) An imported preset with the built-in id is silently dropped.
+        let builtInClone = CohortPreset(id: CohortPreset.defaultsPresetID,
+                                        name: "Defaults",
+                                        config: CohortFormConfig())
+        let data1 = try CohortFormViewModel.encodeExport([builtInClone])
+        let s1 = try vm.importPresets(from: data1, conflictPolicy: .rename)
+        XCTAssertEqual(s1.built_inSkipped, 1)
+        XCTAssertTrue(vm.presets.isEmpty)
+
+        // (b) An imported preset NAMED "Defaults" but with a fresh id
+        // collides with the built-in. Skip policy drops it.
+        let shadowing = CohortPreset(name: "Defaults",
+                                     config: CohortFormConfig(jobName: "Sneaky"))
+        let data2 = try CohortFormViewModel.encodeExport([shadowing])
+        let s2 = try vm.importPresets(from: data2, conflictPolicy: .skip)
+        XCTAssertEqual(s2.skipped, 1)
+        XCTAssertTrue(vm.presets.isEmpty,
+                      "User can't shadow a built-in name via import")
+    }
+
+    @MainActor
+    func testCohortFormVMImportRejectsFutureSchemaVersion() throws {
+        let (vm, defaults, domain) = makeIsolatedFormVM()
+        defer { defaults.removePersistentDomain(forName: domain) }
+        // Hand-craft a v999 bundle to simulate a newer Tracer's export.
+        let json = """
+        {
+          "version": 999,
+          "exportedAt": "2026-04-25T00:00:00Z",
+          "presets": []
+        }
+        """.data(using: .utf8)!
+        do {
+            _ = try vm.importPresets(from: json)
+            XCTFail("Should refuse newer schema versions")
+        } catch let error as CohortFormViewModel.ImportError {
+            guard case .unsupportedVersion(let v) = error else {
+                return XCTFail("Wrong error case: \(error)")
+            }
+            XCTAssertEqual(v, 999)
+        }
+    }
+
+    @MainActor
+    func testCohortFormVMImportRoundTripsThroughExportData() throws {
+        let (vmA, defaultsA, domainA) = makeIsolatedFormVM()
+        defer { defaultsA.removePersistentDomain(forName: domainA) }
+        vmA.jobName = "Patient cohort 042"
+        vmA.outputRoot = "/tmp/p042"
+        vmA.petACEntryID = "deep-ac-dgx"
+        vmA.petACScriptPath = "~/scripts/ac.py"
+        _ = vmA.saveAsPreset(named: "P042 DGX")
+
+        let exported = try vmA.exportAllUserPresets()
+
+        // Brand new VM in a different defaults suite — like a different
+        // machine that just got the JSON file by email.
+        let (vmB, defaultsB, domainB) = makeIsolatedFormVM()
+        defer { defaultsB.removePersistentDomain(forName: domainB) }
+        let summary = try vmB.importPresets(from: exported, conflictPolicy: .skip)
+        XCTAssertEqual(summary.imported, 1)
+        XCTAssertEqual(vmB.presets.count, 1)
+        XCTAssertEqual(vmB.presets[0].name, "P042 DGX")
+        XCTAssertEqual(vmB.presets[0].config.petACEntryID, "deep-ac-dgx")
+        XCTAssertEqual(vmB.presets[0].config.petACScriptPath, "~/scripts/ac.py")
+    }
+
+    @MainActor
+    func testCohortFormVMImportSummaryStatusMessageReadsHumanly() {
+        var s = CohortFormViewModel.ImportSummary(imported: 3, skipped: 1, renamed: 2)
+        XCTAssertTrue(s.statusMessage.contains("3 added"))
+        XCTAssertTrue(s.statusMessage.contains("2 renamed"))
+        XCTAssertTrue(s.statusMessage.contains("1 skipped"))
+        s = CohortFormViewModel.ImportSummary()
+        XCTAssertEqual(s.statusMessage, "Nothing imported.")
+    }
+
     @MainActor
     func testCohortFormVMSurfacesBuiltInDefaultsPreset() {
         let (vm, defaults, domain) = makeIsolatedFormVM()
