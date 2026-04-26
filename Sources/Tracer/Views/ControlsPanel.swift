@@ -22,6 +22,7 @@ struct ControlsPanel: View {
     enum ViewingSub: String, CaseIterable, Identifiable, Hashable {
         case wl = "W/L"
         case fusion = "Fusion"
+        case dynamic = "Dynamic"
         case display = "Display"
         var id: String { rawValue }
     }
@@ -76,6 +77,7 @@ struct ControlsPanel: View {
                     switch viewingSub {
                     case .wl:      ScrollView { WLTab().padding(16) }
                     case .fusion:  ScrollView { FusionTab().padding(16) }
+                    case .dynamic: ScrollView { DynamicTab().padding(16) }
                     case .display: ScrollView { DisplayTab().padding(16) }
                     }
                 case .segmentation:
@@ -174,6 +176,235 @@ private struct WLTab: View {
 
             Spacer()
         }
+    }
+}
+
+// MARK: - Dynamic Tab
+
+private struct DynamicTab: View {
+    @EnvironmentObject var vm: ViewerViewModel
+    @State private var frameDurationSeconds: Double = 1
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Dynamic Imaging")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    vm.buildDynamicStudyFromLoadedVolumes(frameDurationSeconds: frameDurationSeconds)
+                } label: {
+                    Label("Build", systemImage: "square.stack.3d.up")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(vm.dynamicCandidateVolumes.count < 2)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                ControlStatRow("Candidate frames", "\(vm.dynamicCandidateVolumes.count)")
+                HStack {
+                    Text("Frame dur.")
+                    Spacer()
+                    Text(String(format: "%.1fs", frameDurationSeconds))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+                Slider(value: $frameDurationSeconds, in: 0.25...120, step: 0.25)
+                    .help("Temporary frame duration used when source metadata does not provide dynamic timing.")
+            }
+
+            if let study = vm.dynamicStudy {
+                Divider()
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(study.name)
+                        .font(.system(size: 12, weight: .semibold))
+                    ControlStatRow("Modality", study.modality.displayName)
+                    ControlStatRow("Frames", "\(study.frameCount)")
+                    ControlStatRow("Duration", study.durationLabel)
+                    if let frame = study.frame(at: vm.selectedDynamicFrameIndex) {
+                        ControlStatRow("Current", "\(frame.displayName)")
+                    }
+
+                    let maxFrame = max(0, study.frameCount - 1)
+                    Slider(
+                        value: Binding(
+                            get: { Double(vm.selectedDynamicFrameIndex) },
+                            set: { vm.setDynamicFrame(index: Int($0.rounded())) }
+                        ),
+                        in: 0...Double(maxFrame),
+                        step: 1
+                    )
+
+                    HStack(spacing: 6) {
+                        Button {
+                            vm.stepDynamicFrame(delta: -1)
+                        } label: {
+                            Image(systemName: "backward.frame")
+                        }
+                        .help("Previous frame")
+
+                        Button {
+                            vm.toggleDynamicPlayback()
+                        } label: {
+                            Label(vm.isDynamicPlaybackRunning ? "Pause" : "Play",
+                                  systemImage: vm.isDynamicPlaybackRunning ? "pause.fill" : "play.fill")
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        Button {
+                            vm.stepDynamicFrame(delta: 1)
+                        } label: {
+                            Image(systemName: "forward.frame")
+                        }
+                        .help("Next frame")
+
+                        Spacer()
+
+                        Button {
+                            vm.clearDynamicStudy()
+                        } label: {
+                            Image(systemName: "xmark.circle")
+                        }
+                        .help("Close dynamic workflow")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    HStack {
+                        Text("FPS")
+                        Slider(value: $vm.dynamicPlaybackFPS, in: 0.25...12, step: 0.25)
+                        Text(String(format: "%.1f", vm.dynamicPlaybackFPS))
+                            .font(.system(size: 10, design: .monospaced))
+                            .frame(width: 34, alignment: .trailing)
+                    }
+                }
+
+                Divider()
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Time-Activity Curve")
+                            .font(.system(size: 12, weight: .semibold))
+                        Spacer()
+                        if vm.isDynamicTACComputing {
+                            ProgressView()
+                                .scaleEffect(0.65)
+                        }
+                    }
+                    Button {
+                        vm.computeDynamicTimeActivityCurveForActiveLabel()
+                    } label: {
+                        Label("Update From Active Label", systemImage: "chart.xyaxis.line")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(vm.labeling.activeLabelMap == nil || vm.isDynamicTACComputing)
+
+                    if !vm.dynamicTimeActivityCurve.isEmpty {
+                        DynamicTACChart(points: vm.dynamicTimeActivityCurve)
+                            .frame(height: 110)
+                        dynamicTACRows(points: vm.dynamicTimeActivityCurve)
+                    } else {
+                        Text("Use a label or lesion ROI to plot frame-by-frame mean and max activity.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            } else {
+                Text("Load two or more PET/NM volumes on the same grid, then build a dynamic study. The current MPR panes become the dynamic frame viewer.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    private func dynamicTACRows(points: [DynamicTimeActivityPoint]) -> some View {
+        VStack(spacing: 4) {
+            ForEach(points.prefix(6)) { point in
+                HStack {
+                    Text("F\(point.frameIndex + 1)")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .frame(width: 28, alignment: .leading)
+                    Text(DynamicFrame.formatTime(point.midSeconds))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Text(String(format: "mean %.3f  max %.3f %@", point.mean, point.max, point.unit))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+            }
+            if points.count > 6 {
+                Text("+ \(points.count - 6) more frames")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+}
+
+private struct DynamicTACChart: View {
+    let points: [DynamicTimeActivityPoint]
+
+    var body: some View {
+        Canvas { context, size in
+            guard points.count >= 2 else { return }
+            let maxTime = max(points.map(\.midSeconds).max() ?? 1, 1)
+            let maxValue = max(points.map(\.max).max() ?? 1, 1)
+            let rect = CGRect(origin: .zero, size: size).insetBy(dx: 6, dy: 8)
+
+            var axis = Path()
+            axis.move(to: CGPoint(x: rect.minX, y: rect.minY))
+            axis.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+            axis.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+            context.stroke(axis, with: .color(TracerTheme.hairline), lineWidth: 1)
+
+            drawLine(points.map { ($0.midSeconds, $0.mean) },
+                     maxTime: maxTime,
+                     maxValue: maxValue,
+                     rect: rect,
+                     color: TracerTheme.accentBright,
+                     context: &context)
+            drawLine(points.map { ($0.midSeconds, $0.max) },
+                     maxTime: maxTime,
+                     maxValue: maxValue,
+                     rect: rect,
+                     color: TracerTheme.pet,
+                     context: &context)
+        }
+        .background(Color.secondary.opacity(0.07))
+        .cornerRadius(6)
+        .overlay(alignment: .topLeading) {
+            HStack(spacing: 8) {
+                Label("mean", systemImage: "chart.xyaxis.line")
+                    .foregroundColor(TracerTheme.accentBright)
+                Label("max", systemImage: "chart.line.uptrend.xyaxis")
+                    .foregroundColor(TracerTheme.pet)
+            }
+            .font(.system(size: 9, weight: .semibold))
+            .padding(6)
+        }
+    }
+
+    private func drawLine(_ values: [(Double, Double)],
+                          maxTime: Double,
+                          maxValue: Double,
+                          rect: CGRect,
+                          color: Color,
+                          context: inout GraphicsContext) {
+        var path = Path()
+        for (index, value) in values.enumerated() {
+            let x = rect.minX + CGFloat(value.0 / maxTime) * rect.width
+            let y = rect.maxY - CGFloat(value.1 / maxValue) * rect.height
+            let point = CGPoint(x: x, y: y)
+            if index == 0 {
+                path.move(to: point)
+            } else {
+                path.addLine(to: point)
+            }
+        }
+        context.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: 1.8, lineCap: .round, lineJoin: .round))
     }
 }
 

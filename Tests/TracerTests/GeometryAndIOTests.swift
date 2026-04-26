@@ -2525,6 +2525,92 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertTrue(vm.statusMessage.contains("SUV sphere ROI"))
     }
 
+    func testDynamicStudyBuilderUsesMatchingNuclearFrames() throws {
+        let frameA = ImageVolume(
+            pixels: [1, 2, 3, 4],
+            depth: 1,
+            height: 2,
+            width: 2,
+            modality: "PT",
+            seriesDescription: "frame_001"
+        )
+        let frameB = ImageVolume(
+            pixels: [2, 3, 4, 5],
+            depth: 1,
+            height: 2,
+            width: 2,
+            modality: "PT",
+            seriesDescription: "frame_002"
+        )
+        let ct = ImageVolume(
+            pixels: [100, 100, 100, 100],
+            depth: 1,
+            height: 2,
+            width: 2,
+            modality: "CT"
+        )
+
+        let study = try XCTUnwrap(DynamicStudyBuilder.makeStudy(
+            from: [ct, frameB, frameA],
+            frameDurationSeconds: 5
+        ))
+
+        XCTAssertEqual(study.frameCount, 2)
+        XCTAssertEqual(study.frames.map(\.volume.seriesDescription), ["frame_001", "frame_002"])
+        XCTAssertEqual(study.frames[1].midSeconds, 7.5, accuracy: 1e-9)
+    }
+
+    @MainActor
+    func testViewerDynamicStudySwitchesDisplayedFrameAndComputesTAC() throws {
+        let vm = ViewerViewModel()
+        vm.suvSettings.mode = .storedSUV
+        let frameA = ImageVolume(
+            pixels: [1, 2, 3, 4],
+            depth: 1,
+            height: 2,
+            width: 2,
+            modality: "PT",
+            seriesDescription: "frame_001",
+            suvScaleFactor: 2
+        )
+        let frameB = ImageVolume(
+            pixels: [2, 4, 6, 8],
+            depth: 1,
+            height: 2,
+            width: 2,
+            modality: "PT",
+            seriesDescription: "frame_002",
+            suvScaleFactor: 2
+        )
+        vm.addLoadedVolumeIfNeeded(frameA)
+        vm.addLoadedVolumeIfNeeded(frameB)
+
+        XCTAssertTrue(vm.buildDynamicStudyFromLoadedVolumes(frameDurationSeconds: 10))
+        XCTAssertEqual(vm.dynamicStudy?.frameCount, 2)
+        XCTAssertEqual(vm.currentVolume?.id, frameA.id)
+
+        vm.setDynamicFrame(index: 1)
+        XCTAssertEqual(vm.currentVolume?.id, frameB.id)
+
+        let map = vm.labeling.createLabelMap(for: frameA)
+        map.classes = [LabelClass(labelID: 1, name: "ROI", category: .lesion, color: .orange)]
+        map.voxels = [0, 1, 1, 0]
+        let points = DynamicTimeActivityCalculator.compute(
+            study: try XCTUnwrap(vm.dynamicStudy),
+            labelVoxels: map.voxels,
+            labelDimensions: (depth: map.depth, height: map.height, width: map.width),
+            classID: 1,
+            suvSettings: vm.suvSettings
+        )
+
+        XCTAssertEqual(points.count, 2)
+        XCTAssertEqual(points[0].mean, 5.0, accuracy: 1e-9)
+        XCTAssertEqual(points[0].max, 6.0, accuracy: 1e-9)
+        XCTAssertEqual(points[1].mean, 10.0, accuracy: 1e-9)
+        XCTAssertEqual(points[1].max, 12.0, accuracy: 1e-9)
+        XCTAssertEqual(points[1].unit, "SUV")
+    }
+
     func testNNUnetRunnerReportsAvailabilityFromPATH() {
         // We don't assume nnUNetv2_predict is installed in CI — just prove
         // the detector runs without crashing and returns a reasonable value.
