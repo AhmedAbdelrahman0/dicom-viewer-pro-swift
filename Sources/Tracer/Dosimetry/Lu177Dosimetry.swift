@@ -271,20 +271,35 @@ public struct Lu177DosimetryOptions: Equatable, Sendable {
     public let tailModel: Lu177TailModel
     public let doseModel: Lu177DoseModel
     public let densityCalibration: CTDensityCalibration
+    public let recoveryCoefficientTable: Lu177RecoveryCoefficientTable?
+    public let registrationWarningThresholdMM: Double
+    public let doseVolumeHistogramBinWidthGy: Double
     public let outputSeriesDescription: String
 
     public init(physicalHalfLifeHours: Double = 159.53,
                 tailModel: Lu177TailModel = .monoExponentialFitWithPhysicalFallback,
                 doseModel: Lu177DoseModel = .lu177LocalDeposition,
                 densityCalibration: CTDensityCalibration = .standard,
+                recoveryCoefficientTable: Lu177RecoveryCoefficientTable? = nil,
+                registrationWarningThresholdMM: Double = 10,
+                doseVolumeHistogramBinWidthGy: Double = 1,
                 outputSeriesDescription: String = "Lu-177 absorbed dose map") throws {
         guard physicalHalfLifeHours > 0, physicalHalfLifeHours.isFinite else {
             throw Lu177DosimetryError.invalidInput("Lu-177 physical half-life must be a positive finite number of hours.")
+        }
+        guard registrationWarningThresholdMM > 0, registrationWarningThresholdMM.isFinite else {
+            throw Lu177DosimetryError.invalidInput("Registration warning threshold must be a positive finite distance.")
+        }
+        guard doseVolumeHistogramBinWidthGy > 0, doseVolumeHistogramBinWidthGy.isFinite else {
+            throw Lu177DosimetryError.invalidInput("Dose-volume histogram bin width must be a positive finite Gy value.")
         }
         self.physicalHalfLifeHours = physicalHalfLifeHours
         self.tailModel = tailModel
         self.doseModel = doseModel
         self.densityCalibration = densityCalibration
+        self.recoveryCoefficientTable = recoveryCoefficientTable
+        self.registrationWarningThresholdMM = registrationWarningThresholdMM
+        self.doseVolumeHistogramBinWidthGy = doseVolumeHistogramBinWidthGy
         self.outputSeriesDescription = outputSeriesDescription
     }
 
@@ -335,6 +350,102 @@ public struct Lu177DosimetryCurve: Identifiable, Equatable, Sendable {
     public let timeIntegratedActivityBqHours: Double
     public let absorbedDoseGy: Double
     public let warnings: [String]
+}
+
+public struct Lu177RecoveryCoefficientSample: Equatable, Sendable {
+    public let volumeML: Double
+    public let coefficient: Double
+
+    public init(volumeML: Double, coefficient: Double) throws {
+        guard volumeML > 0, volumeML.isFinite else {
+            throw Lu177DosimetryError.invalidInput("Recovery coefficient volume must be a positive finite mL value.")
+        }
+        guard coefficient > 0, coefficient <= 1.5, coefficient.isFinite else {
+            throw Lu177DosimetryError.invalidInput("Recovery coefficient must be finite and greater than zero.")
+        }
+        self.volumeML = volumeML
+        self.coefficient = coefficient
+    }
+}
+
+public struct Lu177RecoveryCoefficientTable: Equatable, Sendable {
+    public let name: String
+    public let samples: [Lu177RecoveryCoefficientSample]
+    public let maxCorrectionFactor: Double
+
+    public init(name: String,
+                samples: [Lu177RecoveryCoefficientSample],
+                maxCorrectionFactor: Double = 5) throws {
+        guard !samples.isEmpty else {
+            throw Lu177DosimetryError.invalidInput("Recovery coefficient table requires at least one volume/coefficient sample.")
+        }
+        guard maxCorrectionFactor >= 1, maxCorrectionFactor.isFinite else {
+            throw Lu177DosimetryError.invalidInput("Maximum recovery correction factor must be finite and at least 1.")
+        }
+        self.name = name
+        self.samples = samples.sorted { $0.volumeML < $1.volumeML }
+        self.maxCorrectionFactor = maxCorrectionFactor
+    }
+
+    public func coefficient(forVolumeML volumeML: Double) -> Double {
+        guard let first = samples.first, let last = samples.last else { return 1 }
+        if volumeML <= first.volumeML { return first.coefficient }
+        if volumeML >= last.volumeML { return last.coefficient }
+
+        for index in 0..<(samples.count - 1) {
+            let lower = samples[index]
+            let upper = samples[index + 1]
+            guard volumeML >= lower.volumeML, volumeML <= upper.volumeML else { continue }
+            let fraction = (volumeML - lower.volumeML) / (upper.volumeML - lower.volumeML)
+            return lower.coefficient + fraction * (upper.coefficient - lower.coefficient)
+        }
+        return last.coefficient
+    }
+
+    public func correctionFactor(forVolumeML volumeML: Double) -> Double {
+        min(maxCorrectionFactor, 1 / max(coefficient(forVolumeML: volumeML), 1e-6))
+    }
+}
+
+public struct Lu177TimePointAlignmentQA: Equatable, Sendable {
+    public let movingTimeHours: Double
+    public let centerOfMassShiftMM: Double
+    public let totalActivityRatio: Double
+    public let passed: Bool
+    public let warning: String?
+}
+
+public struct Lu177DoseVolumeHistogramBin: Equatable, Sendable {
+    public let lowerDoseGy: Double
+    public let upperDoseGy: Double
+    public let voxelCount: Int
+    public let volumeML: Double
+    public let cumulativeVolumeML: Double
+}
+
+public struct Lu177DoseVolumeHistogram: Identifiable, Equatable, Sendable {
+    public let id: String
+    public let labelID: UInt16
+    public let name: String
+    public let totalVolumeML: Double
+    public let minDoseGy: Double
+    public let meanDoseGy: Double
+    public let maxDoseGy: Double
+    public let bins: [Lu177DoseVolumeHistogramBin]
+    public let sortedDoseDescendingGy: [Double]
+
+    public func doseCoveringVolume(percent: Double) -> Double {
+        guard !sortedDoseDescendingGy.isEmpty else { return 0 }
+        let clamped = min(100, max(0, percent))
+        let index = max(0, min(sortedDoseDescendingGy.count - 1, Int(ceil(clamped / 100 * Double(sortedDoseDescendingGy.count))) - 1))
+        return sortedDoseDescendingGy[index]
+    }
+
+    public func volumeReceivingDose(atLeast doseGy: Double) -> Double {
+        guard !sortedDoseDescendingGy.isEmpty else { return 0 }
+        let count = sortedDoseDescendingGy.reduce(0) { $0 + ($1 >= doseGy ? 1 : 0) }
+        return totalVolumeML * Double(count) / Double(sortedDoseDescendingGy.count)
+    }
 }
 
 public struct Lu177TherapyCycleDose: Identifiable, Equatable, Sendable {
@@ -400,6 +511,9 @@ public struct Lu177DosimetryReport: Equatable, Sendable {
     public let maxDoseGy: Double
     public let totalTimeIntegratedActivityBqHours: Double
     public let voiSummaries: [Lu177VOIDoseSummary]
+    public let doseVolumeHistograms: [Lu177DoseVolumeHistogram]
+    public let alignmentQA: [Lu177TimePointAlignmentQA]
+    public let recoveryCorrectionName: String?
     public let warnings: [String]
 }
 
@@ -427,7 +541,20 @@ public enum Lu177DosimetryEngine {
             try validateLabelGrid(reference, labelMap)
         }
 
-        let activities = try sorted.map { try $0.activityConcentrationPixels() }
+        let rawActivities = try sorted.map { try $0.activityConcentrationPixels() }
+        let alignmentQA = try timePointAlignmentQA(
+            timePoints: sorted,
+            warningThresholdMM: options.registrationWarningThresholdMM
+        )
+        let recoveryCorrectionName = options.recoveryCoefficientTable != nil && labelMap != nil
+            ? options.recoveryCoefficientTable?.name
+            : nil
+        let activities = applyRecoveryCorrectionIfNeeded(
+            activities: rawActivities,
+            reference: reference,
+            labelMap: labelMap,
+            table: options.recoveryCoefficientTable
+        )
         let times = sorted.map(\.hoursPostAdministration)
         let tiaPixels = integrateActivityConcentration(
             activities: activities,
@@ -446,7 +573,13 @@ public enum Lu177DosimetryEngine {
             ctVolume: ctVolume,
             labelMap: labelMap,
             options: options,
-            extraWarnings: []
+            extraWarnings: workflowWarnings(
+                alignmentQA: alignmentQA,
+                recoveryTable: options.recoveryCoefficientTable,
+                recoveryApplied: recoveryCorrectionName != nil
+            ),
+            alignmentQA: alignmentQA,
+            recoveryCorrectionName: recoveryCorrectionName
         )
     }
 
@@ -462,7 +595,16 @@ public enum Lu177DosimetryEngine {
         if let labelMap {
             try validateLabelGrid(reference, labelMap)
         }
-        let activity = try timePoint.activityConcentrationPixels()
+        let rawActivity = try timePoint.activityConcentrationPixels()
+        let recoveryCorrectionName = options.recoveryCoefficientTable != nil && labelMap != nil
+            ? options.recoveryCoefficientTable?.name
+            : nil
+        let activity = applyRecoveryCorrectionIfNeeded(
+            activities: [rawActivity],
+            reference: reference,
+            labelMap: labelMap,
+            table: options.recoveryCoefficientTable
+        ).first ?? rawActivity
         let tiaPixels = integrateSingleTimePointActivityConcentration(
             activity: activity,
             timeHours: timePoint.hoursPostAdministration,
@@ -475,6 +617,16 @@ public enum Lu177DosimetryEngine {
             ? "Single-time-point dosimetry uses \(singleTimePointModel.modelName) and extrapolates measured activity back to administration."
             : "Single-time-point dosimetry uses \(singleTimePointModel.modelName) only from the imaging time onward."
 
+        var extraWarnings = [
+            warning,
+            "Single-time-point dosimetry is an approximation; verify the assumed effective half-life against serial imaging or local protocol."
+        ]
+        extraWarnings.append(contentsOf: workflowWarnings(
+            alignmentQA: [],
+            recoveryTable: options.recoveryCoefficientTable,
+            recoveryApplied: recoveryCorrectionName != nil
+        ))
+
         return makeDosimetryResult(
             reference: reference,
             timePointHours: [timePoint.hoursPostAdministration],
@@ -484,10 +636,9 @@ public enum Lu177DosimetryEngine {
             ctVolume: ctVolume,
             labelMap: labelMap,
             options: options,
-            extraWarnings: [
-                warning,
-                "Single-time-point dosimetry is an approximation; verify the assumed effective half-life against serial imaging or local protocol."
-            ]
+            extraWarnings: extraWarnings,
+            alignmentQA: [],
+            recoveryCorrectionName: recoveryCorrectionName
         )
     }
 
@@ -537,7 +688,13 @@ public enum Lu177DosimetryEngine {
             try validateSameGrid(reference, ctVolume, role: "CT density map")
         }
 
-        let activities = try sorted.map { try $0.activityConcentrationPixels() }
+        let rawActivities = try sorted.map { try $0.activityConcentrationPixels() }
+        let activities = applyRecoveryCorrectionIfNeeded(
+            activities: rawActivities,
+            reference: reference,
+            labelMap: labelMap,
+            table: options.recoveryCoefficientTable
+        )
         let times = sorted.map(\.hoursPostAdministration)
         let densityPixels = ctVolume.map {
             $0.pixels.map { options.densityCalibration.densityGPerML(hu: $0) }
@@ -588,6 +745,107 @@ public enum Lu177DosimetryEngine {
                 timeIntegratedActivityBqHours: tia,
                 absorbedDoseGy: dose.isFinite ? dose : 0,
                 warnings: warnings
+            )
+        }
+    }
+
+    public static func timePointAlignmentQA(timePoints: [Lu177DosimetryTimePoint],
+                                            warningThresholdMM: Double = 10) throws -> [Lu177TimePointAlignmentQA] {
+        let sorted = try validateAndSort(timePoints)
+        guard sorted.count > 1 else { return [] }
+        let reference = sorted[0].activityVolume
+        let referenceActivity = try sorted[0].activityConcentrationPixels()
+        let referenceCenter = centerOfMass(activityPixels: referenceActivity, volume: reference)
+        let referenceTotal = referenceActivity.reduce(0) { $0 + Double($1) }
+
+        return try sorted.dropFirst().map { point in
+            try validateSameGrid(reference, point.activityVolume, role: "SPECT time point")
+            let activity = try point.activityConcentrationPixels()
+            let center = centerOfMass(activityPixels: activity, volume: point.activityVolume)
+            let shift = simd_length(center - referenceCenter)
+            let total = activity.reduce(0) { $0 + Double($1) }
+            let ratio = referenceTotal > 0 ? total / referenceTotal : 0
+            let passed = shift <= warningThresholdMM
+            let warning = passed ? nil : "SPECT time point at \(point.hoursPostAdministration) h has activity center-of-mass shift \(String(format: "%.2f", shift)) mm from the reference time point."
+            return Lu177TimePointAlignmentQA(
+                movingTimeHours: point.hoursPostAdministration,
+                centerOfMassShiftMM: shift,
+                totalActivityRatio: ratio,
+                passed: passed,
+                warning: warning
+            )
+        }
+    }
+
+    public static func applyRecoveryCorrection(activities: [[Float]],
+                                               reference: ImageVolume,
+                                               labelMap: LabelMap,
+                                               table: Lu177RecoveryCoefficientTable) -> [[Float]] {
+        applyRecoveryCorrectionIfNeeded(
+            activities: activities,
+            reference: reference,
+            labelMap: labelMap,
+            table: table
+        )
+    }
+
+    public static func doseVolumeHistograms(doseMap: ImageVolume,
+                                            labelMap: LabelMap,
+                                            binWidthGy: Double = 1) -> [Lu177DoseVolumeHistogram] {
+        guard doseMap.width == labelMap.width,
+              doseMap.height == labelMap.height,
+              doseMap.depth == labelMap.depth,
+              binWidthGy > 0,
+              binWidthGy.isFinite else {
+            return []
+        }
+        let classIDs = Set(labelMap.voxels.filter { $0 != 0 })
+        let voxelVolumeML = doseMap.spacing.x * doseMap.spacing.y * doseMap.spacing.z / 1_000
+        return classIDs.sorted().compactMap { classID in
+            let doses = labelMap.voxels.indices
+                .filter { labelMap.voxels[$0] == classID }
+                .map { max(0, Double(doseMap.pixels[$0])) }
+            guard !doses.isEmpty else { return nil }
+
+            let maxDose = doses.max() ?? 0
+            let binCount = max(1, Int(ceil(maxDose / binWidthGy)) + 1)
+            var counts = [Int](repeating: 0, count: binCount)
+            for dose in doses {
+                let binIndex = max(0, min(binCount - 1, Int(floor(dose / binWidthGy))))
+                counts[binIndex] += 1
+            }
+
+            var cumulativeCount = 0
+            var bins = [Lu177DoseVolumeHistogramBin](repeating: Lu177DoseVolumeHistogramBin(
+                lowerDoseGy: 0,
+                upperDoseGy: binWidthGy,
+                voxelCount: 0,
+                volumeML: 0,
+                cumulativeVolumeML: 0
+            ), count: binCount)
+            for index in stride(from: binCount - 1, through: 0, by: -1) {
+                cumulativeCount += counts[index]
+                bins[index] = Lu177DoseVolumeHistogramBin(
+                    lowerDoseGy: Double(index) * binWidthGy,
+                    upperDoseGy: Double(index + 1) * binWidthGy,
+                    voxelCount: counts[index],
+                    volumeML: Double(counts[index]) * voxelVolumeML,
+                    cumulativeVolumeML: Double(cumulativeCount) * voxelVolumeML
+                )
+            }
+
+            let sortedDescending = doses.sorted(by: >)
+            let meanDose = doses.reduce(0, +) / Double(doses.count)
+            return Lu177DoseVolumeHistogram(
+                id: "dvh_\(classID)",
+                labelID: classID,
+                name: labelMap.classInfo(id: classID)?.name ?? "class_\(classID)",
+                totalVolumeML: Double(doses.count) * voxelVolumeML,
+                minDoseGy: doses.min() ?? 0,
+                meanDoseGy: meanDose,
+                maxDoseGy: maxDose,
+                bins: bins,
+                sortedDoseDescendingGy: sortedDescending
             )
         }
     }
@@ -846,7 +1104,9 @@ public enum Lu177DosimetryEngine {
                                             ctVolume: ImageVolume?,
                                             labelMap: LabelMap?,
                                             options: Lu177DosimetryOptions,
-                                            extraWarnings: [String]) -> Lu177DosimetryResult {
+                                            extraWarnings: [String],
+                                            alignmentQA: [Lu177TimePointAlignmentQA],
+                                            recoveryCorrectionName: String?) -> Lu177DosimetryResult {
         let dosePixels = absorbedDosePixels(
             timeIntegratedActivityBqHoursPerML: tiaPixels,
             densityGPerML: densityPixels,
@@ -904,6 +1164,13 @@ public enum Lu177DosimetryEngine {
                 sourceFiles: ct.sourceFiles
             )
         }
+        let histograms = labelMap.map {
+            Lu177DosimetryEngine.doseVolumeHistograms(
+                doseMap: doseVolume,
+                labelMap: $0,
+                binWidthGy: options.doseVolumeHistogramBinWidthGy
+            )
+        } ?? []
 
         var warnings = warningsForWorkflow(
             timePointCount: timePointHours.count,
@@ -933,6 +1200,9 @@ public enum Lu177DosimetryEngine {
                     reference: reference
                 )
             } ?? [],
+            doseVolumeHistograms: histograms,
+            alignmentQA: alignmentQA,
+            recoveryCorrectionName: recoveryCorrectionName,
             warnings: warnings
         )
 
@@ -1113,6 +1383,72 @@ public enum Lu177DosimetryEngine {
             tailModel: .monoExponentialFitWithPhysicalFallback
         )
         return log(2) / lambda
+    }
+
+    private static func applyRecoveryCorrectionIfNeeded(activities: [[Float]],
+                                                        reference: ImageVolume,
+                                                        labelMap: LabelMap?,
+                                                        table: Lu177RecoveryCoefficientTable?) -> [[Float]] {
+        guard let labelMap, let table else { return activities }
+        guard reference.width == labelMap.width,
+              reference.height == labelMap.height,
+              reference.depth == labelMap.depth else {
+            return activities
+        }
+
+        let voxelVolumeML = reference.spacing.x * reference.spacing.y * reference.spacing.z / 1_000
+        let counts = labelMap.voxelCounts()
+        var correctionByClass: [UInt16: Float] = [:]
+        for (classID, voxelCount) in counts {
+            let volumeML = Double(voxelCount) * voxelVolumeML
+            correctionByClass[classID] = Float(table.correctionFactor(forVolumeML: volumeML))
+        }
+
+        return activities.map { activity in
+            var corrected = activity
+            for index in labelMap.voxels.indices {
+                let classID = labelMap.voxels[index]
+                guard classID != 0, let factor = correctionByClass[classID] else { continue }
+                corrected[index] = max(0, activity[index] * factor)
+            }
+            return corrected
+        }
+    }
+
+    private static func centerOfMass(activityPixels: [Float],
+                                     volume: ImageVolume) -> SIMD3<Double> {
+        var weighted = SIMD3<Double>(0, 0, 0)
+        var total = 0.0
+        for index in activityPixels.indices {
+            let activity = max(0, Double(activityPixels[index]))
+            guard activity > 0 else { continue }
+            let coordinate = voxelCoordinate(index: index, reference: volume)
+            let world = volume.worldPoint(z: coordinate.z, y: coordinate.y, x: coordinate.x)
+            weighted += world * activity
+            total += activity
+        }
+        guard total > 0 else {
+            return volume.worldPoint(
+                z: volume.depth / 2,
+                y: volume.height / 2,
+                x: volume.width / 2
+            )
+        }
+        return weighted / total
+    }
+
+    private static func workflowWarnings(alignmentQA: [Lu177TimePointAlignmentQA],
+                                         recoveryTable: Lu177RecoveryCoefficientTable?,
+                                         recoveryApplied: Bool) -> [String] {
+        var warnings = alignmentQA.compactMap(\.warning)
+        if let recoveryTable {
+            if recoveryApplied {
+                warnings.append("Applied SPECT partial-volume/recovery correction using \(recoveryTable.name); verify the recovery table against the local scanner, collimator, reconstruction, and object-size protocol.")
+            } else {
+                warnings.append("Recovery coefficient table \(recoveryTable.name) was configured but not applied because no matching label map was supplied.")
+            }
+        }
+        return warnings
     }
 
     private static func validateAndSort(_ timePoints: [Lu177DosimetryTimePoint]) throws -> [Lu177DosimetryTimePoint] {

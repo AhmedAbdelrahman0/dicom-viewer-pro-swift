@@ -101,6 +101,85 @@ final class Lu177DosimetryTests: XCTestCase {
         )
     }
 
+    func testRecoveryCoefficientCorrectionBoostsSmallVOIActivity() throws {
+        let spect0 = makeVolume(pixels: [1, 1, 5], modality: "NM")
+        let spect1 = makeVolume(pixels: [1, 1, 5], modality: "NM")
+        let labelMap = LabelMap(parentSeriesUID: spect0.seriesUID, depth: 1, height: 1, width: 3)
+        labelMap.classes = [
+            LabelClass(labelID: 1, name: "Small lesion", category: .tumor, color: .yellow)
+        ]
+        labelMap.voxels = [1, 1, 0]
+        let recovery = try Lu177RecoveryCoefficientTable(
+            name: "Local sphere phantom",
+            samples: [
+                try Lu177RecoveryCoefficientSample(volumeML: 1, coefficient: 0.4),
+                try Lu177RecoveryCoefficientSample(volumeML: 2, coefficient: 0.5),
+                try Lu177RecoveryCoefficientSample(volumeML: 10, coefficient: 0.9)
+            ]
+        )
+        let options = try Lu177DosimetryOptions(
+            tailModel: .noTail,
+            recoveryCoefficientTable: recovery
+        )
+
+        let result = try Lu177DosimetryEngine.createAbsorbedDoseMap(
+            timePoints: [
+                try Lu177DosimetryTimePoint(activityVolume: spect0, hoursPostAdministration: 0),
+                try Lu177DosimetryTimePoint(activityVolume: spect1, hoursPostAdministration: 1)
+            ],
+            labelMap: labelMap,
+            options: options
+        )
+
+        XCTAssertEqual(result.report.recoveryCorrectionName, "Local sphere phantom")
+        XCTAssertEqual(result.timeIntegratedActivityMapBqHoursPerML.pixels[0], 2, accuracy: 1e-6)
+        XCTAssertEqual(result.timeIntegratedActivityMapBqHoursPerML.pixels[1], 2, accuracy: 1e-6)
+        XCTAssertEqual(result.timeIntegratedActivityMapBqHoursPerML.pixels[2], 5, accuracy: 1e-6)
+        XCTAssertTrue(result.report.warnings.contains { $0.contains("Applied SPECT partial-volume") })
+    }
+
+    func testTimePointAlignmentQAFlagsShiftedActivityCentroid() throws {
+        let reference = makeVolume(pixels: [10, 0, 0], modality: "NM", spacing: (10, 10, 10))
+        let shifted = makeVolume(pixels: [0, 0, 10], modality: "NM", spacing: (10, 10, 10))
+        let points = [
+            try Lu177DosimetryTimePoint(activityVolume: reference, hoursPostAdministration: 4),
+            try Lu177DosimetryTimePoint(activityVolume: shifted, hoursPostAdministration: 24)
+        ]
+
+        let qa = try Lu177DosimetryEngine.timePointAlignmentQA(
+            timePoints: points,
+            warningThresholdMM: 5
+        )
+
+        XCTAssertEqual(qa.count, 1)
+        XCTAssertEqual(qa[0].centerOfMassShiftMM, 20, accuracy: 1e-8)
+        XCTAssertFalse(qa[0].passed)
+        XCTAssertNotNil(qa[0].warning)
+    }
+
+    func testDoseVolumeHistogramReportsCumulativeDoseMetrics() throws {
+        let doseMap = makeVolume(pixels: [0.5, 1.5, 2.5, 3.5], modality: "DOSE", height: 2, width: 2)
+        let labelMap = LabelMap(parentSeriesUID: doseMap.seriesUID, depth: 1, height: 2, width: 2)
+        labelMap.classes = [
+            LabelClass(labelID: 1, name: "Kidney", category: .organ, color: .red)
+        ]
+        labelMap.voxels = [1, 1, 1, 1]
+
+        let histograms = Lu177DosimetryEngine.doseVolumeHistograms(
+            doseMap: doseMap,
+            labelMap: labelMap,
+            binWidthGy: 1
+        )
+
+        let kidney = try XCTUnwrap(histograms.first)
+        XCTAssertEqual(kidney.name, "Kidney")
+        XCTAssertEqual(kidney.totalVolumeML, 4, accuracy: 1e-8)
+        XCTAssertEqual(kidney.meanDoseGy, 2, accuracy: 1e-8)
+        XCTAssertEqual(kidney.doseCoveringVolume(percent: 50), 2.5, accuracy: 1e-8)
+        XCTAssertEqual(kidney.volumeReceivingDose(atLeast: 2), 2, accuracy: 1e-8)
+        XCTAssertEqual(kidney.bins[2].cumulativeVolumeML, 2, accuracy: 1e-8)
+    }
+
     func testDosimetryCurvesBuildVOITimeActivityAndDoseCurves() throws {
         let spect0 = makeVolume(pixels: [1, 2, 3, 4], modality: "NM", height: 2, width: 2)
         let spect1 = makeVolume(pixels: [0.5, 1, 1.5, 2], modality: "NM", height: 2, width: 2)
