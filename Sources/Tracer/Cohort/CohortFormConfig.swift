@@ -188,6 +188,12 @@ public struct CohortFormConfig: Codable, Hashable, Sendable {
 /// A user-named cohort configuration — wraps a `CohortFormConfig` with an
 /// id, display name, and timestamps. Persisted as a `[CohortPreset]` array
 /// under `UserDefaults["Tracer.Cohort.Presets"]`.
+///
+/// Tracer also defines a small set of **built-in presets** (currently just
+/// `Defaults`) that are loadable but can't be renamed, updated, deleted,
+/// or persisted — they're computed in code so they can't be lost or
+/// shadowed by a user-created preset with the same name. Use `isBuiltIn`
+/// to gate the UI's mutate-actions.
 public struct CohortPreset: Codable, Identifiable, Hashable, Sendable {
     public let id: UUID
     public var name: String
@@ -205,5 +211,39 @@ public struct CohortPreset: Codable, Identifiable, Hashable, Sendable {
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.config = config
+    }
+
+    // MARK: - Built-ins
+
+    /// Stable id for the "Defaults" sentinel preset. Hard-coded UUID so
+    /// it survives across launches without needing persistence and so we
+    /// can recognize it in `isBuiltIn`. Never collides with `UUID()` —
+    /// uniformly random UUIDs land here with probability ~1e-38.
+    public static let defaultsPresetID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+
+    /// Read-only "Defaults" preset surfaced at the top of the picker so
+    /// users can reset to a clean form by name (rather than digging into
+    /// a "New" menu item that mutates state in place). Doesn't get
+    /// persisted; rebuilt in code on every VM init.
+    public static let builtInDefaults = CohortPreset(
+        id: defaultsPresetID,
+        name: "Defaults",
+        createdAt: Date(timeIntervalSince1970: 0),
+        updatedAt: Date(timeIntervalSince1970: 0),
+        config: CohortFormConfig()
+    )
+
+    /// Every built-in preset Tracer ships. Currently one. Surfaced as a
+    /// computed list (not a `let` constant) so views can show / hide them
+    /// per-feature-flag in the future.
+    public static var allBuiltIns: [CohortPreset] {
+        [builtInDefaults]
+    }
+
+    /// True for any preset whose id is known to be a built-in. Drives
+    /// the UI's "hide Update / Rename / Delete" gate and the VM's
+    /// "reject mutation" guards.
+    public var isBuiltIn: Bool {
+        Self.allBuiltIns.contains { $0.id == self.id }
     }
 }

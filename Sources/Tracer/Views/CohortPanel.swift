@@ -121,10 +121,21 @@ public struct CohortPanel: View {
                 .font(.system(size: 11))
 
             Menu {
-                Button {
-                    form.reset()
-                } label: {
-                    Label("New (defaults)", systemImage: "doc.badge.plus")
+                // Built-in presets (currently just "Defaults") at the top
+                // so a user who opens a fresh window can immediately see
+                // a clean starting point by name. These are read-only —
+                // selecting "Defaults" doesn't unlock Update/Rename/Delete.
+                ForEach(form.builtInPresets) { preset in
+                    Button {
+                        form.loadPreset(preset)
+                    } label: {
+                        HStack {
+                            Image(systemName: form.activePresetID == preset.id
+                                  ? "checkmark.circle.fill"
+                                  : "doc.text")
+                            Text(preset.name)
+                        }
+                    }
                 }
                 if !form.presets.isEmpty {
                     Divider()
@@ -169,13 +180,17 @@ public struct CohortPanel: View {
 
             Menu {
                 Button {
-                    pendingPresetName = form.activePresetName ?? form.jobName
+                    pendingPresetName = form.activePresetIsBuiltIn
+                        ? form.jobName        // don't pre-fill with "Defaults"
+                        : (form.activePresetName ?? form.jobName)
                     showingSavePresetSheet = true
                 } label: {
                     Label("Save as new preset…", systemImage: "square.and.arrow.down")
                 }
                 .disabled(!form.hasUserEdits)
 
+                // Update only available for non-built-in active presets
+                // with unsaved divergence.
                 Button {
                     _ = form.updateActivePreset()
                 } label: {
@@ -184,26 +199,33 @@ public struct CohortPanel: View {
                           : "Update active preset",
                           systemImage: "arrow.up.circle")
                 }
-                .disabled(form.activePresetID == nil || !form.hasUnsavedPresetChanges)
+                .disabled(form.activePresetID == nil
+                          || form.activePresetIsBuiltIn
+                          || !form.hasUnsavedPresetChanges)
 
-                if let active = form.presets.first(where: { $0.id == form.activePresetID }) {
+                // Duplicate works for both built-ins and user presets —
+                // built-in dup becomes a regular user preset the user
+                // can then customise.
+                if let active = form.preset(id: form.activePresetID ?? UUID()) {
                     Divider()
-                    Button {
-                        pendingRenameValue = active.name
-                        showingRenameSheet = true
-                    } label: {
-                        Label("Rename…", systemImage: "pencil")
-                    }
                     Button {
                         _ = form.duplicatePreset(active)
                     } label: {
                         Label("Duplicate", systemImage: "plus.square.on.square")
                     }
-                    Divider()
-                    Button(role: .destructive) {
-                        showingDeleteConfirm = true
-                    } label: {
-                        Label("Delete preset", systemImage: "trash")
+                    if !active.isBuiltIn {
+                        Button {
+                            pendingRenameValue = active.name
+                            showingRenameSheet = true
+                        } label: {
+                            Label("Rename…", systemImage: "pencil")
+                        }
+                        Divider()
+                        Button(role: .destructive) {
+                            showingDeleteConfirm = true
+                        } label: {
+                            Label("Delete preset", systemImage: "trash")
+                        }
                     }
                 }
             } label: {

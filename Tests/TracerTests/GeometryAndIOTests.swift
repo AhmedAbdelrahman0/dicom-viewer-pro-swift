@@ -3721,6 +3721,73 @@ final class GeometryAndIOTests: XCTestCase {
     }
 
     @MainActor
+    func testCohortFormVMSurfacesBuiltInDefaultsPreset() {
+        let (vm, defaults, domain) = makeIsolatedFormVM()
+        defer { defaults.removePersistentDomain(forName: domain) }
+        XCTAssertEqual(vm.builtInPresets.count, 1)
+        XCTAssertEqual(vm.builtInPresets[0].id, CohortPreset.defaultsPresetID)
+        XCTAssertTrue(vm.builtInPresets[0].isBuiltIn)
+        // Loading the built-in sets the active id + name; the form
+        // matches the default config; user can edit on top of it.
+        vm.loadPreset(vm.builtInPresets[0])
+        XCTAssertEqual(vm.activePresetID, CohortPreset.defaultsPresetID)
+        XCTAssertEqual(vm.activePresetName, "Defaults")
+        XCTAssertTrue(vm.activePresetIsBuiltIn)
+        XCTAssertFalse(vm.hasUnsavedPresetChanges)
+        vm.jobName = "Edited atop defaults"
+        XCTAssertTrue(vm.hasUnsavedPresetChanges)
+    }
+
+    @MainActor
+    func testCohortFormVMRejectsMutationsToBuiltInPresets() {
+        let (vm, defaults, domain) = makeIsolatedFormVM()
+        defer { defaults.removePersistentDomain(forName: domain) }
+        let defaultsPreset = vm.builtInPresets[0]
+        vm.loadPreset(defaultsPreset)
+        vm.jobName = "Edited"
+
+        // updateActivePreset → no-op when active is built-in
+        XCTAssertNil(vm.updateActivePreset(),
+                     "Built-ins are read-only; update returns nil")
+
+        // renameActivePreset → false when active is built-in
+        XCTAssertFalse(vm.renameActivePreset(to: "My Defaults"),
+                       "Built-ins can't be renamed")
+
+        // deletePreset → no-op
+        let beforeCount = vm.presets.count
+        vm.deletePreset(defaultsPreset)
+        XCTAssertEqual(vm.presets.count, beforeCount,
+                       "Built-ins can't be deleted from user presets")
+        XCTAssertEqual(vm.activePresetID, CohortPreset.defaultsPresetID,
+                       "Active binding stays put after attempted delete")
+    }
+
+    @MainActor
+    func testCohortFormVMRejectsUserPresetNamedDefaults() {
+        let (vm, defaults, domain) = makeIsolatedFormVM()
+        defer { defaults.removePersistentDomain(forName: domain) }
+        // Built-in name collision rejection — user can't shadow "Defaults"
+        // with their own preset called "Defaults" (or "DEFAULTS").
+        XCTAssertNil(vm.saveAsPreset(named: "Defaults"))
+        XCTAssertNil(vm.saveAsPreset(named: "DEFAULTS"))
+        XCTAssertNil(vm.saveAsPreset(named: "  defaults  "))
+        XCTAssertNotNil(vm.saveAsPreset(named: "My Defaults"),
+                        "Distinct name still allowed")
+    }
+
+    @MainActor
+    func testCohortFormVMDuplicateBuiltInProducesEditableUserPreset() {
+        let (vm, defaults, domain) = makeIsolatedFormVM()
+        defer { defaults.removePersistentDomain(forName: domain) }
+        let defaultsPreset = vm.builtInPresets[0]
+        let dup = vm.duplicatePreset(defaultsPreset)
+        XCTAssertEqual(dup.name, "Defaults (copy)")
+        XCTAssertFalse(dup.isBuiltIn)
+        XCTAssertTrue(vm.presets.contains { $0.id == dup.id })
+    }
+
+    @MainActor
     func testCohortFormVMConfigSnapshotMatchesPublishedFields() {
         let (vm, defaults, domain) = makeIsolatedFormVM()
         defer { defaults.removePersistentDomain(forName: domain) }

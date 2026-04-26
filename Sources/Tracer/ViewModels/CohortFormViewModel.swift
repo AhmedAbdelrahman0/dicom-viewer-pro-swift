@@ -53,11 +53,29 @@ public final class CohortFormViewModel: ObservableObject {
 
     @Published public private(set) var presets: [CohortPreset] = []
     /// The preset id the user currently has loaded. `nil` means "untitled
-    /// draft — not associated with any saved preset". Mutates to
-    /// `nil` when the user edits any field that diverges from the loaded
-    /// preset, so the UI can show an "unsaved changes" indicator.
+    /// draft — not associated with any saved preset". For built-in
+    /// presets (e.g. "Defaults") this carries the built-in's stable id;
+    /// the UI gates mutate-actions on `activePresetIsBuiltIn`.
     @Published public private(set) var activePresetID: UUID?
     @Published public private(set) var activePresetName: String?
+
+    /// Tracer's built-in presets (currently just "Defaults"). Always
+    /// rendered above user presets in the picker; can't be renamed,
+    /// updated, deleted, or exported.
+    public let builtInPresets: [CohortPreset] = CohortPreset.allBuiltIns
+
+    /// Convenience for the panel's "hide mutate menu items" gate.
+    public var activePresetIsBuiltIn: Bool {
+        guard let id = activePresetID else { return false }
+        return builtInPresets.contains { $0.id == id }
+    }
+
+    /// Lookup that searches BOTH built-ins and user presets — the picker
+    /// loads via id, and we don't want it to silently miss a built-in.
+    public func preset(id: UUID) -> CohortPreset? {
+        if let built = builtInPresets.first(where: { $0.id == id }) { return built }
+        return presets.first { $0.id == id }
+    }
 
     // MARK: - Internals
 
@@ -149,10 +167,12 @@ public final class CohortFormViewModel: ObservableObject {
     }
 
     /// True when we have a loaded preset AND the form has diverged from
-    /// it. Drives the "modified" dot next to the preset name.
+    /// it. Drives the "modified" dot next to the preset name. For
+    /// built-in presets, "diverged" still flips to `true` (the user is
+    /// editing the form on top of the built-in baseline) but the panel
+    /// won't offer "Update preset" for built-ins — they're read-only.
     public var hasUnsavedPresetChanges: Bool {
-        guard let id = activePresetID,
-              let preset = presets.first(where: { $0.id == id }) else {
+        guard let id = activePresetID, let preset = preset(id: id) else {
             return false
         }
         return preset.config != config
@@ -202,7 +222,9 @@ public final class CohortFormViewModel: ObservableObject {
 
     /// Reset the form to the defaults from `CohortFormConfig.init()`.
     /// Clears the active preset binding so the next save creates a new
-    /// preset rather than overwriting one.
+    /// preset rather than overwriting one. Users who want to LOAD the
+    /// "Defaults" built-in preset (so the picker shows its name) should
+    /// call `loadPreset(CohortPreset.builtInDefaults)` instead.
     public func reset() {
         apply(CohortFormConfig())
         activePresetID = nil
@@ -212,18 +234,17 @@ public final class CohortFormViewModel: ObservableObject {
     // MARK: - Preset CRUD
 
     /// Save the current form as a new preset under `name`. `name` is
-    /// trimmed; empty names are rejected. Returns the saved preset on
-    /// success so callers can highlight it.
+    /// trimmed; empty names + collisions with built-in or user preset
+    /// names are rejected. Returns the saved preset on success so
+    /// callers can highlight it.
     @discardableResult
     public func saveAsPreset(named rawName: String) -> CohortPreset? {
         let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return nil }
-        // Disallow exact-name collisions — caller should call `update`
-        // on the existing preset instead. UI presents this as "Update"
-        // when the active preset matches the typed name.
-        if presets.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
-            return nil
-        }
+        // Reject collisions with both user presets AND built-ins so
+        // users can't shadow the "Defaults" preset by saving one called
+        // "Defaults".
+        if anyPresetMatches(name: name, excluding: nil) { return nil }
         let preset = CohortPreset(
             name: name,
             createdAt: now(),
@@ -239,10 +260,13 @@ public final class CohortFormViewModel: ObservableObject {
     }
 
     /// Overwrite the active preset with the current form. No-op if no
-    /// preset is loaded (caller should disable the menu item then).
+    /// preset is loaded OR if the active preset is a built-in
+    /// (built-ins are read-only by design). Caller should disable the
+    /// menu item via `activePresetIsBuiltIn`.
     @discardableResult
     public func updateActivePreset() -> CohortPreset? {
         guard let id = activePresetID,
+              !activePresetIsBuiltIn,
               let idx = presets.firstIndex(where: { $0.id == id }) else {
             return nil
         }
@@ -258,7 +282,12 @@ public final class CohortFormViewModel: ObservableObject {
         activePresetName = preset.name
     }
 
+    /// Delete a user preset. No-op for built-in presets — they aren't
+    /// in the `presets` array anyway, but the `activePresetID` could
+    /// still point at one, so we guard against clearing the binding for
+    /// a built-in delete attempt.
     public func deletePreset(_ preset: CohortPreset) {
+        if preset.isBuiltIn { return }
         presets.removeAll { $0.id == preset.id }
         savePresets()
         if activePresetID == preset.id {
@@ -267,14 +296,15 @@ public final class CohortFormViewModel: ObservableObject {
         }
     }
 
-    /// Make a copy of `preset` with `(copy)` appended to the name. Useful
-    /// when the user wants to start from an existing config and tweak.
+    /// Make a copy of `preset` with `(copy)` appended to the name. Works
+    /// on built-in presets too — the resulting copy is a regular user
+    /// preset (mutable, persistent).
     @discardableResult
     public func duplicatePreset(_ preset: CohortPreset) -> CohortPreset {
         let baseName = preset.name + " (copy)"
         var name = baseName
         var counter = 2
-        while presets.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+        while anyPresetMatches(name: name, excluding: nil) {
             name = "\(baseName) \(counter)"
             counter += 1
         }
@@ -290,21 +320,20 @@ public final class CohortFormViewModel: ObservableObject {
         return dup
     }
 
-    /// Rename the active preset. Returns true on success, false on empty
-    /// or duplicate names. Updates the activePresetName mirror so the
-    /// preset bar refreshes.
+    /// Rename the active preset. Returns false on empty / duplicate
+    /// names OR if the active preset is a built-in (built-ins are
+    /// read-only by design — the UI should hide the rename action).
     @discardableResult
     public func renameActivePreset(to rawName: String) -> Bool {
         let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty,
+              !activePresetIsBuiltIn,
               let id = activePresetID,
               let idx = presets.firstIndex(where: { $0.id == id }) else {
             return false
         }
-        // Reject if some OTHER preset already owns this name.
-        if presets.contains(where: {
-            $0.id != id && $0.name.caseInsensitiveCompare(name) == .orderedSame
-        }) {
+        // Reject if some OTHER preset (user or built-in) owns this name.
+        if anyPresetMatches(name: name, excluding: id) {
             return false
         }
         presets[idx].name = name
@@ -313,6 +342,17 @@ public final class CohortFormViewModel: ObservableObject {
         savePresets()
         activePresetName = name
         return true
+    }
+
+    /// Helper: case-insensitive name collision against BOTH built-in
+    /// and user presets. `excluding` skips a specific preset id (used
+    /// during rename to allow no-op renames like "beta" → "Beta").
+    private func anyPresetMatches(name: String, excluding skipID: UUID?) -> Bool {
+        let combined = builtInPresets + presets
+        return combined.contains { preset in
+            preset.id != skipID
+                && preset.name.caseInsensitiveCompare(name) == .orderedSame
+        }
     }
 
     // MARK: - Persistence — draft
