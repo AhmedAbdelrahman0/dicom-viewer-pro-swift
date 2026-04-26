@@ -52,9 +52,11 @@ public final class NNUnetViewModel: ObservableObject {
 
     private let subprocessRunner = NNUnetRunner()
     private let coreMLRunner = NNUnetCoreMLRunner()
+    private let modelStore: TracerModelStore
     private var remoteRunner: RemoteNNUnetRunner?
 
-    public init() {
+    public init(modelStore: TracerModelStore? = nil) {
+        self.modelStore = modelStore ?? TracerModelStore.shared
         // Adopt Settings defaults for the binary path and the $nnUNet_results
         // directory. These can still be overridden in the panel per-session.
         let defaults = UserDefaults.standard
@@ -92,9 +94,31 @@ public final class NNUnetViewModel: ObservableObject {
     }
 
     public var isSubprocessAvailable: Bool {
-        NNUnetRunner.locatePredictBinary(override:
-            customBinaryPath.isEmpty ? nil : customBinaryPath
+        let binaryName: String
+        if let entry = selectedEntry,
+           boundExternalNNUnetModel(for: entry) != nil {
+            binaryName = "nnUNetv2_predict_from_modelfolder"
+        } else {
+            binaryName = "nnUNetv2_predict"
+        }
+        return NNUnetRunner.locatePredictBinary(override:
+            customBinaryPath.isEmpty ? nil : customBinaryPath,
+            binaryName: binaryName
         ) != nil
+    }
+
+    public func boundExternalNNUnetModel(for entry: NNUnetCatalog.Entry) -> TracerModel? {
+        var candidates = modelStore.models(boundTo: entry.id)
+        candidates.append(contentsOf: modelStore.models(boundTo: entry.datasetID))
+        var seen = Set<String>()
+        return candidates.first { model in
+            guard seen.insert(model.id).inserted,
+                  model.kind == .nnunetDataset,
+                  model.existsLocally else {
+                return false
+            }
+            return (try? NNUnetModelInspector.inspect(URL(fileURLWithPath: model.localPath))) != nil
+        }
     }
 
     public var coreMLReadinessMessage: String? {
@@ -165,7 +189,9 @@ public final class NNUnetViewModel: ObservableObject {
     @discardableResult
     public func run(on volume: ImageVolume,
                     auxiliaryChannels: [ImageVolume] = [],
-                    labeling: LabelingViewModel) async -> LabelMap? {
+                    labeling: LabelingViewModel,
+                    useFullEnsembleOverride: Bool? = nil,
+                    disableTTAOverride: Bool? = nil) async -> LabelMap? {
         guard let entry = selectedEntry else {
             statusMessage = "Pick a model first."
             return nil
@@ -186,13 +212,17 @@ public final class NNUnetViewModel: ObservableObject {
         defer { isRunning = false }
 
         let start = Date()
+        let useFullEnsemble = useFullEnsembleOverride ?? self.useFullEnsemble
+        let disableTTA = disableTTAOverride ?? self.disableTTA
         switch mode {
         case .subprocess:
             return await runSubprocess(entry: entry,
                                        volume: volume,
                                        auxiliaryChannels: auxiliaryChannels,
                                        labeling: labeling,
-                                       start: start)
+                                       start: start,
+                                       useFullEnsemble: useFullEnsemble,
+                                       disableTTA: disableTTA)
         case .coreML:
             if !auxiliaryChannels.isEmpty {
                 statusMessage = "CoreML path is single-channel only; use the subprocess runner for multi-channel models."
@@ -204,7 +234,9 @@ public final class NNUnetViewModel: ObservableObject {
                                       volume: volume,
                                       auxiliaryChannels: auxiliaryChannels,
                                       labeling: labeling,
-                                      start: start)
+                                      start: start,
+                                      useFullEnsemble: useFullEnsemble,
+                                      disableTTA: disableTTA)
         }
     }
 
@@ -216,7 +248,9 @@ public final class NNUnetViewModel: ObservableObject {
                               volume: ImageVolume,
                               auxiliaryChannels: [ImageVolume],
                               labeling: LabelingViewModel,
-                              start: Date) async -> LabelMap? {
+                              start: Date,
+                              useFullEnsemble: Bool,
+                              disableTTA: Bool) async -> LabelMap? {
         if let msg = dgxReadinessMessage {
             statusMessage = msg
             return nil
@@ -272,28 +306,46 @@ public final class NNUnetViewModel: ObservableObject {
                                volume: ImageVolume,
                                auxiliaryChannels: [ImageVolume],
                                labeling: LabelingViewModel,
-                               start: Date) async -> LabelMap? {
+                               start: Date,
+                               useFullEnsemble: Bool,
+                               disableTTA: Bool) async -> LabelMap? {
+        var modelArtifact: NNUnetModelInspector.Artifact?
+        if let model = boundExternalNNUnetModel(for: entry) {
+            modelArtifact = try? NNUnetModelInspector.inspect(URL(fileURLWithPath: model.localPath))
+        }
+
+        let availableFolds = modelArtifact?.folds ?? entry.folds
+        var additionalEnvironment: [String: String] = [:]
+        if let bundledPythonRoot = modelArtifact?.bundledPythonRoot {
+            additionalEnvironment["PYTHONPATH"] = bundledPythonRoot.path
+        }
+
         let cfg = NNUnetRunner.Configuration(
             predictBinaryPath: customBinaryPath.isEmpty ? nil : customBinaryPath,
-            resultsDir: resultsDirPath.isEmpty
+            resultsDir: modelArtifact?.resultsDirectory ?? (resultsDirPath.isEmpty
                 ? nil
-                : URL(fileURLWithPath: (resultsDirPath as NSString).expandingTildeInPath),
-            configuration: entry.configuration,
-            folds: useFullEnsemble
-                ? ["0", "1", "2", "3", "4"]
-                : entry.folds,
+                : URL(fileURLWithPath: (resultsDirPath as NSString).expandingTildeInPath)),
+            modelFolder: modelArtifact?.modelFolder,
+            additionalEnvironment: additionalEnvironment,
+            configuration: modelArtifact?.configuration ?? entry.configuration,
+            folds: resolvedFolds(useFullEnsemble: useFullEnsemble,
+                                 entryFolds: entry.folds,
+                                 availableFolds: availableFolds),
             disableTestTimeAugmentation: disableTTA
         )
         subprocessRunner.update(configuration: cfg)
 
         guard subprocessRunner.isAvailable() else {
-            statusMessage = "nnUNetv2_predict not found. Set a custom path or install nnunetv2."
+            statusMessage = cfg.modelFolder == nil
+                ? "nnUNetv2_predict not found. Set a custom path or install nnunetv2."
+                : "nnUNetv2_predict_from_modelfolder not found. Set a custom path or install nnunetv2 in the same environment."
             return nil
         }
 
+        let runName = modelArtifact?.displayName ?? entry.datasetID
         statusMessage = auxiliaryChannels.isEmpty
-            ? "Running \(entry.datasetID)…"
-            : "Running \(entry.datasetID) with \(auxiliaryChannels.count + 1) channels…"
+            ? "Running \(runName)…"
+            : "Running \(runName) with \(auxiliaryChannels.count + 1) channels…"
         do {
             // Primary volume becomes channel 0; auxiliaries fill 1..n in order.
             let channels = [volume] + auxiliaryChannels
@@ -315,7 +367,8 @@ public final class NNUnetViewModel: ObservableObject {
                 labeling.activeClassID = first.labelID
             }
             let elapsed = String(format: "%.1f", result.durationSeconds)
-            statusMessage = "✓ \(entry.displayName) finished in \(elapsed)s · \(result.labelMap.classes.count) classes"
+            let source = modelArtifact == nil ? "" : " · external model"
+            statusMessage = "✓ \(entry.displayName)\(source) finished in \(elapsed)s · \(result.labelMap.classes.count) classes"
             return result.labelMap
         } catch let err as NNUnetRunner.RunError {
             statusMessage = err.localizedDescription
@@ -388,5 +441,20 @@ public final class NNUnetViewModel: ObservableObject {
                 labelMap.classes[idx].name = name
             }
         }
+    }
+
+    private func resolvedFolds(useFullEnsemble: Bool,
+                               entryFolds: [String],
+                               availableFolds: [String]) -> [String] {
+        guard !availableFolds.isEmpty else {
+            return useFullEnsemble ? ["0", "1", "2", "3", "4"] : entryFolds
+        }
+        if useFullEnsemble {
+            return availableFolds
+        }
+        if let first = entryFolds.first(where: { availableFolds.contains($0) }) {
+            return [first]
+        }
+        return [availableFolds[0]]
     }
 }

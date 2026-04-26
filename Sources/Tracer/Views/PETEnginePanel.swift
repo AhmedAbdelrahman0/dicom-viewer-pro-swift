@@ -119,10 +119,46 @@ public struct PETEnginePanel: View {
             .pickerStyle(.menu)
             .labelsHidden()
 
+            Picker("Profile", selection: $pet.segmentationProfile) {
+                ForEach(PETEngineViewModel.SegmentationProfile.allCases) { profile in
+                    Label(profile.displayName, systemImage: profile.systemImage)
+                        .tag(profile)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            if pet.segmentationProfile.applySUVAttention {
+                HStack {
+                    Text("SUV floor")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                    Slider(value: $pet.suvAttentionThreshold, in: 0...20, step: 0.1)
+                    Text(String(format: "%.1f", pet.suvAttentionThreshold))
+                        .font(.system(size: 10, design: .monospaced))
+                        .frame(width: 34, alignment: .trailing)
+                }
+                HStack {
+                    Text("Min mL")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                    Slider(value: $pet.minimumLesionVolumeML, in: 0...10, step: 0.1)
+                    Text(String(format: "%.1f", pet.minimumLesionVolumeML))
+                        .font(.system(size: 10, design: .monospaced))
+                        .frame(width: 34, alignment: .trailing)
+                }
+            }
+
             if let entry = catalogEntry(for: pet.selectedEngine) {
                 Text("Model: \(entry.displayName) · \(entry.datasetID)")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.secondary)
+                if let model = nnunet.boundExternalNNUnetModel(for: entry) {
+                    Label("External: \(model.displayName)",
+                          systemImage: "link")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
                 if entry.id == "LesionLocator-AutoPETIV" {
                     Label("Experimental — weights from AutoPET IV are still rolling out.",
                           systemImage: "exclamationmark.triangle.fill")

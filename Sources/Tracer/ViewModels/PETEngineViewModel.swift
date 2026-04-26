@@ -72,9 +72,57 @@ public final class PETEngineViewModel: ObservableObject {
         }
     }
 
+    public enum SegmentationProfile: String, CaseIterable, Identifiable, Sendable {
+        case fast
+        case accurate
+        case maxSensitivity
+
+        public var id: String { rawValue }
+
+        public var displayName: String {
+            switch self {
+            case .fast: return "Fast"
+            case .accurate: return "Accurate"
+            case .maxSensitivity: return "Max sensitivity"
+            }
+        }
+
+        public var systemImage: String {
+            switch self {
+            case .fast: return "bolt.fill"
+            case .accurate: return "target"
+            case .maxSensitivity: return "scope"
+            }
+        }
+
+        public var useFullEnsemble: Bool {
+            switch self {
+            case .fast, .accurate: return false
+            case .maxSensitivity: return true
+            }
+        }
+
+        public var disableTTA: Bool {
+            switch self {
+            case .fast: return true
+            case .accurate, .maxSensitivity: return false
+            }
+        }
+
+        public var applySUVAttention: Bool {
+            switch self {
+            case .fast: return false
+            case .accurate, .maxSensitivity: return true
+            }
+        }
+    }
+
     // MARK: - Published state
 
     @Published public var selectedEngine: Engine = .autoPETII
+    @Published public var segmentationProfile: SegmentationProfile = .fast
+    @Published public var suvAttentionThreshold: Double = 2.5
+    @Published public var minimumLesionVolumeML: Double = 0.5
     @Published public var auxiliaryVolumeID: String?
     @Published public var medSAMModelPath: String = ""
     @Published public var medSAMBoxString: String = ""  // "x,y,w,h" on the current slice
@@ -169,13 +217,34 @@ public final class PETEngineViewModel: ObservableObject {
         guard let labelMap = await nnunet.run(
             on: modelChannel0,
             auxiliaryChannels: modelRestChannels,
-            labeling: labeling
+            labeling: labeling,
+            useFullEnsembleOverride: segmentationProfile.useFullEnsemble,
+            disableTTAOverride: segmentationProfile.disableTTA
         ) else {
             statusMessage = nnunet.statusMessage
             return statusMessage
         }
 
-        statusMessage = "✓ \(entry.displayName): \(labelMap.classes.count) classes produced."
+        var postprocessSummary = ""
+        if segmentationProfile.applySUVAttention,
+           let petSUVChannel = ([modelChannel0] + modelRestChannels).first(where: {
+               Modality.normalize($0.modality) == .PT
+           }) {
+            do {
+                let result = try PETLesionPostprocessor.filterComponentsBySUV(
+                    labelMap: labelMap,
+                    petSUVVolume: petSUVChannel,
+                    classID: 1,
+                    minimumSUV: suvAttentionThreshold,
+                    minimumVolumeML: minimumLesionVolumeML
+                )
+                postprocessSummary = " · SUV attention kept \(result.keptComponents), removed \(result.removedComponents)"
+            } catch {
+                postprocessSummary = " · SUV attention skipped: \(error.localizedDescription)"
+            }
+        }
+
+        statusMessage = "✓ \(entry.displayName): \(labelMap.classes.count) classes produced\(postprocessSummary)."
         return statusMessage
     }
 
