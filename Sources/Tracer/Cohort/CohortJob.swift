@@ -87,6 +87,37 @@ public struct CohortJob: Codable, Hashable, Sendable {
     /// Empty = accept every study in the worklist.
     public var modalityAllowList: [String]
 
+    // MARK: - Optional PET attenuation correction step
+
+    /// `PETACCatalog` entry id to apply to each NAC PET before
+    /// segmentation/classification. `nil` = skip AC entirely (the
+    /// majority case — most cohorts already have CT-AC PET).
+    public var petACEntryID: String?
+    /// Local path (or remote-DGX path) to the AC script. Mirrors
+    /// `PETACViewModel.scriptPath`.
+    public var petACScriptPath: String
+    /// Python interpreter for subprocess AC. `/usr/bin/env` is the
+    /// default — Tracer prepends `python3` automatically.
+    public var petACPythonExecutable: String
+    /// `KEY=VALUE` lines exported into the subprocess env (or, for the
+    /// DGX backend, the first `activate=…` line is run before the script).
+    public var petACEnvironment: String
+    /// Extra script arguments appended after the script path, before
+    /// `--input` / `--output`.
+    public var petACExtraArgs: String
+    /// Per-study AC timeout. Generous default — cold-start torch + load
+    /// can take 30s; a single 192³ inference adds 5–60s.
+    public var petACTimeoutSeconds: Double
+    /// Whether to feed an anatomical (CT/MR) channel to the AC model.
+    /// Forced on for entries whose `requiresAnatomicalChannel` is true.
+    public var petACUseAnatomicalChannel: Bool
+    /// **Critical UX toggle.** When `true`, an AC failure on a study is
+    /// logged but the study still proceeds to segmentation/classification
+    /// using the original NAC PET. When `false`, the study is marked
+    /// `failedAttenuationCorrection` and skipped — no segmentation,
+    /// no classification. Default: `true` (keep moving on cohorts).
+    public var petACFallbackToNACOnFailure: Bool
+
     public init(id: String = UUID().uuidString,
                 name: String = "Cohort run",
                 outputRoot: URL,
@@ -107,7 +138,15 @@ public struct CohortJob: Codable, Hashable, Sendable {
                 classifyClassIDs: [UInt16] = [],
                 maxConcurrent: Int = 2,
                 skipIfResultsExist: Bool = true,
-                modalityAllowList: [String] = []) {
+                modalityAllowList: [String] = [],
+                petACEntryID: String? = nil,
+                petACScriptPath: String = "",
+                petACPythonExecutable: String = "/usr/bin/env",
+                petACEnvironment: String = "",
+                petACExtraArgs: String = "",
+                petACTimeoutSeconds: Double = 600,
+                petACUseAnatomicalChannel: Bool = false,
+                petACFallbackToNACOnFailure: Bool = true) {
         self.id = id
         self.name = name
         self.outputRoot = outputRoot
@@ -129,6 +168,64 @@ public struct CohortJob: Codable, Hashable, Sendable {
         self.maxConcurrent = maxConcurrent
         self.skipIfResultsExist = skipIfResultsExist
         self.modalityAllowList = modalityAllowList
+        self.petACEntryID = petACEntryID
+        self.petACScriptPath = petACScriptPath
+        self.petACPythonExecutable = petACPythonExecutable
+        self.petACEnvironment = petACEnvironment
+        self.petACExtraArgs = petACExtraArgs
+        self.petACTimeoutSeconds = petACTimeoutSeconds
+        self.petACUseAnatomicalChannel = petACUseAnatomicalChannel
+        self.petACFallbackToNACOnFailure = petACFallbackToNACOnFailure
+    }
+
+    // MARK: - Backward-compatible decoding
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, outputRoot
+        case nnunetEntryID, segmentationMode, useFullEnsemble, disableTTA
+        case classifierEntryID, classifierModelPath, classifierBinaryPath
+        case classifierProjectorPath, classifierEnvironment
+        case zeroShotPrompts, zeroShotLabels, zeroShotTokenIDs, candidateLabels
+        case runClassifierOnDGX, classifyClassIDs
+        case maxConcurrent, skipIfResultsExist, modalityAllowList
+        case petACEntryID, petACScriptPath, petACPythonExecutable
+        case petACEnvironment, petACExtraArgs, petACTimeoutSeconds
+        case petACUseAnatomicalChannel, petACFallbackToNACOnFailure
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        // Old (pre-AC) checkpoints don't have the `petAC…` keys; default
+        // them so resuming a pre-AC cohort still works.
+        self.id = try c.decode(String.self, forKey: .id)
+        self.name = try c.decode(String.self, forKey: .name)
+        self.outputRoot = try c.decode(URL.self, forKey: .outputRoot)
+        self.nnunetEntryID = try c.decodeIfPresent(String.self, forKey: .nnunetEntryID)
+        self.segmentationMode = try c.decodeIfPresent(SegmentationMode.self, forKey: .segmentationMode) ?? .subprocess
+        self.useFullEnsemble = try c.decodeIfPresent(Bool.self, forKey: .useFullEnsemble) ?? false
+        self.disableTTA = try c.decodeIfPresent(Bool.self, forKey: .disableTTA) ?? true
+        self.classifierEntryID = try c.decodeIfPresent(String.self, forKey: .classifierEntryID)
+        self.classifierModelPath = try c.decodeIfPresent(String.self, forKey: .classifierModelPath) ?? ""
+        self.classifierBinaryPath = try c.decodeIfPresent(String.self, forKey: .classifierBinaryPath) ?? ""
+        self.classifierProjectorPath = try c.decodeIfPresent(String.self, forKey: .classifierProjectorPath) ?? ""
+        self.classifierEnvironment = try c.decodeIfPresent(String.self, forKey: .classifierEnvironment) ?? ""
+        self.zeroShotPrompts = try c.decodeIfPresent(String.self, forKey: .zeroShotPrompts) ?? ""
+        self.zeroShotLabels = try c.decodeIfPresent(String.self, forKey: .zeroShotLabels) ?? ""
+        self.zeroShotTokenIDs = try c.decodeIfPresent(String.self, forKey: .zeroShotTokenIDs) ?? ""
+        self.candidateLabels = try c.decodeIfPresent(String.self, forKey: .candidateLabels) ?? ""
+        self.runClassifierOnDGX = try c.decodeIfPresent(Bool.self, forKey: .runClassifierOnDGX) ?? false
+        self.classifyClassIDs = try c.decodeIfPresent([UInt16].self, forKey: .classifyClassIDs) ?? []
+        self.maxConcurrent = try c.decodeIfPresent(Int.self, forKey: .maxConcurrent) ?? 2
+        self.skipIfResultsExist = try c.decodeIfPresent(Bool.self, forKey: .skipIfResultsExist) ?? true
+        self.modalityAllowList = try c.decodeIfPresent([String].self, forKey: .modalityAllowList) ?? []
+        self.petACEntryID = try c.decodeIfPresent(String.self, forKey: .petACEntryID)
+        self.petACScriptPath = try c.decodeIfPresent(String.self, forKey: .petACScriptPath) ?? ""
+        self.petACPythonExecutable = try c.decodeIfPresent(String.self, forKey: .petACPythonExecutable) ?? "/usr/bin/env"
+        self.petACEnvironment = try c.decodeIfPresent(String.self, forKey: .petACEnvironment) ?? ""
+        self.petACExtraArgs = try c.decodeIfPresent(String.self, forKey: .petACExtraArgs) ?? ""
+        self.petACTimeoutSeconds = try c.decodeIfPresent(Double.self, forKey: .petACTimeoutSeconds) ?? 600
+        self.petACUseAnatomicalChannel = try c.decodeIfPresent(Bool.self, forKey: .petACUseAnatomicalChannel) ?? false
+        self.petACFallbackToNACOnFailure = try c.decodeIfPresent(Bool.self, forKey: .petACFallbackToNACOnFailure) ?? true
     }
 
     /// Stable path for the checkpoint file. Co-located with the results so

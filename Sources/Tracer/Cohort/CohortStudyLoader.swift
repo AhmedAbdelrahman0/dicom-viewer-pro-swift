@@ -46,6 +46,31 @@ enum CohortStudyLoader {
             guard case .petSUV = entry.preprocessing else { return channels }
             return channels.map(CohortStudyLoader.makePETSUVVolume)
         }
+
+        /// Returns a new `LoadedStudy` with the PET channel replaced by the
+        /// supplied AC PET. Used by the cohort AC step to swap the corrected
+        /// PET into the load set so downstream segmentation + quantification
+        /// + classification all see the AC values.
+        ///
+        /// Channel placement:
+        ///   • If the primary is PET (PET-only studies) → replace primary
+        ///   • Else → replace the first auxiliary PET (PET/CT case where
+        ///     CT is primary and PET is auxiliary[0])
+        ///   • If no PET channel is found at all (defensive — caller should
+        ///     have validated before calling AC) → return self unchanged.
+        func replacingPET(with acVolume: ImageVolume) -> LoadedStudy {
+            if Modality.normalize(primary.modality) == .PT {
+                return LoadedStudy(primary: acVolume, auxiliary: auxiliary)
+            }
+            if let petIdx = auxiliary.firstIndex(where: {
+                Modality.normalize($0.modality) == .PT
+            }) {
+                var newAux = auxiliary
+                newAux[petIdx] = acVolume
+                return LoadedStudy(primary: primary, auxiliary: newAux)
+            }
+            return self
+        }
     }
 
     enum LoadError: Swift.Error, LocalizedError {
