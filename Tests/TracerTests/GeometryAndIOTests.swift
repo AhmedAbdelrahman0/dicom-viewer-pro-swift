@@ -3887,6 +3887,66 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(s.statusMessage, "Nothing imported.")
     }
 
+    // MARK: - Cohort preset display metadata
+
+    func testCohortPresetRelativeUpdatedAtIsNilForBuiltIns() {
+        let builtIn = CohortPreset.builtInDefaults
+        XCTAssertTrue(builtIn.isBuiltIn)
+        XCTAssertNil(builtIn.relativeUpdatedAtDescription(),
+                     "Built-ins must not surface a fake '55 years ago' date")
+    }
+
+    func testCohortPresetRelativeUpdatedAtFormatsRecentEdit() {
+        let now = Date()
+        let preset = CohortPreset(
+            name: "Tweaked",
+            createdAt: now.addingTimeInterval(-7200),
+            updatedAt: now.addingTimeInterval(-3600),
+            config: CohortFormConfig()
+        )
+        let label = preset.relativeUpdatedAtDescription(now: now)
+        XCTAssertNotNil(label)
+        // Don't pin exact wording (locale-dependent) — just sanity-check
+        // that the formatter ran and produced something non-empty.
+        XCTAssertFalse(label?.isEmpty ?? true)
+    }
+
+    func testCohortPresetTooltipCollapsesNeverEditedToCreatedOnly() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let preset = CohortPreset(
+            name: "Fresh",
+            createdAt: now,
+            updatedAt: now,
+            config: CohortFormConfig()
+        )
+        let tooltip = preset.tooltipDescription(now: now)
+        XCTAssertTrue(tooltip.hasPrefix("Created"),
+                      "Never-edited preset should show only the created date")
+        XCTAssertFalse(tooltip.contains("Last edited"),
+                       "No 'Last edited' line when createdAt == updatedAt")
+    }
+
+    func testCohortPresetTooltipShowsBothDatesWhenEdited() {
+        let created = Date(timeIntervalSince1970: 1_700_000_000)
+        let edited = created.addingTimeInterval(86_400)   // 1 day later
+        let preset = CohortPreset(
+            name: "Edited",
+            createdAt: created,
+            updatedAt: edited,
+            config: CohortFormConfig()
+        )
+        let tooltip = preset.tooltipDescription(now: edited.addingTimeInterval(60))
+        XCTAssertTrue(tooltip.contains("Created"))
+        XCTAssertTrue(tooltip.contains("Last edited"),
+                      "Edited preset surfaces both timestamps")
+    }
+
+    func testCohortPresetTooltipForBuiltInIsStable() {
+        let tooltip = CohortPreset.builtInDefaults.tooltipDescription()
+        XCTAssertTrue(tooltip.contains("Defaults"))
+        XCTAssertTrue(tooltip.contains("read-only"))
+    }
+
     @MainActor
     func testCohortFormVMSurfacesBuiltInDefaultsPreset() {
         let (vm, defaults, domain) = makeIsolatedFormVM()

@@ -126,30 +126,12 @@ public struct CohortPanel: View {
                 // a clean starting point by name. These are read-only —
                 // selecting "Defaults" doesn't unlock Update/Rename/Delete.
                 ForEach(form.builtInPresets) { preset in
-                    Button {
-                        form.loadPreset(preset)
-                    } label: {
-                        HStack {
-                            Image(systemName: form.activePresetID == preset.id
-                                  ? "checkmark.circle.fill"
-                                  : "doc.text")
-                            Text(preset.name)
-                        }
-                    }
+                    presetMenuButton(preset)
                 }
                 if !form.presets.isEmpty {
                     Divider()
                     ForEach(form.presets) { preset in
-                        Button {
-                            form.loadPreset(preset)
-                        } label: {
-                            HStack {
-                                Image(systemName: form.activePresetID == preset.id
-                                      ? "checkmark.circle.fill"
-                                      : "circle")
-                                Text(preset.name)
-                            }
-                        }
+                        presetMenuButton(preset)
                     }
                 }
             } label: {
@@ -271,6 +253,39 @@ public struct CohortPanel: View {
         if let name = form.activePresetName { return name }
         if form.presets.isEmpty { return "Untitled (no presets yet)" }
         return "Untitled draft"
+    }
+
+    /// One menu row in the load picker. Shows the preset name (with the
+    /// active checkmark or a category icon) and, when not a built-in,
+    /// surfaces the relative-updated-at as a secondary line so users
+    /// can spot "the one I tweaked yesterday" in a long preset list.
+    /// Hover tooltip carries the full date breadcrumb.
+    @ViewBuilder
+    private func presetMenuButton(_ preset: CohortPreset) -> some View {
+        Button {
+            form.loadPreset(preset)
+        } label: {
+            // SwiftUI menus on macOS can render multi-line button content
+            // — VStack-with-secondary-text shows up cleanly; the menu
+            // resizes to fit the longest line.
+            HStack(spacing: 6) {
+                Image(systemName: leadingIconName(for: preset))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(preset.name)
+                    if let relative = preset.relativeUpdatedAtDescription() {
+                        Text(relative)
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+        }
+        .help(preset.tooltipDescription())
+    }
+
+    private func leadingIconName(for preset: CohortPreset) -> String {
+        if form.activePresetID == preset.id { return "checkmark.circle.fill" }
+        return preset.isBuiltIn ? "doc.text" : "circle"
     }
 
     // MARK: - Form

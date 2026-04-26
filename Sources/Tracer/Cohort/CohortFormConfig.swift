@@ -246,4 +246,37 @@ public struct CohortPreset: Codable, Identifiable, Hashable, Sendable {
     public var isBuiltIn: Bool {
         Self.allBuiltIns.contains { $0.id == self.id }
     }
+
+    // MARK: - Display helpers
+
+    /// "2 days ago" / "now" / "3 minutes ago" — used as the subtitle in
+    /// the picker so users can spot "the one I tweaked yesterday" at a
+    /// glance. Built-in presets return nil so we don't surface a fake
+    /// "55 years ago" date for the epoch-zero sentinel.
+    public func relativeUpdatedAtDescription(now: Date = Date()) -> String? {
+        if isBuiltIn { return nil }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter.localizedString(for: updatedAt, relativeTo: now)
+    }
+
+    /// Long-form tooltip for hover: "Created Apr 25, 2026 — Last edited
+    /// 2 hours ago". Built-ins return a static description.
+    public func tooltipDescription(now: Date = Date()) -> String {
+        if isBuiltIn {
+            return "\(name) — read-only built-in preset"
+        }
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateStyle = .medium
+        dateFormatter.timeStyle = .none
+        let relFormatter = RelativeDateTimeFormatter()
+        relFormatter.unitsStyle = .full
+        let createdString = dateFormatter.string(from: createdAt)
+        let updatedString = relFormatter.localizedString(for: updatedAt, relativeTo: now)
+        if abs(createdAt.timeIntervalSince(updatedAt)) < 1 {
+            // Never edited after creation — collapse to one line.
+            return "Created \(createdString)"
+        }
+        return "Created \(createdString) — Last edited \(updatedString)"
+    }
 }
