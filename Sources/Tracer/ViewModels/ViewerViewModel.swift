@@ -243,6 +243,12 @@ public final class ViewerViewModel: ObservableObject {
     @Published public var suvSphereRadiusMM: Double = 6.2
     @Published public var suvROIMeasurements: [SUVROIMeasurement] = []
     @Published public var lastSUVROIMeasurement: SUVROIMeasurement?
+    @Published public var dynamicStudy: DynamicImageStudy?
+    @Published public var selectedDynamicFrameIndex: Int = 0
+    @Published public var dynamicPlaybackFPS: Double = 2.0
+    @Published public private(set) var isDynamicPlaybackRunning: Bool = false
+    @Published public private(set) var dynamicTimeActivityCurve: [DynamicTimeActivityPoint] = []
+    @Published public private(set) var isDynamicTACComputing: Bool = false
     @Published public private(set) var volumeOperationStatus: VolumeOperationStatus?
     @Published public private(set) var petMIPCacheRevision: Int = 0
     @Published public private(set) var appUndoDepth: Int = 0
@@ -300,6 +306,8 @@ public final class ViewerViewModel: ObservableObject {
     private let maxBackgroundTrackedChangedVoxels = 5_000_000
     private var volumeOperationTask: Task<Void, Never>?
     private var autoWindowTask: Task<Void, Never>?
+    private var dynamicPlaybackTask: Task<Void, Never>?
+    private var dynamicTACTask: Task<Void, Never>?
     private let maxPETMIPProjectionCacheEntries = 12
     private var petMIPProjectionCache: [PETMIPProjectionKey: PETMIPProjection] = [:]
     private var petMIPProjectionCacheOrder: [PETMIPProjectionKey] = []
@@ -792,6 +800,131 @@ public final class ViewerViewModel: ObservableObject {
             self?.lastSUVROIMeasurement = nil
         }
         statusMessage = "Cleared \(before.count) SUV ROI measurements"
+    }
+
+    public var dynamicCandidateVolumes: [ImageVolume] {
+        DynamicStudyBuilder.dynamicCandidates(from: loadedVolumes)
+    }
+
+    @discardableResult
+    public func buildDynamicStudyFromLoadedVolumes(frameDurationSeconds: Double = 1.0) -> Bool {
+        guard let study = DynamicStudyBuilder.makeStudy(
+            from: loadedVolumes,
+            preferredReference: currentVolume,
+            frameDurationSeconds: frameDurationSeconds
+        ) else {
+            statusMessage = "Dynamic workflow needs at least two PET/NM frames on the same grid"
+            return false
+        }
+
+        stopDynamicPlayback()
+        dynamicStudy = study
+        selectedDynamicFrameIndex = 0
+        dynamicTimeActivityCurve = []
+        if let first = study.frame(at: 0) {
+            showDynamicFrame(first, resetDisplay: true)
+        }
+        statusMessage = "Dynamic study ready: \(study.frameCount) frames over \(study.durationLabel)"
+        return true
+    }
+
+    public func clearDynamicStudy() {
+        stopDynamicPlayback()
+        dynamicTACTask?.cancel()
+        dynamicTACTask = nil
+        dynamicStudy = nil
+        selectedDynamicFrameIndex = 0
+        dynamicTimeActivityCurve = []
+        isDynamicTACComputing = false
+        statusMessage = "Closed dynamic workflow"
+    }
+
+    public func setDynamicFrame(index: Int) {
+        guard let study = dynamicStudy,
+              let frame = study.frame(at: index) else { return }
+        selectedDynamicFrameIndex = max(0, min(study.frameCount - 1, index))
+        showDynamicFrame(frame, resetDisplay: false)
+        statusMessage = "Dynamic frame \(selectedDynamicFrameIndex + 1)/\(study.frameCount) at \(DynamicFrame.formatTime(frame.midSeconds))"
+    }
+
+    public func stepDynamicFrame(delta: Int) {
+        guard let study = dynamicStudy, study.frameCount > 0 else { return }
+        let next = max(0, min(study.frameCount - 1, selectedDynamicFrameIndex + delta))
+        setDynamicFrame(index: next)
+    }
+
+    public func toggleDynamicPlayback() {
+        isDynamicPlaybackRunning ? stopDynamicPlayback() : startDynamicPlayback()
+    }
+
+    public func startDynamicPlayback() {
+        guard let study = dynamicStudy, study.frameCount > 1 else {
+            statusMessage = "Build a dynamic study before playback"
+            return
+        }
+        stopDynamicPlayback()
+        isDynamicPlaybackRunning = true
+        dynamicPlaybackTask = Task { [weak self] in
+            while !Task.isCancelled {
+                let fps = await MainActor.run { self?.dynamicPlaybackFPS ?? 2.0 }
+                let interval = UInt64(1_000_000_000 / max(0.25, min(30.0, fps)))
+                try? await Task.sleep(nanoseconds: interval)
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    guard let self,
+                          let study = self.dynamicStudy,
+                          study.frameCount > 1 else {
+                        return
+                    }
+                    let next = (self.selectedDynamicFrameIndex + 1) % study.frameCount
+                    self.setDynamicFrame(index: next)
+                }
+            }
+        }
+    }
+
+    public func stopDynamicPlayback() {
+        dynamicPlaybackTask?.cancel()
+        dynamicPlaybackTask = nil
+        isDynamicPlaybackRunning = false
+    }
+
+    public func computeDynamicTimeActivityCurveForActiveLabel() {
+        guard let study = dynamicStudy else {
+            statusMessage = "Build a dynamic study before calculating a time-activity curve"
+            return
+        }
+        guard let map = labeling.activeLabelMap else {
+            statusMessage = "Create or load a label/ROI before calculating a time-activity curve"
+            return
+        }
+
+        dynamicTACTask?.cancel()
+        isDynamicTACComputing = true
+        statusMessage = "Computing dynamic time-activity curve..."
+        let labelVoxels = map.voxels
+        let dimensions = (depth: map.depth, height: map.height, width: map.width)
+        let classID = labeling.activeClassID
+        let settings = suvSettings
+
+        dynamicTACTask = Task { [weak self, study, labelVoxels, dimensions, classID, settings] in
+            let points = await Task.detached(priority: .userInitiated) {
+                DynamicTimeActivityCalculator.compute(
+                    study: study,
+                    labelVoxels: labelVoxels,
+                    labelDimensions: dimensions,
+                    classID: classID,
+                    suvSettings: settings
+                )
+            }.value
+            guard !Task.isCancelled, let self else { return }
+            self.dynamicTimeActivityCurve = points
+            self.isDynamicTACComputing = false
+            self.dynamicTACTask = nil
+            self.statusMessage = points.isEmpty
+                ? "No dynamic TAC points found for the active label"
+                : "Dynamic TAC ready: \(points.count) frames"
+        }
     }
 
     public func ensureActiveLabelMapForCurrentContext(defaultName: String = "Measurement Labels",
@@ -1547,6 +1680,25 @@ public final class ViewerViewModel: ObservableObject {
         let (w, l) = autoWindowLevel(pixels: volume.pixels)
         window = w
         level = l
+    }
+
+    private func showDynamicFrame(_ frame: DynamicFrame, resetDisplay: Bool) {
+        if resetDisplay || currentVolume == nil {
+            displayVolume(frame.volume)
+        } else {
+            currentVolume = frame.volume
+            clampSliceIndices(to: frame.volume)
+        }
+    }
+
+    private func clampSliceIndices(to volume: ImageVolume) {
+        guard sliceIndices.count >= 3 else {
+            sliceIndices = [volume.width / 2, volume.height / 2, volume.depth / 2]
+            return
+        }
+        sliceIndices[0] = max(0, min(volume.width - 1, sliceIndices[0]))
+        sliceIndices[1] = max(0, min(volume.height - 1, sliceIndices[1]))
+        sliceIndices[2] = max(0, min(volume.depth - 1, sliceIndices[2]))
     }
 
     // MARK: - Slice navigation
