@@ -311,7 +311,7 @@ public final class PETEngineViewModel: ObservableObject {
         let snapshot = map.snapshot(name: "\(map.name) TMTV snapshot")
         let settings = viewer.suvSettings
         do {
-            let report = try await Task.detached(priority: .userInitiated) {
+            let report = try await Task.detached(priority: ResourcePolicy.load().backgroundTaskPriority) {
                 try PETQuantification.compute(
                     petVolume: pet,
                     labelMap: snapshot,

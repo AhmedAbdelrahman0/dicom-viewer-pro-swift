@@ -138,6 +138,7 @@ public enum PETMRDeformableRegistrationError: Error, LocalizedError {
     case launchFailed(String)
     case timedOut(Double, String)
     case failed(exitCode: Int32, stderr: String)
+    case cancelled
     case outputMissing(String)
     case outputLoadFailed(String)
 
@@ -151,6 +152,8 @@ public enum PETMRDeformableRegistrationError: Error, LocalizedError {
             return "Deformable registration timed out after \(Int(timeout))s\(stderr.isEmpty ? "" : ": \(stderr)")"
         case .failed(let exitCode, let stderr):
             return "Deformable registration exited \(exitCode): \(stderr.isEmpty ? "<no stderr>" : stderr)"
+        case .cancelled:
+            return "Deformable registration was cancelled."
         case .outputMissing(let path):
             return "Deformable registration did not produce output: \(path)"
         case .outputLoadFailed(let message):
@@ -276,7 +279,7 @@ public enum PETMRDeformableRegistrationRunner {
                     "--shrink-factors", "4x2x1",
                     "--smoothing-sigmas", "2x1x0vox"
                 ] + extra,
-                environment: ProcessInfo.processInfo.environment
+                environment: ResourcePolicy.load().applyingSubprocessDefaults(to: ProcessInfo.processInfo.environment)
             )
 
         case .synthMorph, .voxelMorph, .customScript:
@@ -294,7 +297,7 @@ public enum PETMRDeformableRegistrationRunner {
             return CommandLine(
                 executable: exe,
                 arguments: args,
-                environment: ProcessInfo.processInfo.environment
+                environment: ResourcePolicy.load().applyingSubprocessDefaults(to: ProcessInfo.processInfo.environment)
             )
 
         case .internalBodyEnvelope:
@@ -321,56 +324,36 @@ public enum PETMRDeformableRegistrationRunner {
     private static func run(command: CommandLine,
                             workDir: URL,
                             timeoutSeconds: Double) async throws -> (stdout: String, stderr: String) {
-        let process = Process()
+        let executablePath: String
+        let arguments: [String]
         if command.executable.contains("/") {
-            process.executableURL = URL(fileURLWithPath: command.executable)
-            process.arguments = command.arguments
+            executablePath = command.executable
+            arguments = command.arguments
         } else {
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            process.arguments = [command.executable] + command.arguments
-        }
-        process.currentDirectoryURL = workDir
-        process.environment = command.environment
-
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-
-        let stdoutBuffer = ProcessOutputBuffer()
-        let stderrBuffer = ProcessOutputBuffer()
-        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
-            stdoutBuffer.append(handle.availableData)
-        }
-        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
-            stderrBuffer.append(handle.availableData)
+            executablePath = "/usr/bin/env"
+            arguments = [command.executable] + command.arguments
         }
 
         do {
-            try process.run()
-        } catch {
-            throw PETMRDeformableRegistrationError.launchFailed(error.localizedDescription)
-        }
-
-        let timedOut = await ProcessWaiter.wait(for: process, timeoutSeconds: max(1, timeoutSeconds))
-
-        stdoutPipe.fileHandleForReading.readabilityHandler = nil
-        stderrPipe.fileHandleForReading.readabilityHandler = nil
-        stdoutBuffer.append(stdoutPipe.fileHandleForReading.readDataToEndOfFile())
-        stderrBuffer.append(stderrPipe.fileHandleForReading.readDataToEndOfFile())
-
-        let stdout = stdoutBuffer.string()
-        let stderr = stderrBuffer.string()
-
-        if timedOut {
+            let result = try await LocalWorkerProcess().run(WorkerProcessRequest(
+                executablePath: executablePath,
+                arguments: arguments,
+                environment: command.environment,
+                workingDirectory: workDir,
+                timeoutSeconds: max(1, timeoutSeconds),
+                streamStdout: false,
+                streamStderr: true
+            ))
+            return (result.stdout, result.stderr)
+        } catch WorkerProcessError.cancelled {
+            throw PETMRDeformableRegistrationError.cancelled
+        } catch WorkerProcessError.launchFailed(let message) {
+            throw PETMRDeformableRegistrationError.launchFailed(message)
+        } catch WorkerProcessError.timedOut(_, let stderr) {
             throw PETMRDeformableRegistrationError.timedOut(timeoutSeconds, stderr)
+        } catch WorkerProcessError.nonZeroExit(let exitCode, let stderr) {
+            throw PETMRDeformableRegistrationError.failed(exitCode: exitCode, stderr: stderr)
         }
-
-        guard process.terminationStatus == 0 else {
-            throw PETMRDeformableRegistrationError.failed(exitCode: process.terminationStatus, stderr: stderr)
-        }
-
-        return (stdout, stderr)
     }
 
     private static func shellLikeSplit(_ text: String) -> [String] {

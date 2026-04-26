@@ -73,7 +73,7 @@ public final class ClassificationViewModel: ObservableObject {
         let classifierMask = labelMap.snapshot(name: "\(labelMap.name) classification snapshot")
         let report: PETQuantification.Report
         do {
-            report = try await Task.detached(priority: .userInitiated) {
+            report = try await Task.detached(priority: ResourcePolicy.load().backgroundTaskPriority) {
                 try PETQuantification.compute(
                     petVolume: volume,
                     labelMap: classifierMask,

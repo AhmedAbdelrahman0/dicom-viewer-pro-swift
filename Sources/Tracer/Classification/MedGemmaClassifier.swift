@@ -145,52 +145,28 @@ public final class MedGemmaClassifier: LesionClassifier, @unchecked Sendable {
         }
         args.append(contentsOf: spec.extraArguments)
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: spec.binaryPath)
-        process.arguments = args
-
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-
-        let stdoutBuffer = ProcessOutputBuffer()
-        let stderrBuffer = ProcessOutputBuffer()
-        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
-            stdoutBuffer.append(handle.availableData)
-        }
-        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
-            stderrBuffer.append(handle.availableData)
-        }
-
+        let result: WorkerProcessResult
         do {
-            try process.run()
-        } catch {
-            throw ClassificationError.inferenceFailed("launch failed: \(error)")
-        }
-
-        let timedOut = await ProcessWaiter.wait(
-            for: process,
-            timeoutSeconds: spec.timeoutSeconds
-        )
-
-        stdoutPipe.fileHandleForReading.readabilityHandler = nil
-        stderrPipe.fileHandleForReading.readabilityHandler = nil
-        stdoutBuffer.append(stdoutPipe.fileHandleForReading.readDataToEndOfFile())
-        stderrBuffer.append(stderrPipe.fileHandleForReading.readDataToEndOfFile())
-        let stdoutData = stdoutBuffer.data()
-        let stderr = stderrBuffer.string()
-        if timedOut {
+            result = try await LocalWorkerProcess().run(WorkerProcessRequest(
+                executablePath: spec.binaryPath,
+                arguments: args,
+                environment: ResourcePolicy.load().applyingSubprocessDefaults(to: ProcessInfo.processInfo.environment),
+                timeoutSeconds: spec.timeoutSeconds,
+                streamStdout: false,
+                streamStderr: false
+            ))
+        } catch WorkerProcessError.timedOut(_, let stderr) {
             throw ClassificationError.inferenceFailed(
                 "llama-cli timed out after \(Int(spec.timeoutSeconds))s\(stderr.isEmpty ? "" : ": \(stderr)")"
             )
-        }
-        guard process.terminationStatus == 0 else {
+        } catch WorkerProcessError.nonZeroExit(let exitCode, let stderr) {
             throw ClassificationError.inferenceFailed(
-                "llama-cli exited \(process.terminationStatus): \(stderr)"
+                "llama-cli exited \(exitCode): \(stderr)"
             )
+        } catch {
+            throw ClassificationError.inferenceFailed("launch failed: \(error)")
         }
-        let raw = String(data: stdoutData, encoding: .utf8) ?? ""
+        let raw = result.stdout
 
         // 4. Parse the JSON.
         let parsed = try Self.parseJSON(in: raw, expectedLabels: spec.candidateLabels)

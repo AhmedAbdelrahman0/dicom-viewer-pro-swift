@@ -19,6 +19,7 @@ final class MetalVolumeRenderer: NSObject, MTKViewDelegate {
         opacity: 0.18,
         density: 1.15,
         sampleCount: 288,
+        maxTextureDimension: 384,
         rotationX: -0.31,
         rotationY: 0.49,
         zoom: 1.25,
@@ -68,7 +69,10 @@ final class MetalVolumeRenderer: NSObject, MTKViewDelegate {
         guard let device else { return }
         guard volumeID != volume.id else { return }
 
-        let payload = VolumeTexturePayload.make(from: volume, maxDimension: 384)
+        let payload = VolumeTexturePayload.make(
+            from: volume,
+            maxDimension: Int(settings.maxTextureDimension)
+        )
         let descriptor = MTLTextureDescriptor()
         descriptor.textureType = .type3D
         descriptor.pixelFormat = .r32Float

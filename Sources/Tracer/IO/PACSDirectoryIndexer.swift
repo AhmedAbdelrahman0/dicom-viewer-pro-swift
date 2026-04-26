@@ -94,6 +94,7 @@ public enum PACSDirectoryIndexer {
                             seriesDirectoryFastPath: Bool = true,
                             fastPathMinimumDICOMFilesPerDirectory: Int = 8,
                             fastPathSampleCount: Int = 2,
+                            maxWorkerCount: Int? = nil,
                             pathDerivedFastPathSeriesThreshold: Int = 1_024,
                             pathDerivedFastPathFileThreshold: Int = 100_000,
                             isCancelled: @escaping @Sendable () -> Bool = { false },
@@ -300,6 +301,7 @@ public enum PACSDirectoryIndexer {
                     jobs: fastPathDirectoryJobs,
                     headerByteLimit: headerByteLimit,
                     sampleCount: fastPathSamples,
+                    maxWorkerCount: maxWorkerCount,
                     isCancelled: isCancelled
                 )
                 for result in fastResults.indexed {
@@ -480,6 +482,7 @@ public enum PACSDirectoryIndexer {
     private static func fastPathAccumulators(jobs: [[URL]],
                                              headerByteLimit: Int,
                                              sampleCount: Int,
+                                             maxWorkerCount: Int?,
                                              isCancelled: @escaping @Sendable () -> Bool)
         -> (indexed: [(accumulator: DICOMSeriesIndexAccumulator, scannedFiles: Int)], failedFiles: Int, cancelled: Bool) {
         guard !jobs.isEmpty else { return ([], 0, false) }
@@ -492,7 +495,9 @@ public enum PACSDirectoryIndexer {
 
         let workerCount = min(
             jobs.count,
-            max(1, min(8, ProcessInfo.processInfo.activeProcessorCount))
+            ResourcePolicy.load().boundedIndexingWorkers(
+                requested: maxWorkerCount ?? min(8, ProcessInfo.processInfo.activeProcessorCount)
+            )
         )
 
         DispatchQueue.concurrentPerform(iterations: workerCount) { _ in

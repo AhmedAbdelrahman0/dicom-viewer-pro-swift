@@ -63,7 +63,7 @@ public final class SyntheticCTViewModel: ObservableObject {
 
         task = Task { [weak self, petVolume, suvSettings, options, viewer] in
             do {
-                let result = try await Task.detached(priority: .userInitiated) {
+                let result = try await Task.detached(priority: ResourcePolicy.load().backgroundTaskPriority) {
                     try SyntheticCTGenerator.generate(
                         from: petVolume,
                         suvSettings: suvSettings,

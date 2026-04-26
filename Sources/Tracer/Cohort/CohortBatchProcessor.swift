@@ -85,7 +85,16 @@ public actor CohortBatchProcessor {
             return
         }
 
-        let workers = max(1, min(16, job.maxConcurrent))
+        let requestedWorkers = max(1, min(16, job.maxConcurrent))
+        let policy = ResourcePolicy.load()
+        let cohortBound = policy.boundedCohortWorkers(requested: requestedWorkers)
+        let mayUseLocalGPU = job.nnunetEntryID != nil && job.segmentationMode != .dgxRemote
+        let workers = mayUseLocalGPU ? min(cohortBound, policy.gpuWorkerLimit) : cohortBound
+        if workers != checkpoint.job.maxConcurrent {
+            checkpoint.job.maxConcurrent = workers
+            try? checkpoint.save(to: checkpointURL)
+            await onProgress(checkpoint)
+        }
         await withTaskGroup(of: Void.self) { group in
             // Seed the pool with `workers` tasks. Each task pulls the next
             // pending study id from a shared queue.
@@ -140,7 +149,7 @@ public actor CohortBatchProcessor {
                 throw CohortError.worklistEntryMissing(id: studyID)
             }
             let t0 = Date()
-            loaded = try await Task.detached(priority: .userInitiated) {
+            loaded = try await Task.detached(priority: ResourcePolicy.load().backgroundTaskPriority) {
                 try CohortStudyLoader.load(study)
             }.value
             result.loadSeconds = Date().timeIntervalSince(t0)

@@ -100,60 +100,31 @@ public final class SubprocessPETACCorrector: PETAttenuationCorrector, @unchecked
             extraArgs: args
         )
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: spec.executablePath)
-        process.arguments = launchArguments
-        var env = ProcessInfo.processInfo.environment
+        var env = ResourcePolicy.load().applyingSubprocessDefaults(to: ProcessInfo.processInfo.environment)
         for (k, v) in spec.environment { env[k] = v }
-        process.environment = env
-
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-
-        let stdoutBuffer = ProcessOutputBuffer()
-        let stderrBuffer = ProcessOutputBuffer()
-        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
-            let chunk = handle.availableData
-            guard !chunk.isEmpty else { return }
-            stdoutBuffer.append(chunk)
-        }
-        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
-            let chunk = handle.availableData
-            guard !chunk.isEmpty else { return }
-            stderrBuffer.append(chunk)
-            // Stream stderr to the progress sink line-by-line so the panel
-            // can show "Loading model…", "Running inference…", etc.
-            if let s = String(data: chunk, encoding: .utf8) {
-                progress(s.trimmingCharacters(in: .newlines))
-            }
-        }
-
+        let worker = LocalWorkerProcess()
+        let result: WorkerProcessResult
         do {
-            try process.run()
-        } catch {
-            throw PETACError.inferenceFailed("could not launch \(spec.executablePath): \(error.localizedDescription)")
-        }
-
-        let timedOut = await ProcessWaiter.wait(for: process,
-                                                timeoutSeconds: spec.timeoutSeconds)
-        stdoutPipe.fileHandleForReading.readabilityHandler = nil
-        stderrPipe.fileHandleForReading.readabilityHandler = nil
-        stdoutBuffer.append(stdoutPipe.fileHandleForReading.readDataToEndOfFile())
-        stderrBuffer.append(stderrPipe.fileHandleForReading.readDataToEndOfFile())
-
-        let stderr = stderrBuffer.string()
-        if timedOut {
+            result = try await worker.run(WorkerProcessRequest(
+                executablePath: spec.executablePath,
+                arguments: launchArguments,
+                environment: env,
+                timeoutSeconds: spec.timeoutSeconds,
+                streamStdout: false,
+                streamStderr: true
+            ), logSink: progress)
+        } catch WorkerProcessError.timedOut(_, let stderr) {
             throw PETACError.inferenceFailed(
                 "AC subprocess timed out after \(Int(spec.timeoutSeconds))s\(stderr.isEmpty ? "" : ": \(stderr)")"
             )
-        }
-        guard process.terminationStatus == 0 else {
+        } catch WorkerProcessError.nonZeroExit(let exitCode, let stderr) {
             throw PETACError.inferenceFailed(
-                "AC subprocess exited \(process.terminationStatus): \(stderr.isEmpty ? "<no stderr>" : stderr)"
+                "AC subprocess exited \(exitCode): \(stderr.isEmpty ? "<no stderr>" : stderr)"
             )
+        } catch {
+            throw PETACError.inferenceFailed("could not launch \(spec.executablePath): \(error.localizedDescription)")
         }
+        let stderr = result.stderr
 
         // Load the output NIfTI as a fresh ImageVolume + verify geometry.
         let acVolume: ImageVolume
@@ -170,14 +141,14 @@ public final class SubprocessPETACCorrector: PETAttenuationCorrector, @unchecked
             )
         }
 
-        let result = PETACUtilities.makeACVolume(
+        let acResultVolume = PETACUtilities.makeACVolume(
             from: acVolume.pixels,
             sourceNAC: nacPET,
             correctorID: id
         )
         progress("✓ AC complete")
         return PETACResult(
-            acPET: result,
+            acPET: acResultVolume,
             durationSeconds: Date().timeIntervalSince(started),
             correctorID: id,
             logSnippet: stderr.isEmpty ? nil : String(stderr.suffix(800))

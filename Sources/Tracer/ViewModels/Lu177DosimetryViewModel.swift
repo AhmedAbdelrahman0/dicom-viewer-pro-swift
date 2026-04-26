@@ -26,7 +26,7 @@ public final class Lu177DosimetryViewModel: ObservableObject {
 
         task = Task {
             do {
-                let computed = try await Task.detached(priority: .userInitiated) {
+                let computed = try await Task.detached(priority: ResourcePolicy.load().backgroundTaskPriority) {
                     try Lu177DosimetryEngine.createAbsorbedDoseMap(
                         timePoints: timePoints,
                         ctVolume: ctVolume,

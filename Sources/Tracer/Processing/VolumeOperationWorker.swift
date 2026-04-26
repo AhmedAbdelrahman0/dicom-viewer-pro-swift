@@ -59,6 +59,19 @@ enum VolumeLabelOperation: Sendable {
         }
     }
 
+    var systemImage: String {
+        switch self {
+        case .petThreshold, .petPercentOfMax, .petSeededPercentOfMax:
+            return "flame"
+        case .petGradient:
+            return "point.3.connected.trianglepath.dotted"
+        case .regionGrow:
+            return "circle.hexagongrid"
+        case .ctRange:
+            return "scalemass"
+        }
+    }
+
     var method: VolumeMeasurementMethod {
         switch self {
         case .petThreshold: return .fixedThreshold

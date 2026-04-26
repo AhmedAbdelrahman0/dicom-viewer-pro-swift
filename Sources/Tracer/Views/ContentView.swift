@@ -23,6 +23,8 @@ public struct ContentView: View {
     @StateObject private var reconstruction = NuclearReconstructionViewModel()
     @StateObject private var syntheticCT = SyntheticCTViewModel()
     @StateObject private var dosimetry = Lu177DosimetryViewModel()
+    @StateObject private var activity = ActivityLogStore.shared
+    @StateObject private var jobs = JobCenterStore.shared
     /// Dictation session — survives panel open/close so an in-progress
     /// transcript isn't lost when the user toggles the inspector. Engine
     /// (Apple Speech today, WhisperKit later) is hot-swappable via
@@ -45,6 +47,8 @@ public struct ContentView: View {
     @State private var cohortStudies: [PACSWorklistStudy] = []
     @State private var showAboutWindow = false
     @State private var showOnboarding = false
+    @State private var showJobCenter = false
+    @State private var showActivityLog = false
     /// First-launch onboarding gate — once dismissed the welcome card
     /// sheet stays closed across relaunches. Users can re-open it from
     /// Help → Show Welcome Walkthrough.
@@ -78,18 +82,15 @@ public struct ContentView: View {
             rootLayout
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            if vm.isLoading {
-                loadingIndicator
-                    .transition(.opacity)
-            } else {
-                statusBar
-            }
+            activityFooter
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .tint(TracerTheme.accent)
         .environmentObject(vm)
         .environmentObject(monai)
         .environmentObject(nnunet)
+        .environmentObject(activity)
+        .environmentObject(jobs)
         // Engine panels open as right-side inspector drawers on regular-
         // width windows (macOS / iPad in landscape). In `.compact` widths
         // (iPad portrait, narrow windows) we fall back to `.sheet` since
@@ -234,6 +235,19 @@ public struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .recentVolumesDidChange)) { _ in
             vm.reloadRecentVolumes()
         }
+        .modifier(ActivityLogHooks(vm: vm,
+                                   monai: monai,
+                                   nnunet: nnunet,
+                                   pet: pet,
+                                   classification: classification,
+                                   modelManager: modelManager,
+                                   cohort: cohort,
+                                   lesionDetector: lesionDetector,
+                                   petAC: petAC,
+                                   reconstruction: reconstruction,
+                                   syntheticCT: syntheticCT,
+                                   dosimetry: dosimetry,
+                                   activity: activity))
         .onReceive(NotificationCenter.default.publisher(for: .assistantDidRequestClassification)) { _ in
             handleAssistantClassificationRequest()
         }
@@ -282,6 +296,7 @@ public struct ContentView: View {
                 // Defer by a runloop so the view hierarchy finishes mounting.
                 DispatchQueue.main.async { showOnboarding = true }
             }
+            activity.log("Tracer ready.", source: "System", level: .success, countAsUnread: false)
         }
         .tooltipHost()  // must wrap the whole window so tooltips escape any clipping
         .background(TracerTheme.windowBackground)
@@ -893,50 +908,393 @@ public struct ContentView: View {
         .fixedSize(horizontal: true, vertical: false)
     }
 
-    // MARK: - Status bar
+    // MARK: - Activity bar
 
-    private var statusBar: some View {
-        HStack {
-            if let operation = vm.volumeOperationStatus {
-                ProgressView()
-                    .controlSize(.small)
-                Text(operation.title)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(TracerTheme.accentBright)
-                    .lineLimit(1)
-                Button("Cancel") {
-                    vm.cancelVolumeOperation()
+    private var activityFooter: some View {
+        VStack(spacing: 0) {
+            if showJobCenter {
+                JobCenterPanel(jobs: jobs) { job in
+                    cancel(job)
                 }
-                .buttonStyle(.borderless)
-                .controlSize(.small)
+                .frame(height: 230)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
-            Text(vm.statusMessage)
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundColor(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 4)
-            Spacer()
+            if showActivityLog {
+                ActivityLogPanel(activity: activity)
+                    .frame(height: 170)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+            activityBar
         }
         .background(TracerTheme.panelBackground)
         .overlay(Rectangle().fill(TracerTheme.hairline).frame(height: 1), alignment: .top)
+        .onAppear {
+            syncJobCenter()
+        }
+        .onChange(of: activeOperationsDigest) { _, _ in
+            syncJobCenter()
+        }
     }
 
-    private var loadingIndicator: some View {
-        HStack(spacing: 12) {
-            ProgressView()
-                .controlSize(.small)
-            Text(vm.statusMessage)
-                .font(.system(size: 11))
-                .lineLimit(1)
-                .truncationMode(.middle)
-            Spacer()
+    private var activityBar: some View {
+        HStack(spacing: 8) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    showJobCenter.toggle()
+                    if showJobCenter {
+                        showActivityLog = false
+                        jobs.markRead()
+                    }
+                }
+            } label: {
+                Label(showJobCenter ? "Hide jobs" : "Jobs",
+                      systemImage: showJobCenter ? "chevron.down.circle" : "list.bullet.clipboard")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .help("Show Job Center")
+
+            if jobs.unreadIssueCount > 0 && !showJobCenter {
+                Text("\(jobs.unreadIssueCount)")
+                    .font(.system(size: 9, weight: .bold, design: .rounded))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(Color.orange))
+            }
+
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    showActivityLog.toggle()
+                    if showActivityLog {
+                        showJobCenter = false
+                        activity.markRead()
+                    }
+                }
+            } label: {
+                Label(showActivityLog ? "Hide logs" : "Logs",
+                      systemImage: showActivityLog ? "chevron.down.circle" : "list.bullet.rectangle")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .help("Show operation logs")
+
+            if activity.unreadCount > 0 && !showActivityLog {
+                Text("\(activity.unreadCount)")
+                    .font(.system(size: 9, weight: .bold, design: .rounded))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(TracerTheme.accent))
+            }
+
+            Divider()
+                .frame(height: 18)
+
+            let operations = activeOperations
+            if operations.isEmpty {
+                Image(systemName: vm.isLoading ? "arrow.triangle.2.circlepath" : "checkmark.circle")
+                    .foregroundColor(vm.isLoading ? TracerTheme.accentBright : .secondary)
+                Text(vm.statusMessage)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            } else {
+                ScrollView(.horizontal, showsIndicators: true) {
+                    HStack(spacing: 8) {
+                        ForEach(operations) { operation in
+                            ActivityOperationChip(operation: operation) {
+                                cancel(operation)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 3)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            Spacer(minLength: 8)
+
+            Text(Date.now, style: .time)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundColor(.secondary.opacity(0.8))
+
+            Button {
+                activity.clear()
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .help("Clear logs")
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 5)
-        .background(TracerTheme.panelBackground)
-        .overlay(Rectangle().fill(TracerTheme.hairline).frame(height: 1), alignment: .top)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+        .frame(minHeight: 32)
+    }
+
+    private var activeOperations: [ActivityOperationSnapshot] {
+        var operations: [ActivityOperationSnapshot] = []
+
+        if vm.isIndexing {
+            operations.append(ActivityOperationSnapshot(
+                id: "pacs-index",
+                title: "PACS indexing",
+                stage: vm.indexProgress?.phase.rawValue.capitalized ?? "Scanning",
+                detail: vm.indexProgress?.statusText ?? vm.statusMessage,
+                progress: nil,
+                systemImage: "externaldrive.badge.magnifyingglass",
+                cancelTarget: .indexing
+            ))
+        } else if vm.isLoading {
+            operations.append(ActivityOperationSnapshot(
+                id: "viewer-loading",
+                title: "Loading study",
+                stage: "Import",
+                detail: vm.statusMessage,
+                progress: vm.progress > 0 ? vm.progress : nil,
+                systemImage: "square.and.arrow.down",
+                cancelTarget: nil
+            ))
+        }
+
+        if let operation = vm.volumeOperationStatus {
+            operations.append(ActivityOperationSnapshot(
+                id: operation.id.uuidString,
+                title: operation.title,
+                stage: operation.detail,
+                detail: "Running since \(operation.startedAt.formatted(date: .omitted, time: .shortened))",
+                progress: nil,
+                systemImage: "point.3.connected.trianglepath.dotted",
+                cancelTarget: .volumeOperation
+            ))
+        }
+
+        if monai.isBusy {
+            operations.append(ActivityOperationSnapshot(id: "monai",
+                                                        title: "MONAI Label",
+                                                        stage: monai.isConnected ? "Inference / server" : "Connect",
+                                                        detail: monai.statusMessage,
+                                                        progress: nil,
+                                                        systemImage: "network",
+                                                        cancelTarget: nil))
+        }
+        if nnunet.isRunning {
+            operations.append(ActivityOperationSnapshot(id: "nnunet",
+                                                        title: "nnU-Net",
+                                                        stage: nnunet.mode.displayName,
+                                                        detail: nnunet.statusMessage,
+                                                        progress: nil,
+                                                        systemImage: "brain.head.profile",
+                                                        cancelTarget: .nnunet))
+        }
+        if pet.isRunning {
+            operations.append(ActivityOperationSnapshot(id: "pet-engine",
+                                                        title: "PET Engine",
+                                                        stage: "Segmentation / quantification",
+                                                        detail: pet.statusMessage,
+                                                        progress: nil,
+                                                        systemImage: "flame",
+                                                        cancelTarget: nil))
+        }
+        if classification.isRunning {
+            operations.append(ActivityOperationSnapshot(id: "classification",
+                                                        title: "Classification",
+                                                        stage: "Lesion model",
+                                                        detail: classification.statusMessage,
+                                                        progress: nil,
+                                                        systemImage: "chart.bar.doc.horizontal",
+                                                        cancelTarget: nil))
+        }
+        if cohort.isRunning {
+            operations.append(ActivityOperationSnapshot(id: "cohort",
+                                                        title: "Cohort",
+                                                        stage: cohortStatusStage,
+                                                        detail: cohort.statusMessage,
+                                                        progress: cohort.progressFraction,
+                                                        systemImage: "rectangle.stack.badge.play",
+                                                        cancelTarget: .cohort))
+        }
+        if lesionDetector.isRunning {
+            operations.append(ActivityOperationSnapshot(id: "detector",
+                                                        title: "Lesion detector",
+                                                        stage: "Inference",
+                                                        detail: lesionDetector.statusMessage,
+                                                        progress: nil,
+                                                        systemImage: "scope",
+                                                        cancelTarget: nil))
+        }
+        if petAC.isRunning {
+            operations.append(ActivityOperationSnapshot(id: "pet-ac",
+                                                        title: "PET AC",
+                                                        stage: "Correction",
+                                                        detail: petAC.statusMessage,
+                                                        progress: nil,
+                                                        systemImage: "wand.and.stars",
+                                                        cancelTarget: nil))
+        }
+        if reconstruction.isRunning {
+            operations.append(ActivityOperationSnapshot(id: "reconstruction",
+                                                        title: "Reconstruction",
+                                                        stage: reconstruction.algorithm.displayName,
+                                                        detail: reconstruction.statusMessage,
+                                                        progress: nil,
+                                                        systemImage: "waveform.path.ecg.rectangle",
+                                                        cancelTarget: .reconstruction))
+        }
+        if syntheticCT.isRunning {
+            operations.append(ActivityOperationSnapshot(id: "synthetic-ct",
+                                                        title: "Synthetic CT",
+                                                        stage: syntheticCT.method.displayName,
+                                                        detail: syntheticCT.statusMessage,
+                                                        progress: nil,
+                                                        systemImage: "sparkles.rectangle.stack",
+                                                        cancelTarget: .syntheticCT))
+        }
+        if dosimetry.isRunning {
+            operations.append(ActivityOperationSnapshot(id: "dosimetry",
+                                                        title: "Lu-177 dosimetry",
+                                                        stage: "Dose map",
+                                                        detail: dosimetry.statusMessage,
+                                                        progress: nil,
+                                                        systemImage: "atom",
+                                                        cancelTarget: .dosimetry))
+        }
+
+        for (modelID, status) in modelManager.downloader.statusByModelID.sorted(by: { $0.key < $1.key }) {
+            if let operation = downloadOperation(modelID: modelID, status: status) {
+                operations.append(operation)
+            }
+        }
+
+        return operations
+    }
+
+    private var activeOperationsDigest: String {
+        activeOperations
+            .map { operation in
+                [
+                    operation.id,
+                    operation.title,
+                    operation.stage,
+                    operation.detail,
+                    operation.progress.map { String(format: "%.4f", $0) } ?? "nil",
+                    operation.cancelTarget == nil ? "fixed" : "cancel"
+                ].joined(separator: "\u{1f}")
+            }
+            .joined(separator: "\u{1e}")
+    }
+
+    private func syncJobCenter() {
+        completeTerminalDownloadJobs()
+        jobs.sync(active: activeOperations.map(\.jobUpdate))
+    }
+
+    private func completeTerminalDownloadJobs() {
+        for (modelID, status) in modelManager.downloader.statusByModelID {
+            let displayName = modelManager.store.models.first(where: { $0.id == modelID })?.displayName ?? modelID
+            switch status {
+            case .failed(let message):
+                jobs.complete(operationID: "download-\(modelID)",
+                              state: .failed,
+                              detail: "\(displayName) download failed: \(message)")
+                jobs.complete(operationID: "verify-\(modelID)",
+                              state: .failed,
+                              detail: "\(displayName) verification failed: \(message)")
+            case .cancelled:
+                jobs.complete(operationID: "download-\(modelID)",
+                              state: .cancelled,
+                              detail: "\(displayName) download cancelled")
+                jobs.complete(operationID: "verify-\(modelID)",
+                              state: .cancelled,
+                              detail: "\(displayName) verification cancelled")
+            case .idle, .downloading, .verifying, .completed:
+                break
+            }
+        }
+    }
+
+    private var cohortStatusStage: String {
+        guard let cp = cohort.checkpoint else { return "Queued" }
+        return "\(cp.doneCount + cp.failedCount + cp.skippedCount)/\(cp.total) studies"
+    }
+
+    private func downloadOperation(modelID: String,
+                                   status: ModelDownloadManager.DownloadStatus) -> ActivityOperationSnapshot? {
+        let displayName = modelManager.store.models.first(where: { $0.id == modelID })?.displayName ?? modelID
+        switch status {
+        case .idle, .completed, .failed, .cancelled:
+            return nil
+        case .downloading(let bytesReceived, let totalBytes):
+            let progress = totalBytes > 0 ? Double(bytesReceived) / Double(totalBytes) : nil
+            return ActivityOperationSnapshot(id: "download-\(modelID)",
+                                             title: "Model download",
+                                             stage: displayName,
+                                             detail: byteProgress(bytesReceived, totalBytes),
+                                             progress: progress,
+                                             systemImage: "arrow.down.circle",
+                                             cancelTarget: .modelDownload(modelID))
+        case .verifying:
+            return ActivityOperationSnapshot(id: "verify-\(modelID)",
+                                             title: "Model verify",
+                                             stage: displayName,
+                                             detail: "Checking SHA-256",
+                                             progress: nil,
+                                             systemImage: "checkmark.shield",
+                                             cancelTarget: nil)
+        }
+    }
+
+    private func cancel(_ operation: ActivityOperationSnapshot) {
+        guard let target = operation.cancelTarget else { return }
+        switch target {
+        case .volumeOperation:
+            vm.cancelVolumeOperation()
+            activity.log("Cancelled \(operation.title).", source: "Viewer", level: .warning)
+        case .indexing:
+            vm.cancelIndexing()
+            activity.log("Cancelled PACS indexing.", source: "PACS", level: .warning)
+        case .nnunet:
+            nnunet.cancel()
+            activity.log("Cancelled nnU-Net.", source: "nnU-Net", level: .warning)
+        case .cohort:
+            cohort.cancel()
+            activity.log("Cancelled cohort run.", source: "Cohort", level: .warning)
+        case .reconstruction:
+            reconstruction.cancel()
+            activity.log("Cancelled reconstruction.", source: "Reconstruction", level: .warning)
+        case .syntheticCT:
+            syntheticCT.cancel()
+            activity.log("Cancelled synthetic CT.", source: "Synthetic CT", level: .warning)
+        case .dosimetry:
+            dosimetry.cancel()
+            activity.log("Cancelled dosimetry.", source: "Dosimetry", level: .warning)
+        case .modelDownload(let id):
+            modelManager.downloader.cancel(modelID: id)
+            activity.log("Cancelled model download.", source: "Models", level: .warning)
+        }
+    }
+
+    private func cancel(_ job: JobRecord) {
+        guard let operation = activeOperations.first(where: { $0.id == job.operationID }) else {
+            jobs.markCancellationRequested(recordID: job.id)
+            activity.log("Cancellation requested for \(job.title), but the operation is no longer active.",
+                         source: "Job Center",
+                         level: .warning)
+            return
+        }
+        jobs.markCancellationRequested(recordID: job.id)
+        cancel(operation)
+    }
+
+    private func byteProgress(_ received: Int64, _ total: Int64) -> String {
+        guard total > 0 else { return "\(byteString(received)) received" }
+        return "\(byteString(received)) / \(byteString(total))"
+    }
+
+    private func byteString(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 
     // MARK: - File handlers
@@ -1903,6 +2261,398 @@ private struct EmptyWorkstationView: View {
             }
             .buttonStyle(.bordered)
         }
+    }
+}
+
+// MARK: - Activity footer
+
+private enum ActivityCancelTarget: Equatable {
+    case volumeOperation
+    case indexing
+    case nnunet
+    case cohort
+    case reconstruction
+    case syntheticCT
+    case dosimetry
+    case modelDownload(String)
+}
+
+private struct ActivityOperationSnapshot: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let stage: String
+    let detail: String
+    let progress: Double?
+    let systemImage: String
+    let cancelTarget: ActivityCancelTarget?
+}
+
+private extension ActivityOperationSnapshot {
+    var jobUpdate: JobUpdate {
+        JobUpdate(operationID: id,
+                  kind: inferredJobKind,
+                  title: title,
+                  stage: stage,
+                  detail: detail,
+                  progress: progress,
+                  systemImage: systemImage,
+                  canCancel: cancelTarget != nil)
+    }
+
+    var inferredJobKind: JobKind {
+        if id == "pacs-index" { return .pacsIndexing }
+        if id == "viewer-loading" { return .studyLoading }
+        if id == "monai" { return .monai }
+        if id == "nnunet" { return .nnunet }
+        if id == "pet-engine" { return .petEngine }
+        if id == "classification" { return .classification }
+        if id == "cohort" { return .cohort }
+        if id == "detector" { return .lesionDetection }
+        if id == "pet-ac" { return .petAC }
+        if id == "reconstruction" { return .reconstruction }
+        if id == "synthetic-ct" { return .syntheticCT }
+        if id == "dosimetry" { return .dosimetry }
+        if id.hasPrefix("download-") { return .modelDownload }
+        if id.hasPrefix("verify-") { return .modelVerification }
+        return title.lowercased().contains("volume") ? .volumeOperation : .unknown
+    }
+}
+
+private struct ActivityOperationChip: View {
+    let operation: ActivityOperationSnapshot
+    let cancel: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: operation.systemImage)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(TracerTheme.accentBright)
+                .frame(width: 18)
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(operation.title)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.primary)
+                    Text(operation.stage)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+                Text(operation.detail.isEmpty ? "Running" : operation.detail)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                if let progress = operation.progress {
+                    ProgressView(value: min(max(progress, 0), 1))
+                        .progressViewStyle(.linear)
+                        .frame(width: 180)
+                } else {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .frame(width: 180, alignment: .leading)
+                }
+            }
+
+            if operation.cancelTarget != nil {
+                Button(action: cancel) {
+                    Image(systemName: "xmark.circle.fill")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .foregroundColor(.secondary)
+                .help("Cancel")
+            }
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .frame(width: 280, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 7)
+                .fill(TracerTheme.viewportBackground.opacity(0.88))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 7)
+                .stroke(TracerTheme.hairline, lineWidth: 1)
+        )
+    }
+}
+
+private struct ActivityLogPanel: View {
+    @ObservedObject var activity: ActivityLogStore
+
+    private var visibleEntries: [ActivityLogEntry] {
+        Array(activity.entries.suffix(160))
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Label("Operation Logs", systemImage: "terminal")
+                    .font(.system(size: 11, weight: .semibold))
+                Spacer()
+                Text("\(activity.entries.count) events")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(TracerTheme.headerBackground)
+            .overlay(Rectangle().fill(TracerTheme.hairline).frame(height: 1), alignment: .bottom)
+
+            ScrollViewReader { proxy in
+                ScrollView(.vertical, showsIndicators: true) {
+                    LazyVStack(alignment: .leading, spacing: 3) {
+                        if visibleEntries.isEmpty {
+                            Text("No activity yet.")
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(.secondary)
+                                .padding(10)
+                        } else {
+                            ForEach(visibleEntries) { entry in
+                                HStack(alignment: .firstTextBaseline, spacing: 7) {
+                                    Text(entry.timestamp, style: .time)
+                                        .font(.system(size: 10, design: .monospaced))
+                                        .foregroundColor(.secondary)
+                                        .frame(width: 64, alignment: .leading)
+                                    Image(systemName: icon(for: entry.level))
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .foregroundColor(color(for: entry.level))
+                                        .frame(width: 14)
+                                    Text(entry.source)
+                                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                        .foregroundColor(color(for: entry.level))
+                                        .frame(width: 92, alignment: .leading)
+                                    Text(entry.message)
+                                        .font(.system(size: 10, design: .monospaced))
+                                        .foregroundColor(.primary.opacity(0.9))
+                                        .textSelection(.enabled)
+                                }
+                                .id(entry.id)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 1)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 6)
+                }
+                .onChange(of: activity.entries.count) { _, _ in
+                    if let last = visibleEntries.last {
+                        withAnimation(.easeOut(duration: 0.12)) {
+                            proxy.scrollTo(last.id, anchor: .bottom)
+                        }
+                    }
+                }
+                .onAppear {
+                    if let last = visibleEntries.last {
+                        proxy.scrollTo(last.id, anchor: .bottom)
+                    }
+                }
+            }
+        }
+        .background(TracerTheme.panelBackground)
+    }
+
+    private func icon(for level: ActivityLogLevel) -> String {
+        switch level {
+        case .info: return "info.circle"
+        case .success: return "checkmark.circle"
+        case .warning: return "exclamationmark.triangle"
+        case .error: return "xmark.octagon"
+        }
+    }
+
+    private func color(for level: ActivityLogLevel) -> Color {
+        switch level {
+        case .info: return TracerTheme.accentBright
+        case .success: return .green
+        case .warning: return .orange
+        case .error: return .red
+        }
+    }
+}
+
+private struct ActivityLogHooks: ViewModifier {
+    @ObservedObject var vm: ViewerViewModel
+    @ObservedObject var monai: MONAILabelViewModel
+    @ObservedObject var nnunet: NNUnetViewModel
+    @ObservedObject var pet: PETEngineViewModel
+    @ObservedObject var classification: ClassificationViewModel
+    @ObservedObject var modelManager: ModelManagerViewModel
+    @ObservedObject var cohort: CohortResultsStore
+    @ObservedObject var lesionDetector: LesionDetectorViewModel
+    @ObservedObject var petAC: PETACViewModel
+    @ObservedObject var reconstruction: NuclearReconstructionViewModel
+    @ObservedObject var syntheticCT: SyntheticCTViewModel
+    @ObservedObject var dosimetry: Lu177DosimetryViewModel
+    @ObservedObject var activity: ActivityLogStore
+
+    func body(content: Content) -> some View {
+        content
+            .modifier(ViewerActivityLogHooks(vm: vm,
+                                             monai: monai,
+                                             activity: activity))
+            .modifier(InferenceActivityLogHooks(nnunet: nnunet,
+                                                pet: pet,
+                                                classification: classification,
+                                                activity: activity))
+            .modifier(WorkflowActivityLogHooks(modelManager: modelManager,
+                                               cohort: cohort,
+                                               lesionDetector: lesionDetector,
+                                               petAC: petAC,
+                                               activity: activity))
+            .modifier(NuclearActivityLogHooks(reconstruction: reconstruction,
+                                              syntheticCT: syntheticCT,
+                                              dosimetry: dosimetry,
+                                              activity: activity))
+    }
+}
+
+private struct ViewerActivityLogHooks: ViewModifier {
+    @ObservedObject var vm: ViewerViewModel
+    @ObservedObject var monai: MONAILabelViewModel
+    @ObservedObject var activity: ActivityLogStore
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: vm.statusMessage) { _, newValue in
+                activity.logStatus(newValue, source: "Viewer")
+            }
+            .onChange(of: monai.statusMessage) { _, newValue in
+                activity.logStatus(newValue, source: "MONAI")
+            }
+    }
+}
+
+private struct InferenceActivityLogHooks: ViewModifier {
+    @ObservedObject var nnunet: NNUnetViewModel
+    @ObservedObject var pet: PETEngineViewModel
+    @ObservedObject var classification: ClassificationViewModel
+    @ObservedObject var activity: ActivityLogStore
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: nnunet.statusMessage) { _, newValue in
+                activity.logStatus(newValue, source: "nnU-Net")
+            }
+            .onChange(of: nnunet.log) { _, newValue in
+                ActivityLogHelpers.logLatestLine(newValue, source: "nnU-Net", activity: activity)
+            }
+            .onChange(of: pet.statusMessage) { _, newValue in
+                activity.logStatus(newValue, source: "PET Engine")
+            }
+            .onChange(of: classification.statusMessage) { _, newValue in
+                activity.logStatus(newValue, source: "Classifier")
+            }
+    }
+}
+
+private struct WorkflowActivityLogHooks: ViewModifier {
+    @ObservedObject var modelManager: ModelManagerViewModel
+    @ObservedObject var cohort: CohortResultsStore
+    @ObservedObject var lesionDetector: LesionDetectorViewModel
+    @ObservedObject var petAC: PETACViewModel
+    @ObservedObject var activity: ActivityLogStore
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: modelManager.statusMessage) { _, newValue in
+                activity.logStatus(newValue, source: "Models")
+            }
+            .onChange(of: modelManager.downloader.statusByModelID) { _, newValue in
+                ActivityLogHelpers.logDownloadStatuses(newValue,
+                                                       modelManager: modelManager,
+                                                       activity: activity)
+            }
+            .onChange(of: cohort.statusMessage) { _, newValue in
+                activity.logStatus(newValue, source: "Cohort")
+            }
+            .onChange(of: lesionDetector.statusMessage) { _, newValue in
+                activity.logStatus(newValue, source: "Detector")
+            }
+            .onChange(of: lesionDetector.log) { _, newValue in
+                ActivityLogHelpers.logLatestLine(newValue, source: "Detector", activity: activity)
+            }
+            .onChange(of: petAC.statusMessage) { _, newValue in
+                activity.logStatus(newValue, source: "PET AC")
+            }
+            .onChange(of: petAC.log) { _, newValue in
+                ActivityLogHelpers.logLatestLine(newValue, source: "PET AC", activity: activity)
+            }
+    }
+}
+
+private struct NuclearActivityLogHooks: ViewModifier {
+    @ObservedObject var reconstruction: NuclearReconstructionViewModel
+    @ObservedObject var syntheticCT: SyntheticCTViewModel
+    @ObservedObject var dosimetry: Lu177DosimetryViewModel
+    @ObservedObject var activity: ActivityLogStore
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: reconstruction.statusMessage) { _, newValue in
+                activity.logStatus(newValue, source: "Reconstruction")
+            }
+            .onChange(of: syntheticCT.statusMessage) { _, newValue in
+                activity.logStatus(newValue, source: "Synthetic CT")
+            }
+            .onChange(of: dosimetry.statusMessage) { _, newValue in
+                activity.logStatus(newValue, source: "Dosimetry")
+            }
+    }
+}
+
+private enum ActivityLogHelpers {
+    @MainActor
+    static func logLatestLine(_ text: String, source: String, activity: ActivityLogStore) {
+        let line = text
+            .split(whereSeparator: \.isNewline)
+            .last
+            .map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let line, !line.isEmpty {
+            activity.log(line, source: source)
+        }
+    }
+
+    @MainActor
+    static func logDownloadStatuses(_ statuses: [String: ModelDownloadManager.DownloadStatus],
+                                    modelManager: ModelManagerViewModel,
+                                    activity: ActivityLogStore) {
+        for (modelID, status) in statuses {
+            let displayName = modelManager.store.models.first(where: { $0.id == modelID })?.displayName ?? modelID
+            switch status {
+            case .idle:
+                break
+            case .downloading(let bytesReceived, let totalBytes):
+                activity.log("Downloading \(displayName): \(byteProgress(bytesReceived, totalBytes))",
+                             source: "Models")
+            case .verifying:
+                activity.log("Verifying \(displayName).", source: "Models")
+            case .completed(let sizeBytes):
+                activity.log("Downloaded \(displayName) (\(byteString(Int64(sizeBytes))).",
+                             source: "Models",
+                             level: .success)
+            case .failed(let message):
+                activity.log("\(displayName) download failed: \(message)",
+                             source: "Models",
+                             level: .error)
+            case .cancelled:
+                activity.log("\(displayName) download cancelled.",
+                             source: "Models",
+                             level: .warning)
+            }
+        }
+    }
+
+    static func byteProgress(_ received: Int64, _ total: Int64) -> String {
+        guard total > 0 else { return "\(byteString(received)) received" }
+        return "\(byteString(received)) / \(byteString(total))"
+    }
+
+    static func byteString(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 }
 

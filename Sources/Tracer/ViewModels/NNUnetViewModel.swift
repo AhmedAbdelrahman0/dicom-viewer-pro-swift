@@ -272,7 +272,7 @@ public final class NNUnetViewModel: ObservableObject {
         statusMessage = "Uploading to \(cfg.sshDestination) — \(entry.datasetID)…"
         do {
             let channels = [volume] + auxiliaryChannels
-            let result = try await Task.detached(priority: .userInitiated) {
+            let result = try await Task.detached(priority: ResourcePolicy.load().backgroundTaskPriority) {
                 try await runner.runInference(
                     channels: channels,
                     referenceVolume: volume,

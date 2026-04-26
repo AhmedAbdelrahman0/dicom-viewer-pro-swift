@@ -66,7 +66,7 @@ public final class NuclearReconstructionViewModel: ObservableObject {
 
         task = Task { [weak self, viewer] in
             do {
-                let volume = try await Task.detached(priority: .userInitiated) {
+                let volume = try await Task.detached(priority: ResourcePolicy.load().backgroundTaskPriority) {
                     let angles = (0..<projectionCount).map { index in
                         Double(index) * Double.pi / Double(projectionCount)
                     }

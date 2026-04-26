@@ -69,6 +69,13 @@ public final class NNUnetRunner: @unchecked Sendable {
         /// Max wait time for the process in seconds. `nil` = unlimited.
         public var timeoutSeconds: TimeInterval?
 
+        /// Optional Docker/Podman image for containerized worker execution.
+        /// When set, Tracer invokes `docker run` through `WorkerProcess`
+        /// instead of launching the local nnU-Net binary directly.
+        public var dockerImage: String?
+        public var dockerMounts: [DockerWorkerMount] = []
+        public var dockerEnableGPU: Bool = true
+
         public init(predictBinaryPath: String? = nil,
                     resultsDir: URL? = nil,
                     rawDir: URL? = nil,
@@ -80,7 +87,10 @@ public final class NNUnetRunner: @unchecked Sendable {
                     checkpoint: String? = nil,
                     disableTestTimeAugmentation: Bool = true,
                     quiet: Bool = true,
-                    timeoutSeconds: TimeInterval? = nil) {
+                    timeoutSeconds: TimeInterval? = nil,
+                    dockerImage: String? = nil,
+                    dockerMounts: [DockerWorkerMount] = [],
+                    dockerEnableGPU: Bool = true) {
             self.predictBinaryPath = predictBinaryPath
             self.resultsDir = resultsDir
             self.rawDir = rawDir
@@ -93,6 +103,9 @@ public final class NNUnetRunner: @unchecked Sendable {
             self.disableTestTimeAugmentation = disableTestTimeAugmentation
             self.quiet = quiet
             self.timeoutSeconds = timeoutSeconds
+            self.dockerImage = dockerImage
+            self.dockerMounts = dockerMounts
+            self.dockerEnableGPU = dockerEnableGPU
         }
     }
 
@@ -134,6 +147,7 @@ public final class NNUnetRunner: @unchecked Sendable {
 
     public private(set) var configuration: Configuration
     private var activeProcess: Process?
+    private var activeWorker: WorkerProcess?
     private let processLock = NSLock()
     private var cancelled: Bool = false
 
@@ -217,6 +231,7 @@ public final class NNUnetRunner: @unchecked Sendable {
         processLock.lock()
         cancelled = true
         activeProcess?.interrupt()
+        activeWorker?.cancel()
         processLock.unlock()
     }
 
@@ -326,6 +341,7 @@ public final class NNUnetRunner: @unchecked Sendable {
         let startedAt = Date()
         let (_, stderr) = try await launchAndWait(binary: binary,
                                                    arguments: args,
+                                                   workingDirectory: workRoot,
                                                    logSink: logSink)
         let elapsed = Date().timeIntervalSince(startedAt)
 
@@ -410,13 +426,10 @@ public final class NNUnetRunner: @unchecked Sendable {
 
     private func launchAndWait(binary: String,
                                arguments: [String],
+                               workingDirectory: URL?,
                                logSink: @escaping @Sendable (String) -> Void) async throws -> (stdout: String, stderr: String) {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: binary)
-        proc.arguments = arguments
-
         // Forward nnU-Net_results if configured.
-        var env = ProcessInfo.processInfo.environment
+        var env = ResourcePolicy.load().applyingSubprocessDefaults(to: ProcessInfo.processInfo.environment)
         for (key, value) in configuration.additionalEnvironment {
             if key == "PYTHONPATH",
                let existing = env["PYTHONPATH"],
@@ -430,36 +443,24 @@ public final class NNUnetRunner: @unchecked Sendable {
         if let r = configuration.resultsDir?.path { env["nnUNet_results"] = r }
         if let r = configuration.rawDir?.path { env["nnUNet_raw"] = r }
         if let r = configuration.preprocessedDir?.path { env["nnUNet_preprocessed"] = r }
-        proc.environment = env
 
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        proc.standardOutput = stdoutPipe
-        proc.standardError = stderrPipe
-
-        // Drain both pipes while the process runs. Some nnU-Net/Python setups
-        // are surprisingly chatty on stdout; waiting until exit can fill the
-        // pipe buffer and stall inference indefinitely.
-        let stdoutBuffer = StreamedBuffer(sink: { _ in })
-        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
-            let chunk = handle.availableData
-            guard !chunk.isEmpty else { return }
-            stdoutBuffer.append(chunk)
+        let worker: WorkerProcess
+        if let image = configuration.dockerImage?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !image.isEmpty {
+            let mounts = dockerMounts(workingDirectory: workingDirectory)
+            worker = DockerWorkerProcess(configuration: DockerWorkerConfiguration(
+                image: image,
+                mounts: mounts,
+                enableGPU: configuration.dockerEnableGPU
+            ))
+        } else {
+            worker = LocalWorkerProcess()
         }
-
-        // Stream stderr line-by-line to the log sink.
-        let stderrBuffer = StreamedBuffer(sink: logSink)
-        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
-            let chunk = handle.availableData
-            guard !chunk.isEmpty else { return }
-            stderrBuffer.append(chunk)
-        }
-
         let canStart = withProcessLock {
             if cancelled {
                 return false
             }
-            activeProcess = proc
+            activeWorker = worker
             return true
         }
         guard canStart else {
@@ -467,46 +468,96 @@ public final class NNUnetRunner: @unchecked Sendable {
         }
 
         do {
-            try proc.run()
+            let result = try await worker.run(WorkerProcessRequest(
+                executablePath: binary,
+                arguments: arguments,
+                environment: env,
+                workingDirectory: workingDirectory,
+                timeoutSeconds: configuration.timeoutSeconds,
+                streamStdout: false,
+                streamStderr: true
+            ), logSink: logSink)
+            let wasCancelled = withProcessLock {
+                let value = cancelled
+                activeWorker = nil
+                activeProcess = nil
+                return value
+            }
+            if wasCancelled {
+                throw RunError.cancelled
+            }
+            return (result.stdout, result.stderr)
+        } catch WorkerProcessError.cancelled {
+            withProcessLock {
+                activeWorker = nil
+                activeProcess = nil
+            }
+            throw RunError.cancelled
+        } catch WorkerProcessError.timedOut(let exitCode, let stderr) {
+            withProcessLock {
+                activeWorker = nil
+                activeProcess = nil
+            }
+            let seconds = configuration.timeoutSeconds.map { "\(Int($0))s" } ?? "the configured timeout"
+            throw RunError.subprocessFailed(exitCode: exitCode,
+                                            stderr: "nnU-Net timed out after \(seconds): \(stderr)")
+        } catch WorkerProcessError.nonZeroExit(let exitCode, let stderr) {
+            withProcessLock {
+                activeWorker = nil
+                activeProcess = nil
+            }
+            throw RunError.subprocessFailed(exitCode: exitCode, stderr: stderr)
         } catch {
+            withProcessLock {
+                activeWorker = nil
+                activeProcess = nil
+            }
             throw RunError.subprocessFailed(exitCode: -1, stderr: "\(error)")
         }
+    }
 
-        let timedOut = await ProcessWaiter.wait(
-            for: proc,
-            timeoutSeconds: configuration.timeoutSeconds
-        )
+    private func dockerMounts(workingDirectory: URL?) -> [DockerWorkerMount] {
+        var mounts = configuration.dockerMounts
 
-        // Drain.
-        stdoutPipe.fileHandleForReading.readabilityHandler = nil
-        stderrPipe.fileHandleForReading.readabilityHandler = nil
-        let remainingStdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        stdoutBuffer.append(remainingStdout)
-        let remainingStderr = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-        stderrBuffer.append(remainingStderr)
-        let stdoutStr = stdoutBuffer.flush()
-
-        let wasCancelled = withProcessLock {
-            let value = cancelled
-            activeProcess = nil
-            return value
+        func appendUnique(_ mount: DockerWorkerMount) {
+            let hostPath = URL(fileURLWithPath: mount.hostPath).standardizedFileURL.path
+            let containerPath = URL(fileURLWithPath: mount.containerPath).standardizedFileURL.path
+            let alreadyMounted = mounts.contains { existing in
+                URL(fileURLWithPath: existing.hostPath).standardizedFileURL.path == hostPath ||
+                URL(fileURLWithPath: existing.containerPath).standardizedFileURL.path == containerPath
+            }
+            if !alreadyMounted {
+                mounts.append(mount)
+            }
         }
 
-        if wasCancelled {
-            throw RunError.cancelled
+        if let workingDirectory {
+            appendUnique(DockerWorkerMount(hostPath: workingDirectory.path,
+                                           containerPath: workingDirectory.path,
+                                           access: .readWrite))
+        }
+        if let resultsDir = configuration.resultsDir {
+            appendUnique(DockerWorkerMount(hostPath: resultsDir.path,
+                                           containerPath: resultsDir.path,
+                                           access: .readOnly))
+        }
+        if let modelFolder = configuration.modelFolder {
+            appendUnique(DockerWorkerMount(hostPath: modelFolder.path,
+                                           containerPath: modelFolder.path,
+                                           access: .readOnly))
+        }
+        if let rawDir = configuration.rawDir {
+            appendUnique(DockerWorkerMount(hostPath: rawDir.path,
+                                           containerPath: rawDir.path,
+                                           access: .readWrite))
+        }
+        if let preprocessedDir = configuration.preprocessedDir {
+            appendUnique(DockerWorkerMount(hostPath: preprocessedDir.path,
+                                           containerPath: preprocessedDir.path,
+                                           access: .readWrite))
         }
 
-        if timedOut {
-            let seconds = configuration.timeoutSeconds.map { "\(Int($0))s" } ?? "the configured timeout"
-            throw RunError.subprocessFailed(exitCode: proc.terminationStatus,
-                                            stderr: "nnU-Net timed out after \(seconds): \(stderrBuffer.flush())")
-        }
-
-        let exit = proc.terminationStatus
-        if exit != 0 {
-            throw RunError.subprocessFailed(exitCode: exit, stderr: stderrBuffer.flush())
-        }
-        return (stdoutStr, stderrBuffer.flush())
+        return mounts
     }
 
     private func setCancelled(_ value: Bool) {

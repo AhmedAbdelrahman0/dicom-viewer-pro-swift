@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 #if os(macOS)
@@ -24,6 +25,19 @@ public struct TracerSettingsView: View {
     @AppStorage(TracerSettings.Keys.defaultMONAIURL) private var defaultMONAIURL: String = "http://127.0.0.1:8000"
     @AppStorage(TracerSettings.Keys.defaultNNUnetBinary) private var defaultNNUnetBinary: String = ""
     @AppStorage(TracerSettings.Keys.defaultNNUnetResults) private var defaultNNUnetResults: String = ""
+    @AppStorage(TracerSettings.Keys.resourceProfile) private var resourceProfileRaw: String = ResourcePolicy.Profile.balanced.rawValue
+    @AppStorage(TracerSettings.Keys.resourceCPULimit) private var cpuWorkerLimit: Int = ResourcePolicy.balancedPreset.cpuWorkerLimit
+    @AppStorage(TracerSettings.Keys.resourceIndexingLimit) private var indexingWorkerLimit: Int = ResourcePolicy.balancedPreset.indexingWorkerLimit
+    @AppStorage(TracerSettings.Keys.resourceCohortLimit) private var cohortWorkerLimit: Int = ResourcePolicy.balancedPreset.cohortWorkerLimit
+    @AppStorage(TracerSettings.Keys.resourceGPULimit) private var gpuWorkerLimit: Int = ResourcePolicy.balancedPreset.gpuWorkerLimit
+    @AppStorage(TracerSettings.Keys.resourceMIPLimit) private var mipWorkerLimit: Int = ResourcePolicy.balancedPreset.mipWorkerLimit
+    @AppStorage(TracerSettings.Keys.resourceMemoryBudgetGB) private var memoryBudgetGB: Double = ResourcePolicy.balancedPreset.memoryBudgetGB
+    @AppStorage(TracerSettings.Keys.resourceUndoBudgetMB) private var undoHistoryBudgetMB: Int = ResourcePolicy.balancedPreset.undoHistoryBudgetMB
+    @AppStorage(TracerSettings.Keys.resourceSliceCacheEntries) private var sliceCacheEntries: Int = ResourcePolicy.balancedPreset.sliceCacheEntries
+    @AppStorage(TracerSettings.Keys.resourcePETMIPCacheEntries) private var petMIPCacheEntries: Int = ResourcePolicy.balancedPreset.petMIPCacheEntries
+    @AppStorage(TracerSettings.Keys.resourceVolumeTextureMaxDimension) private var volumeRenderTextureMaxDimension: Int = ResourcePolicy.balancedPreset.volumeRenderTextureMaxDimension
+    @AppStorage(TracerSettings.Keys.resourceVolumeSampleLimit) private var volumeRenderSampleLimit: Int = ResourcePolicy.balancedPreset.volumeRenderSampleLimit
+    @AppStorage(TracerSettings.Keys.resourceResponsivePriority) private var preferResponsiveBackgroundPriority: Bool = ResourcePolicy.balancedPreset.preferResponsiveBackgroundPriority
 
     public init() {}
 
@@ -33,12 +47,14 @@ public struct TracerSettingsView: View {
                 .tabItem { Label("Shortcuts", systemImage: "keyboard") }
             enginesTab
                 .tabItem { Label("Engines", systemImage: "cpu") }
+            performanceTab
+                .tabItem { Label("Performance", systemImage: "gauge.with.dots.needle.bottom.50percent") }
             DGXSparkSettingsTab()
                 .tabItem { Label("DGX Spark", systemImage: "bolt.horizontal.fill") }
             appearanceTab
                 .tabItem { Label("Appearance", systemImage: "sparkles") }
         }
-        .frame(width: 620, height: 460)
+        .frame(width: 680, height: 560)
         .padding(18)
     }
 
@@ -109,6 +125,166 @@ public struct TracerSettingsView: View {
         .formStyle(.grouped)
     }
 
+    // MARK: - Performance tab
+
+    private var performanceTab: some View {
+        let snapshot = ResourceSystemSnapshot.current()
+        let policy = ResourcePolicy.load()
+        return Form {
+            Section("Resource policy") {
+                Picker("Profile", selection: Binding(
+                    get: { resourceProfileRaw },
+                    set: { raw in
+                        let profile = ResourcePolicy.Profile(rawValue: raw) ?? .balanced
+                        applyResourceProfile(profile)
+                    }
+                )) {
+                    ForEach(ResourcePolicy.Profile.allCases) { profile in
+                        Text(profile.displayName).tag(profile.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                Text((ResourcePolicy.Profile(rawValue: resourceProfileRaw) ?? .balanced).description)
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+
+                Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 6) {
+                    GridRow {
+                        Text("CPU")
+                        Text("\(snapshot.activeProcessorCount) active / \(snapshot.processorCount) logical")
+                            .foregroundColor(.secondary)
+                    }
+                    GridRow {
+                        Text("Memory")
+                        Text(byteString(snapshot.physicalMemoryBytes))
+                            .foregroundColor(.secondary)
+                    }
+                    GridRow {
+                        Text("GPU")
+                        Text(snapshot.gpuName ?? "Unavailable")
+                            .foregroundColor(.secondary)
+                    }
+                    if let workingSet = snapshot.gpuRecommendedWorkingSetBytes {
+                        GridRow {
+                            Text("GPU working set")
+                            Text(byteString(workingSet))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    GridRow {
+                        Text("Thermal")
+                        Text(snapshot.thermalStateDescription + (snapshot.lowPowerModeEnabled ? " · Low Power" : ""))
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .font(.system(size: 11, design: .monospaced))
+            }
+
+            Section("CPU and batch work") {
+                Stepper("CPU threads per local worker: \(cpuWorkerLimit)",
+                        value: Binding(
+                            get: { cpuWorkerLimit },
+                            set: { cpuWorkerLimit = $0; markResourceCustom() }
+                        ),
+                        in: 1...max(1, ResourcePolicy.processorCount))
+                Stepper("PACS indexing workers: \(indexingWorkerLimit)",
+                        value: Binding(
+                            get: { indexingWorkerLimit },
+                            set: { indexingWorkerLimit = $0; markResourceCustom() }
+                        ),
+                        in: 1...32)
+                Stepper("Cohort workers: \(cohortWorkerLimit)",
+                        value: Binding(
+                            get: { cohortWorkerLimit },
+                            set: { cohortWorkerLimit = $0; markResourceCustom() }
+                        ),
+                        in: 1...32)
+                Toggle("Keep background jobs at responsive priority",
+                       isOn: Binding(
+                           get: { preferResponsiveBackgroundPriority },
+                           set: { preferResponsiveBackgroundPriority = $0; markResourceCustom() }
+                       ))
+                Text("Python/ANTs/nnU-Net subprocesses receive BLAS/OpenMP thread caps from this policy unless the model-specific environment overrides them.")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+            }
+
+            Section("GPU and 3D rendering") {
+                Stepper("GPU-heavy jobs at once: \(gpuWorkerLimit)",
+                        value: Binding(
+                            get: { gpuWorkerLimit },
+                            set: { gpuWorkerLimit = $0; markResourceCustom() }
+                        ),
+                        in: 1...8)
+                Stepper("PET MIP projections at once: \(mipWorkerLimit)",
+                        value: Binding(
+                            get: { mipWorkerLimit },
+                            set: { mipWorkerLimit = $0; markResourceCustom() }
+                        ),
+                        in: 1...8)
+                Stepper("3D texture max dimension: \(volumeRenderTextureMaxDimension)",
+                        value: Binding(
+                            get: { volumeRenderTextureMaxDimension },
+                            set: { volumeRenderTextureMaxDimension = $0; markResourceCustom() }
+                        ),
+                        in: 96...1024,
+                        step: 32)
+                Stepper("3D ray samples: \(volumeRenderSampleLimit)",
+                        value: Binding(
+                            get: { volumeRenderSampleLimit },
+                            set: { volumeRenderSampleLimit = $0; markResourceCustom() }
+                        ),
+                        in: 64...1024,
+                        step: 32)
+                Text("Effective 3D budget: \(policy.volumeRenderTextureMaxDimension)³ texture cap, \(policy.volumeRenderSampleLimit) samples.")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+            }
+
+            Section("Memory and caches") {
+                Stepper("App memory budget: \(String(format: "%.1f", memoryBudgetGB)) GB",
+                        value: Binding(
+                            get: { memoryBudgetGB },
+                            set: { memoryBudgetGB = $0; markResourceCustom() }
+                        ),
+                        in: 1...max(2, ResourcePolicy.physicalMemoryGB),
+                        step: 0.5)
+                Stepper("Undo history: \(undoHistoryBudgetMB) MB",
+                        value: Binding(
+                            get: { undoHistoryBudgetMB },
+                            set: { undoHistoryBudgetMB = $0; markResourceCustom() }
+                        ),
+                        in: 64...4096,
+                        step: 64)
+                Stepper("Slice cache entries: \(sliceCacheEntries)",
+                        value: Binding(
+                            get: { sliceCacheEntries },
+                            set: { sliceCacheEntries = $0; markResourceCustom() }
+                        ),
+                        in: 12...512)
+                Stepper("PET MIP cache entries: \(petMIPCacheEntries)",
+                        value: Binding(
+                            get: { petMIPCacheEntries },
+                            set: { petMIPCacheEntries = $0; markResourceCustom() }
+                        ),
+                        in: 2...64)
+                HStack {
+                    Spacer()
+                    Button("Reset Balanced") { applyResourceProfile(.balanced) }
+                        .buttonStyle(.bordered)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear {
+            if resourceProfileRaw != ResourcePolicy.Profile.custom.rawValue,
+               let profile = ResourcePolicy.Profile(rawValue: resourceProfileRaw) {
+                applyResourceProfile(profile)
+            }
+        }
+    }
+
     // MARK: - Appearance tab
 
     private var appearanceTab: some View {
@@ -141,6 +317,19 @@ public enum TracerSettings {
         public static let defaultMONAIURL = "Tracer.Prefs.MONAI.DefaultURL"
         public static let defaultNNUnetBinary = "Tracer.Prefs.NNUnet.Binary"
         public static let defaultNNUnetResults = "Tracer.Prefs.NNUnet.Results"
+        public static let resourceProfile = ResourcePolicy.Keys.profile
+        public static let resourceCPULimit = ResourcePolicy.Keys.cpuWorkerLimit
+        public static let resourceIndexingLimit = ResourcePolicy.Keys.indexingWorkerLimit
+        public static let resourceCohortLimit = ResourcePolicy.Keys.cohortWorkerLimit
+        public static let resourceGPULimit = ResourcePolicy.Keys.gpuWorkerLimit
+        public static let resourceMIPLimit = ResourcePolicy.Keys.mipWorkerLimit
+        public static let resourceMemoryBudgetGB = ResourcePolicy.Keys.memoryBudgetGB
+        public static let resourceUndoBudgetMB = ResourcePolicy.Keys.undoHistoryBudgetMB
+        public static let resourceSliceCacheEntries = ResourcePolicy.Keys.sliceCacheEntries
+        public static let resourcePETMIPCacheEntries = ResourcePolicy.Keys.petMIPCacheEntries
+        public static let resourceVolumeTextureMaxDimension = ResourcePolicy.Keys.volumeRenderTextureMaxDimension
+        public static let resourceVolumeSampleLimit = ResourcePolicy.Keys.volumeRenderSampleLimit
+        public static let resourceResponsivePriority = ResourcePolicy.Keys.preferResponsiveBackgroundPriority
     }
 
     /// All W/L presets available as rebind targets, built once from the
@@ -149,6 +338,35 @@ public enum TracerSettings {
         let all = WLPresets.CT + WLPresets.MR + WLPresets.PT
         return Array(Set(all.map(\.name))).sorted()
     }()
+}
+
+private extension TracerSettingsView {
+    func markResourceCustom() {
+        resourceProfileRaw = ResourcePolicy.Profile.custom.rawValue
+    }
+
+    func applyResourceProfile(_ profile: ResourcePolicy.Profile) {
+        resourceProfileRaw = profile.rawValue
+        guard profile != .custom else { return }
+        let policy = ResourcePolicy.preset(profile)
+        cpuWorkerLimit = policy.cpuWorkerLimit
+        indexingWorkerLimit = policy.indexingWorkerLimit
+        cohortWorkerLimit = policy.cohortWorkerLimit
+        gpuWorkerLimit = policy.gpuWorkerLimit
+        mipWorkerLimit = policy.mipWorkerLimit
+        memoryBudgetGB = policy.memoryBudgetGB
+        undoHistoryBudgetMB = policy.undoHistoryBudgetMB
+        sliceCacheEntries = policy.sliceCacheEntries
+        petMIPCacheEntries = policy.petMIPCacheEntries
+        volumeRenderTextureMaxDimension = policy.volumeRenderTextureMaxDimension
+        volumeRenderSampleLimit = policy.volumeRenderSampleLimit
+        preferResponsiveBackgroundPriority = policy.preferResponsiveBackgroundPriority
+    }
+
+    func byteString(_ bytes: UInt64) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(min(bytes, UInt64(Int64.max))),
+                                  countStyle: .memory)
+    }
 }
 
 // MARK: - DGX Spark tab

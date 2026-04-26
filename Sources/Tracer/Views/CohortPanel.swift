@@ -340,8 +340,13 @@ public struct CohortPanel: View {
                 .pickerStyle(.menu)
                 .frame(maxWidth: 180)
 
-                Stepper("Workers: \(form.maxConcurrent)",
-                        value: $form.maxConcurrent, in: 1...16)
+                let cohortLimit = ResourcePolicy.load().cohortWorkerLimit
+                Stepper("Workers: \(min(form.maxConcurrent, cohortLimit)) / cap \(cohortLimit)",
+                        value: Binding(
+                            get: { min(form.maxConcurrent, cohortLimit) },
+                            set: { form.maxConcurrent = min($0, cohortLimit) }
+                        ),
+                        in: 1...max(1, cohortLimit))
                     .controlSize(.small)
 
                 Toggle("Skip if results exist", isOn: $form.skipIfResultsExist)

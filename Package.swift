@@ -11,11 +11,17 @@ let package = Package(
         .library(name: "Tracer", targets: ["Tracer"]),
         .executable(name: "TracerApp", targets: ["TracerApp"]),
     ],
-    dependencies: [],
+    dependencies: [
+        .package(url: "https://github.com/apple/swift-log.git", .upToNextMinor(from: "1.6.4")),
+        .package(url: "https://github.com/apple/swift-metrics.git", .upToNextMinor(from: "2.7.1")),
+    ],
     targets: [
         .target(
             name: "Tracer",
-            dependencies: [],
+            dependencies: [
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "Metrics", package: "swift-metrics"),
+            ],
             path: "Sources/Tracer"
         ),
         .executableTarget(

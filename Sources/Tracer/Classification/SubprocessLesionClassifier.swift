@@ -111,65 +111,34 @@ public final class SubprocessLesionClassifier: LesionClassifier, @unchecked Send
         ]
         let stdinData = try JSONSerialization.data(withJSONObject: payload)
 
-        // 2. Spawn the process.
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: spec.executablePath)
-        process.arguments = spec.arguments
-        var env = ProcessInfo.processInfo.environment
+        var env = ResourcePolicy.load().applyingSubprocessDefaults(to: ProcessInfo.processInfo.environment)
         for (k, v) in spec.environment { env[k] = v }
-        process.environment = env
 
-        let stdinPipe = Pipe()
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        process.standardInput = stdinPipe
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-
-        let stdoutBuffer = ProcessOutputBuffer()
-        let stderrBuffer = ProcessOutputBuffer()
-        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
-            stdoutBuffer.append(handle.availableData)
-        }
-        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
-            stderrBuffer.append(handle.availableData)
-        }
-
+        let result: WorkerProcessResult
         do {
-            try process.run()
+            result = try await LocalWorkerProcess().run(WorkerProcessRequest(
+                executablePath: spec.executablePath,
+                arguments: spec.arguments,
+                environment: env,
+                stdinData: stdinData,
+                timeoutSeconds: spec.timeoutSeconds,
+                streamStdout: false,
+                streamStderr: false
+            ))
+        } catch WorkerProcessError.timedOut(_, let stderr) {
+            throw ClassificationError.inferenceFailed(
+                "subprocess timed out after \(Int(spec.timeoutSeconds))s\(stderr.isEmpty ? "" : ": \(stderr)")"
+            )
+        } catch WorkerProcessError.nonZeroExit(let exitCode, let stderr) {
+            throw ClassificationError.inferenceFailed(
+                "subprocess exited \(exitCode): \(stderr)"
+            )
         } catch {
             throw ClassificationError.inferenceFailed(
                 "launch failed: \(error.localizedDescription)"
             )
         }
-
-        // Feed payload, close stdin.
-        try stdinPipe.fileHandleForWriting.write(contentsOf: stdinData)
-        try stdinPipe.fileHandleForWriting.close()
-
-        let timedOut = await ProcessWaiter.wait(
-            for: process,
-            timeoutSeconds: spec.timeoutSeconds
-        )
-
-        stdoutPipe.fileHandleForReading.readabilityHandler = nil
-        stderrPipe.fileHandleForReading.readabilityHandler = nil
-        stdoutBuffer.append(stdoutPipe.fileHandleForReading.readDataToEndOfFile())
-        stderrBuffer.append(stderrPipe.fileHandleForReading.readDataToEndOfFile())
-        let stdoutData = stdoutBuffer.data()
-        let stderr = stderrBuffer.string()
-
-        if timedOut {
-            throw ClassificationError.inferenceFailed(
-                "subprocess timed out after \(Int(spec.timeoutSeconds))s\(stderr.isEmpty ? "" : ": \(stderr)")"
-            )
-        }
-
-        guard process.terminationStatus == 0 else {
-            throw ClassificationError.inferenceFailed(
-                "subprocess exited \(process.terminationStatus): \(stderr)"
-            )
-        }
+        let stdoutData = result.stdoutData
 
         // 3. Parse the response JSON.
         guard let obj = try? JSONSerialization.jsonObject(with: stdoutData),

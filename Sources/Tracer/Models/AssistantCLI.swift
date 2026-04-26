@@ -176,41 +176,30 @@ public struct AssistantCLIRunner: Sendable {
                             arguments: [String],
                             workingDirectory: URL?) async throws -> String {
         #if os(macOS)
-        return try await Task.detached(priority: .userInitiated) {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: executable)
-            process.arguments = arguments
-            if let workingDirectory {
-                process.currentDirectoryURL = workingDirectory
-            }
-
-            let output = Pipe()
-            let error = Pipe()
-            process.standardOutput = output
-            process.standardError = error
-
-            try process.run()
-
-            let timedOut = await ProcessWaiter.wait(for: process, timeoutSeconds: 45)
-
-            let stdout = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            let stderr = String(data: error.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-
-            if timedOut {
-                let message = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-                throw AssistantCLIError.failed(
-                    "CLI response timed out after 45 seconds.\(message.isEmpty ? "" : " Last stderr: \(message)")"
-                )
-            }
-
-            guard process.terminationStatus == 0 else {
-                let message = stderr.isEmpty ? stdout : stderr
-                throw AssistantCLIError.failed(message.trimmingCharacters(in: .whitespacesAndNewlines))
-            }
-
-            let trimmed = stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            let result = try await LocalWorkerProcess().run(WorkerProcessRequest(
+                executablePath: executable,
+                arguments: arguments,
+                environment: ProcessInfo.processInfo.environment,
+                workingDirectory: workingDirectory,
+                timeoutSeconds: 45,
+                streamStdout: false,
+                streamStderr: false
+            ))
+            let trimmed = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty ? "CLI returned no text." : trimmed
-        }.value
+        } catch WorkerProcessError.timedOut(_, let stderr) {
+            let message = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw AssistantCLIError.failed(
+                "CLI response timed out after 45 seconds.\(message.isEmpty ? "" : " Last stderr: \(message)")"
+            )
+        } catch WorkerProcessError.nonZeroExit(_, let stderr) {
+            throw AssistantCLIError.failed(stderr.trimmingCharacters(in: .whitespacesAndNewlines))
+        } catch WorkerProcessError.launchFailed(let message) {
+            throw AssistantCLIError.failed(message)
+        } catch WorkerProcessError.cancelled {
+            throw AssistantCLIError.failed("CLI request was cancelled.")
+        }
         #else
         throw AssistantCLIError.unavailable("CLI providers are available only on macOS.")
         #endif

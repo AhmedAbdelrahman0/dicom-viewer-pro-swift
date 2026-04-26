@@ -97,64 +97,32 @@ public final class SubprocessLesionDetector: LesionDetector, @unchecked Sendable
             extraArgs: args
         )
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: spec.executablePath)
-        process.arguments = launchArguments
-        var env = ProcessInfo.processInfo.environment
+        var env = ResourcePolicy.load().applyingSubprocessDefaults(to: ProcessInfo.processInfo.environment)
         for (k, v) in spec.environment { env[k] = v }
-        process.environment = env
-
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-
-        let stdoutBuffer = ProcessOutputBuffer()
-        let stderrBuffer = ProcessOutputBuffer()
-        // Stdout is the JSON payload — must NOT be streamed line-by-line
-        // to the progress sink (would confuse a user watching the panel).
-        // Stderr IS the model's progress chatter (PyTorch loading bars,
-        // "running NMS…", etc.).
-        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
-            let chunk = handle.availableData
-            guard !chunk.isEmpty else { return }
-            stdoutBuffer.append(chunk)
-        }
-        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
-            let chunk = handle.availableData
-            guard !chunk.isEmpty else { return }
-            stderrBuffer.append(chunk)
-            if let s = String(data: chunk, encoding: .utf8) {
-                progress(s.trimmingCharacters(in: .newlines))
-            }
-        }
-
+        let worker = LocalWorkerProcess()
+        let result: WorkerProcessResult
         do {
-            try process.run()
+            result = try await worker.run(WorkerProcessRequest(
+                executablePath: spec.executablePath,
+                arguments: launchArguments,
+                environment: env,
+                timeoutSeconds: spec.timeoutSeconds,
+                streamStdout: false,
+                streamStderr: true
+            ), logSink: progress)
+        } catch WorkerProcessError.timedOut(_, let stderr) {
+            throw DetectionError.inferenceFailed(
+                "detector subprocess timed out after \(Int(spec.timeoutSeconds))s\(stderr.isEmpty ? "" : ": \(stderr)")"
+            )
+        } catch WorkerProcessError.nonZeroExit(let exitCode, let stderr) {
+            throw DetectionError.inferenceFailed(
+                "detector subprocess exited \(exitCode): \(stderr.isEmpty ? "<no stderr>" : stderr)"
+            )
         } catch {
             throw DetectionError.inferenceFailed("could not launch \(spec.executablePath): \(error.localizedDescription)")
         }
 
-        let timedOut = await ProcessWaiter.wait(for: process,
-                                                timeoutSeconds: spec.timeoutSeconds)
-        stdoutPipe.fileHandleForReading.readabilityHandler = nil
-        stderrPipe.fileHandleForReading.readabilityHandler = nil
-        stdoutBuffer.append(stdoutPipe.fileHandleForReading.readDataToEndOfFile())
-        stderrBuffer.append(stderrPipe.fileHandleForReading.readDataToEndOfFile())
-
-        let stderr = stderrBuffer.string()
-        if timedOut {
-            throw DetectionError.inferenceFailed(
-                "detector subprocess timed out after \(Int(spec.timeoutSeconds))s\(stderr.isEmpty ? "" : ": \(stderr)")"
-            )
-        }
-        guard process.terminationStatus == 0 else {
-            throw DetectionError.inferenceFailed(
-                "detector subprocess exited \(process.terminationStatus): \(stderr.isEmpty ? "<no stderr>" : stderr)"
-            )
-        }
-
-        let stdoutData = stdoutBuffer.data()
+        let stdoutData = result.stdoutData
         let wire: DetectionWireFormat
         do {
             wire = try JSONDecoder().decode(DetectionWireFormat.self, from: stdoutData)

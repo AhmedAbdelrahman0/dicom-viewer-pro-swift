@@ -84,9 +84,10 @@ public final class LabelingViewModel: ObservableObject {
     private var currentHistoryBytes: Int = 0
     private let maxUndoRecords = 40
     private let maxTrackedChangedVoxels = 5_000_000
-    /// Total resident memory budget for undo + redo stacks (256 MB).
-    /// Older records are evicted when appending a new edit would exceed this.
-    private let maxHistoryBytes = 256 * 1024 * 1024
+    /// Total resident memory budget for undo + redo stacks. Operator-tunable
+    /// from Settings → Performance so heavy labeling sessions can trade
+    /// undo depth against RAM pressure.
+    private var maxHistoryBytes: Int { ResourcePolicy.load().undoHistoryBudgetBytes }
 
     /// Published so the UI can show how much undo memory the session is using.
     @Published public private(set) var historyMemoryBytes: Int = 0

@@ -32,7 +32,8 @@ struct VolumeRenderingPane: View {
                             level: Float(renderLevel),
                             opacity: Float(opacity),
                             density: Float(density),
-                            sampleCount: UInt32(sampleCount),
+                            sampleCount: UInt32(resourcePolicy.boundedVolumeSamples(Int(sampleCount))),
+                            maxTextureDimension: UInt32(resourcePolicy.volumeRenderTextureMaxDimension),
                             rotationX: Float(rotation.height * .pi / 180),
                             rotationY: Float(rotation.width * .pi / 180),
                             zoom: Float(zoom),
@@ -107,6 +108,10 @@ struct VolumeRenderingPane: View {
         vm.fusion == nil ? vm.invertColors : false
     }
 
+    private var resourcePolicy: ResourcePolicy {
+        ResourcePolicy.load()
+    }
+
     private var renderTitle: String {
         vm.fusion?.isPETCT == true ? "3D PET" : "3D GPU"
     }
@@ -116,7 +121,9 @@ struct VolumeRenderingPane: View {
             HStack(spacing: 8) {
                 Label("\(Int(sampleCount))", systemImage: "line.3.horizontal.decrease")
                     .font(.system(size: 10, design: .monospaced))
-                Slider(value: $sampleCount, in: 96...640, step: 32)
+                Slider(value: $sampleCount,
+                       in: 64...Double(max(96, resourcePolicy.volumeRenderSampleLimit)),
+                       step: 32)
                     .frame(width: 120)
             }
 
@@ -204,6 +211,7 @@ struct VolumeRenderSettings: Equatable {
     var opacity: Float
     var density: Float
     var sampleCount: UInt32
+    var maxTextureDimension: UInt32
     var rotationX: Float
     var rotationY: Float
     var zoom: Float

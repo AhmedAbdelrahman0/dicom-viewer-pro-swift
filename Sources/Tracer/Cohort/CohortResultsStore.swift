@@ -83,7 +83,7 @@ public final class CohortResultsStore: ObservableObject {
                 }
             }
             isRunning = true
-            activeTask = Task.detached(priority: .userInitiated) { [weak self] in
+            activeTask = Task.detached(priority: ResourcePolicy.load().backgroundTaskPriority) { [weak self] in
                 await processor.run()
                 await self?.markRunFinished()
             }

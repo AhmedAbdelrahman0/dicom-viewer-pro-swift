@@ -319,11 +319,9 @@ public final class ViewerViewModel: ObservableObject {
     private var autoWindowTask: Task<Void, Never>?
     private var dynamicPlaybackTask: Task<Void, Never>?
     private var dynamicTACTask: Task<Void, Never>?
-    private let maxPETMIPProjectionCacheEntries = 12
     private var petMIPProjectionCache: [PETMIPProjectionKey: PETMIPProjection] = [:]
     private var petMIPProjectionCacheOrder: [PETMIPProjectionKey] = []
     private var petMIPProjectionTasks: [PETMIPProjectionKey: Task<Void, Never>] = [:]
-    private let maxSliceRenderCacheEntries = 96
     private var sliceRenderCache: [SliceRenderCacheKey: CGImage] = [:]
     private var sliceRenderCacheOrder: [SliceRenderCacheKey] = []
     public private(set) var sliceRenderCacheHitCount: Int = 0
@@ -480,6 +478,8 @@ public final class ViewerViewModel: ObservableObject {
         volumeOperationTask = nil
         if let operation = volumeOperationStatus {
             statusMessage = "Cancelled \(operation.title)"
+            JobManager.shared.cancel(operationID: operation.id.uuidString,
+                                     detail: "Cancelled \(operation.title)")
         }
         volumeOperationStatus = nil
     }
@@ -1759,12 +1759,21 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     public func indexDirectory(url: URL, modelContext: ModelContext) async {
+        let jobID = "pacs-index"
         indexCancellation.reset()
         isLoading = true
         isIndexing = true
         progress = 0
         indexProgress = nil
         statusMessage = "Indexing \(url.lastPathComponent)..."
+        JobManager.shared.start(JobUpdate(operationID: jobID,
+                                          kind: .pacsIndexing,
+                                          title: "PACS indexing",
+                                          stage: "Scanning",
+                                          detail: statusMessage,
+                                          progress: nil,
+                                          systemImage: "externaldrive.badge.magnifyingglass",
+                                          canCancel: true))
         defer {
             isLoading = false
             isIndexing = false
@@ -1776,21 +1785,29 @@ public final class ViewerViewModel: ObservableObject {
             Task { @MainActor in
                 self?.indexProgress = update
                 self?.statusMessage = update.statusText
+                JobManager.shared.heartbeat(operationID: jobID,
+                                            detail: update.statusText)
+                JobManager.shared.update(operationID: jobID,
+                                         stage: update.phase.rawValue.capitalized,
+                                         detail: update.statusText)
             }
         }
 
         let cancellation = indexCancellation
         let isCancelled: @Sendable () -> Bool = { cancellation.isCancelled }
 
-        let scanResult = await Task.detached(priority: .userInitiated) {
+        let indexWorkerLimit = ResourcePolicy.load().indexingWorkerLimit
+        let scanResult = await Task.detached(priority: ResourcePolicy.load().backgroundTaskPriority) {
             PACSDirectoryIndexer.scan(url: url,
                                       progressStride: 5_000,
+                                      maxWorkerCount: indexWorkerLimit,
                                       isCancelled: isCancelled,
                                       progress: progressHandler)
         }.value
 
         if scanResult.cancelled {
             statusMessage = "Indexing cancelled after \(scanResult.scannedFiles) files (\(scanResult.records.count) partial series discarded)"
+            JobManager.shared.cancel(operationID: jobID, detail: statusMessage)
             return
         }
 
@@ -1806,6 +1823,7 @@ public final class ViewerViewModel: ObservableObject {
                 if indexCancellation.isCancelled {
                     try? modelContext.save()
                     statusMessage = "Indexing cancelled at \(offset)/\(records.count) series (inserted \(inserted), updated \(updated))"
+                    JobManager.shared.cancel(operationID: jobID, detail: statusMessage)
                     return
                 }
                 let end = min(records.count, offset + batchSize)
@@ -1818,13 +1836,23 @@ public final class ViewerViewModel: ObservableObject {
                 try modelContext.save()
                 offset = end
                 statusMessage = "Indexed \(offset)/\(records.count) series | inserted \(inserted), updated \(updated)"
+                JobManager.shared.heartbeat(operationID: jobID,
+                                            detail: statusMessage,
+                                            progress: records.isEmpty ? nil : Double(offset) / Double(records.count))
                 await Task.yield()
             }
             indexRevision += 1
             savedArchiveRoots = archiveRootStore.rememberIndexedDirectory(url: url, records: records)
             statusMessage = "Indexed \(records.count) series from \(scanResult.scannedFiles) files | inserted \(inserted), updated \(updated), skipped \(scanResult.skippedFiles)"
+            JobManager.shared.succeed(operationID: jobID, detail: statusMessage)
         } catch {
             statusMessage = "Index error: \(error.localizedDescription)"
+            JobManager.shared.fail(operationID: jobID,
+                                   error: JobErrorInfo(error,
+                                                       code: "pacs_index_error",
+                                                       recoverySuggestion: "Check directory permissions and retry indexing.",
+                                                       isRetryable: true),
+                                   detail: statusMessage)
         }
     }
 
@@ -1832,6 +1860,7 @@ public final class ViewerViewModel: ObservableObject {
     /// Safe to call from any thread. No-op when no scan is running.
     public func cancelIndexing() {
         indexCancellation.cancel()
+        JobManager.shared.markCancellationRequested(operationID: "pacs-index")
     }
 
     public func openIndexedSeries(_ entry: PACSIndexedSeriesSnapshot, autoFuse: Bool = true) async {
@@ -3123,6 +3152,14 @@ public final class ViewerViewModel: ObservableObject {
             startedAt: Date()
         )
         statusMessage = "Running \(title)… viewer remains responsive"
+        JobManager.shared.start(JobUpdate(operationID: operationID.uuidString,
+                                          kind: .volumeOperation,
+                                          title: title,
+                                          stage: thresholdSummary,
+                                          detail: statusMessage,
+                                          progress: nil,
+                                          systemImage: "chart.bar.xaxis",
+                                          canCancel: true))
 
         let input = VolumeMeasurementInput(
             mapID: map.id,
@@ -3138,7 +3175,11 @@ public final class ViewerViewModel: ObservableObject {
         )
 
         volumeOperationTask = Task { [weak self, input, operationID] in
-            let report = await Task.detached(priority: .userInitiated) {
+            await MainActor.run {
+                JobManager.shared.heartbeat(operationID: operationID.uuidString,
+                                            detail: "Computing volume metrics")
+            }
+            let report = await Task.detached(priority: ResourcePolicy.load().backgroundTaskPriority) {
                 VolumeOperationWorker.measure(input)
             }.value
             guard !Task.isCancelled,
@@ -3149,6 +3190,8 @@ public final class ViewerViewModel: ObservableObject {
             self.volumeOperationStatus = nil
             self.volumeOperationTask = nil
             self.autosaveActiveStudySession()
+            JobManager.shared.succeed(operationID: operationID.uuidString,
+                                      detail: self.statusMessage)
         }
     }
 
@@ -3393,6 +3436,14 @@ public final class ViewerViewModel: ObservableObject {
             startedAt: Date()
         )
         statusMessage = "Running \(operation.title)… viewer remains responsive"
+        JobManager.shared.start(JobUpdate(operationID: operationID.uuidString,
+                                          kind: .volumeOperation,
+                                          title: operation.title,
+                                          stage: operation.thresholdSummary,
+                                          detail: statusMessage,
+                                          progress: nil,
+                                          systemImage: operation.systemImage,
+                                          canCancel: true))
 
         let input = VolumeLabelOperationInput(
             mapID: map.id,
@@ -3408,17 +3459,21 @@ public final class ViewerViewModel: ObservableObject {
         )
 
         volumeOperationTask = Task { [weak self, input, operationID] in
-            let result = await Task.detached(priority: .userInitiated) {
+            await MainActor.run {
+                JobManager.shared.heartbeat(operationID: operationID.uuidString,
+                                            detail: "Running \(input.operation.title)")
+            }
+            let result = await Task.detached(priority: ResourcePolicy.load().backgroundTaskPriority) {
                 VolumeOperationWorker.runLabelOperation(input)
             }.value
             guard !Task.isCancelled,
                   let self,
                   self.volumeOperationStatus?.id == operationID else { return }
-            self.finishBackgroundLabelOperation(result)
+            self.finishBackgroundLabelOperation(result, operationID: operationID)
         }
     }
 
-    private func finishBackgroundLabelOperation(_ result: VolumeLabelOperationOutput) {
+    private func finishBackgroundLabelOperation(_ result: VolumeLabelOperationOutput, operationID: UUID) {
         let changed = labeling.applyVoxelReplacement(
             mapID: result.mapID,
             voxels: result.voxels,
@@ -3472,6 +3527,8 @@ public final class ViewerViewModel: ObservableObject {
         volumeOperationStatus = nil
         volumeOperationTask = nil
         saveOrUpdateCurrentStudySession(announce: false, includeLabelMaps: true)
+        JobManager.shared.succeed(operationID: operationID.uuidString,
+                                  detail: message)
     }
 
     private func measurementStatus(_ report: VolumeMeasurementReport) -> String {
@@ -3735,7 +3792,7 @@ public final class ViewerViewModel: ObservableObject {
         sliceRenderCache[key] = image
         sliceRenderCacheOrder.removeAll { $0 == key }
         sliceRenderCacheOrder.append(key)
-        while sliceRenderCacheOrder.count > maxSliceRenderCacheEntries {
+        while sliceRenderCacheOrder.count > ResourcePolicy.load().sliceCacheEntries {
             let evicted = sliceRenderCacheOrder.removeFirst()
             sliceRenderCache.removeValue(forKey: evicted)
         }
@@ -3862,8 +3919,10 @@ public final class ViewerViewModel: ObservableObject {
                                                axis: Int,
                                                key: PETMIPProjectionKey) {
         guard petMIPProjectionTasks[key] == nil else { return }
-        petMIPProjectionTasks[key] = Task { [weak self, volume, axis, key] in
-            let projection = await Task.detached(priority: .userInitiated) {
+        let policy = ResourcePolicy.load()
+        guard petMIPProjectionTasks.count < policy.mipWorkerLimit else { return }
+        petMIPProjectionTasks[key] = Task { [weak self, volume, axis, key, policy] in
+            let projection = await Task.detached(priority: policy.backgroundTaskPriority) {
                 PETMIPProjection.compute(volume: volume, axis: axis)
             }.value
             guard !Task.isCancelled, let self else { return }
@@ -3871,7 +3930,7 @@ public final class ViewerViewModel: ObservableObject {
             self.petMIPProjectionCache[key] = projection
             self.petMIPProjectionCacheOrder.removeAll { $0 == key }
             self.petMIPProjectionCacheOrder.append(key)
-            while self.petMIPProjectionCacheOrder.count > self.maxPETMIPProjectionCacheEntries {
+            while self.petMIPProjectionCacheOrder.count > ResourcePolicy.load().petMIPCacheEntries {
                 let evicted = self.petMIPProjectionCacheOrder.removeFirst()
                 self.petMIPProjectionCache.removeValue(forKey: evicted)
             }
