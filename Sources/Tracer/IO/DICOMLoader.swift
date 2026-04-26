@@ -59,6 +59,8 @@ public final class DICOMFile: @unchecked Sendable {
 public enum DICOMLoader {
     private static let implicitVRLittleEndian = "1.2.840.10008.1.2"
     private static let explicitVRLittleEndian = "1.2.840.10008.1.2.1"
+    private static let loadHeaderInitialByteLimit = 262_144
+    private static let loadHeaderMaximumByteLimit = 67_108_864
 
     private static let uncompressedTransferSyntaxes: Set<String> = [
         implicitVRLittleEndian,
@@ -78,8 +80,7 @@ public enum DICOMLoader {
     ]
 
     public static func parseHeader(at url: URL) throws -> DICOMFile {
-        let data = try Data(contentsOf: url)
-        let dcm = try parseHeader(data: data)
+        let dcm = try parseHeaderPrefixForLoading(at: url)
         dcm.filePath = url.path
         return dcm
     }
@@ -178,11 +179,8 @@ public enum DICOMLoader {
             guard f.rows == rows, f.columns == cols else {
                 throw DICOMError.invalidFile("Series contains mixed slice dimensions")
             }
-            let slice = try loadSlicePixels(f)
             let dst = zi * rows * cols
-            for i in 0..<(rows * cols) {
-                pixels[dst + i] = slice[i]
-            }
+            try loadSlicePixels(f, into: &pixels, dstOffset: dst)
         }
 
         // Z spacing from projected slice position difference along the slice normal.
@@ -216,9 +214,16 @@ public enum DICOMLoader {
 
     /// Load a single slice as raw pixel data (rows * cols floats, rescale applied).
     public static func loadSlicePixels(_ dcm: DICOMFile) throws -> [Float] {
-        let data = try Data(contentsOf: URL(fileURLWithPath: dcm.filePath))
         let n = dcm.rows * dcm.columns
         var out = [Float](repeating: 0, count: n)
+        try loadSlicePixels(dcm, into: &out, dstOffset: 0)
+        return out
+    }
+
+    private static func loadSlicePixels(_ dcm: DICOMFile,
+                                        into out: inout [Float],
+                                        dstOffset: Int) throws {
+        let n = dcm.rows * dcm.columns
 
         let offset = dcm.pixelDataOffset
         let length = dcm.pixelDataLength
@@ -226,31 +231,44 @@ public enum DICOMLoader {
 
         try validateRenderable(dcm)
 
-        guard length >= expectedBytes, offset + expectedBytes <= data.count else {
+        guard offset >= 0, expectedBytes > 0, length >= expectedBytes else {
             throw DICOMError.invalidFile("Pixel data out of bounds")
         }
 
+        guard dstOffset >= 0, dstOffset + n <= out.count else {
+            throw DICOMError.invalidFile("Pixel decode destination out of bounds")
+        }
+
+        let fileURL = URL(fileURLWithPath: dcm.filePath)
+        if let size = fileSize(of: fileURL),
+           Int64(offset) + Int64(expectedBytes) > size {
+            throw DICOMError.invalidFile("Pixel data out of bounds")
+        }
+
+        let data = try fileSegmentData(from: fileURL,
+                                       offset: offset,
+                                       length: expectedBytes)
+
         data.withUnsafeBytes { raw in
-            let base = raw.baseAddress!.advanced(by: offset)
+            let base = raw.baseAddress!
             if dcm.bitsAllocated == 16 {
                 if dcm.pixelRepresentation == 1 {
                     let p = base.assumingMemoryBound(to: Int16.self)
-                    for i in 0..<n { out[i] = Float(Double(p[i]) * dcm.rescaleSlope + dcm.rescaleIntercept) }
+                    for i in 0..<n { out[dstOffset + i] = Float(Double(p[i]) * dcm.rescaleSlope + dcm.rescaleIntercept) }
                 } else {
                     let p = base.assumingMemoryBound(to: UInt16.self)
-                    for i in 0..<n { out[i] = Float(Double(p[i]) * dcm.rescaleSlope + dcm.rescaleIntercept) }
+                    for i in 0..<n { out[dstOffset + i] = Float(Double(p[i]) * dcm.rescaleSlope + dcm.rescaleIntercept) }
                 }
             } else if dcm.bitsAllocated == 8 {
                 let p = base.assumingMemoryBound(to: UInt8.self)
-                for i in 0..<n { out[i] = Float(Double(p[i]) * dcm.rescaleSlope + dcm.rescaleIntercept) }
+                for i in 0..<n { out[dstOffset + i] = Float(Double(p[i]) * dcm.rescaleSlope + dcm.rescaleIntercept) }
             } else if dcm.bitsAllocated == 32 {
                 let p = base.assumingMemoryBound(to: Float.self)
-                for i in 0..<n { out[i] = Float(Double(p[i]) * dcm.rescaleSlope + dcm.rescaleIntercept) }
+                for i in 0..<n { out[dstOffset + i] = Float(Double(p[i]) * dcm.rescaleSlope + dcm.rescaleIntercept) }
             } else {
                 return
             }
         }
-        return out
     }
 
     // MARK: - DICOM element reader
@@ -474,6 +492,38 @@ public enum DICOMLoader {
         return value.asInt()
     }
 
+    private static func parseHeaderPrefixForLoading(at url: URL) throws -> DICOMFile {
+        let size = fileSize(of: url)
+        var byteLimit = min(loadHeaderInitialByteLimit,
+                            Int(size ?? Int64(loadHeaderInitialByteLimit)))
+        byteLimit = max(132, byteLimit)
+
+        while true {
+            let data = try prefixData(from: url, maxBytes: byteLimit)
+            let dcm = try parseHeader(data: data)
+            dcm.filePath = url.path
+
+            if dcm.pixelDataOffset > 0 || data.count < byteLimit {
+                return dcm
+            }
+
+            let maxLimit = min(loadHeaderMaximumByteLimit,
+                               Int(size ?? Int64(loadHeaderMaximumByteLimit)))
+            guard byteLimit < maxLimit else {
+                return dcm
+            }
+            byteLimit = min(maxLimit, byteLimit * 2)
+        }
+    }
+
+    private static func fileSize(of url: URL) -> Int64? {
+        if let values = try? url.resourceValues(forKeys: [.fileSizeKey]),
+           let size = values.fileSize {
+            return Int64(size)
+        }
+        return nil
+    }
+
     private static func prefixData(from url: URL, maxBytes: Int) throws -> Data {
         let byteCount = max(132, maxBytes)
         let fd = open(url.path, O_RDONLY)
@@ -490,6 +540,41 @@ public enum DICOMLoader {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
         return Data(buffer.prefix(readCount))
+    }
+
+    private static func fileSegmentData(from url: URL,
+                                        offset: Int,
+                                        length: Int) throws -> Data {
+        let fd = open(url.path, O_RDONLY)
+        guard fd >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        defer { close(fd) }
+
+        guard lseek(fd, off_t(offset), SEEK_SET) >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+
+        var data = Data(count: length)
+        try data.withUnsafeMutableBytes { rawBuffer in
+            guard var cursor = rawBuffer.baseAddress else {
+                throw DICOMError.invalidFile("Could not allocate pixel buffer")
+            }
+            var remaining = length
+            while remaining > 0 {
+                let readCount = Darwin.read(fd, cursor, remaining)
+                if readCount < 0 {
+                    if errno == EINTR { continue }
+                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                }
+                if readCount == 0 {
+                    throw DICOMError.invalidFile("Unexpected end of pixel data")
+                }
+                cursor = cursor.advanced(by: readCount)
+                remaining -= readCount
+            }
+        }
+        return data
     }
 
     // MARK: - Scan a directory for DICOM files

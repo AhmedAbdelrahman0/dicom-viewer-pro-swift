@@ -2,7 +2,7 @@ import Foundation
 import Compression
 import simd
 
-private enum NIfTIByteOrder {
+private enum NIfTIByteOrder: Equatable {
     case littleEndian
     case bigEndian
 }
@@ -179,31 +179,15 @@ public enum NIfTILoader {
         var pixels = [Float](repeating: 0, count: total)
 
         let bpp = bytesPerVoxel(for: datatype)
-        for i in 0..<total {
-            let offset = dataOffset + i * bpp
-            let rawValue: Double
-            switch datatype {
-            case 2:   // UINT8
-                rawValue = Double(data[offset])
-            case 4:   // INT16
-                rawValue = Double(data.readInt16(at: offset, byteOrder: byteOrder))
-            case 8:   // INT32
-                rawValue = Double(data.readInt32(at: offset, byteOrder: byteOrder))
-            case 16:  // FLOAT32
-                rawValue = Double(data.readFloat32(at: offset, byteOrder: byteOrder))
-            case 64:  // FLOAT64
-                rawValue = data.readFloat64(at: offset, byteOrder: byteOrder)
-            case 256: // INT8
-                rawValue = Double(Int8(bitPattern: data[offset]))
-            case 512: // UINT16
-                rawValue = Double(data.readUInt16(at: offset, byteOrder: byteOrder))
-            case 768: // UINT32
-                rawValue = Double(data.readUInt32(at: offset, byteOrder: byteOrder))
-            default:
-                throw NIfTILoaderError.unsupportedDataType(datatype)
-            }
-            pixels[i] = Float(rawValue * slope + inter)
-        }
+        try decodePixels(data: data,
+                         dataOffset: dataOffset,
+                         total: total,
+                         datatype: datatype,
+                         bytesPerVoxel: bpp,
+                         byteOrder: byteOrder,
+                         slope: slope,
+                         inter: inter,
+                         into: &pixels)
 
         let modality = inferModality(filename: filename, parentDir: (sourcePath as NSString).deletingLastPathComponent,
                                      hint: modalityHint)
@@ -236,6 +220,114 @@ public enum NIfTILoader {
         case 64:            return 8
         default:            return 4
         }
+    }
+
+    private static func decodePixels(data: Data,
+                                     dataOffset: Int,
+                                     total: Int,
+                                     datatype: Int,
+                                     bytesPerVoxel: Int,
+                                     byteOrder: NIfTIByteOrder,
+                                     slope: Double,
+                                     inter: Double,
+                                     into pixels: inout [Float]) throws {
+        guard total >= 0,
+              dataOffset >= 0,
+              dataOffset + total * bytesPerVoxel <= data.count else {
+            throw NIfTILoaderError.dimensionMismatch
+        }
+
+        let hasScaling = slope != 1.0 || inter != 0.0
+        try data.withUnsafeBytes { raw in
+            guard let rawBase = raw.baseAddress else {
+                throw NIfTILoaderError.dimensionMismatch
+            }
+            let base = rawBase.advanced(by: dataOffset)
+
+            switch datatype {
+            case 2:   // UINT8
+                let src = base.assumingMemoryBound(to: UInt8.self)
+                for i in 0..<total {
+                    let value = Double(src[i])
+                    pixels[i] = Float(hasScaling ? value * slope + inter : value)
+                }
+
+            case 256: // INT8
+                let src = base.assumingMemoryBound(to: Int8.self)
+                for i in 0..<total {
+                    let value = Double(src[i])
+                    pixels[i] = Float(hasScaling ? value * slope + inter : value)
+                }
+
+            case 16 where byteOrder == .littleEndian && isAligned(base, as: Float.self):
+                let src = base.assumingMemoryBound(to: Float.self)
+                if hasScaling {
+                    for i in 0..<total {
+                        pixels[i] = Float(Double(src[i]) * slope + inter)
+                    }
+                } else {
+                    pixels = Array(UnsafeBufferPointer(start: src, count: total))
+                }
+
+            case 4 where byteOrder == .littleEndian && isAligned(base, as: Int16.self):
+                let src = base.assumingMemoryBound(to: Int16.self)
+                for i in 0..<total {
+                    let value = Double(src[i])
+                    pixels[i] = Float(hasScaling ? value * slope + inter : value)
+                }
+
+            case 512 where byteOrder == .littleEndian && isAligned(base, as: UInt16.self):
+                let src = base.assumingMemoryBound(to: UInt16.self)
+                for i in 0..<total {
+                    let value = Double(src[i])
+                    pixels[i] = Float(hasScaling ? value * slope + inter : value)
+                }
+
+            case 8 where byteOrder == .littleEndian && isAligned(base, as: Int32.self):
+                let src = base.assumingMemoryBound(to: Int32.self)
+                for i in 0..<total {
+                    let value = Double(src[i])
+                    pixels[i] = Float(hasScaling ? value * slope + inter : value)
+                }
+
+            case 768 where byteOrder == .littleEndian && isAligned(base, as: UInt32.self):
+                let src = base.assumingMemoryBound(to: UInt32.self)
+                for i in 0..<total {
+                    let value = Double(src[i])
+                    pixels[i] = Float(hasScaling ? value * slope + inter : value)
+                }
+
+            case 64 where byteOrder == .littleEndian && isAligned(base, as: Double.self):
+                let src = base.assumingMemoryBound(to: Double.self)
+                for i in 0..<total {
+                    let value = src[i]
+                    pixels[i] = Float(hasScaling ? value * slope + inter : value)
+                }
+
+            case 4, 8, 16, 64, 512, 768:
+                for i in 0..<total {
+                    let offset = dataOffset + i * bytesPerVoxel
+                    let rawValue: Double
+                    switch datatype {
+                    case 4: rawValue = Double(data.readInt16(at: offset, byteOrder: byteOrder))
+                    case 8: rawValue = Double(data.readInt32(at: offset, byteOrder: byteOrder))
+                    case 16: rawValue = Double(data.readFloat32(at: offset, byteOrder: byteOrder))
+                    case 64: rawValue = data.readFloat64(at: offset, byteOrder: byteOrder)
+                    case 512: rawValue = Double(data.readUInt16(at: offset, byteOrder: byteOrder))
+                    case 768: rawValue = Double(data.readUInt32(at: offset, byteOrder: byteOrder))
+                    default: rawValue = 0
+                    }
+                    pixels[i] = Float(rawValue * slope + inter)
+                }
+
+            default:
+                throw NIfTILoaderError.unsupportedDataType(datatype)
+            }
+        }
+    }
+
+    private static func isAligned<T>(_ pointer: UnsafeRawPointer, as type: T.Type) -> Bool {
+        Int(bitPattern: pointer) % MemoryLayout<T>.alignment == 0
     }
 
     private static func affineGeometry(data: Data,

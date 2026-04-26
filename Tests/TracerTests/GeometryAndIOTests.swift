@@ -649,6 +649,45 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(dcm.modality, "PT")
     }
 
+    func testDICOMLoaderFindsPixelDataBeyondInitialHeaderPrefix() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dicom-prefix-load-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var data = Data(count: 128)
+        data.append("DICM".data(using: .ascii)!)
+        data.appendDICOMElement(group: 0x0002, element: 0x0010, vr: "UI", string: "1.2.840.10008.1.2.1")
+        data.appendDICOMElement(group: 0x0020, element: 0x000D, vr: "UI", string: "study-prefix")
+        data.appendDICOMElement(group: 0x0020, element: 0x000E, vr: "UI", string: "series-prefix")
+        data.appendDICOMElement(group: 0x0008, element: 0x0060, vr: "CS", string: "CT")
+        data.appendDICOMElement(group: 0x0008, element: 0x0018, vr: "UI", string: "sop-prefix")
+        data.appendDICOMElement(group: 0x0028, element: 0x0010, vr: "US", uint16: 2)
+        data.appendDICOMElement(group: 0x0028, element: 0x0011, vr: "US", uint16: 2)
+        data.appendDICOMElement(group: 0x0028, element: 0x0100, vr: "US", uint16: 16)
+        data.appendDICOMElement(group: 0x0028, element: 0x0103, vr: "US", uint16: 0)
+        data.appendDICOMLongElement(
+            group: 0x0019,
+            element: 0x1000,
+            vr: "OB",
+            bytes: Data(repeating: 7, count: 300_000)
+        )
+        var pixelBytes = Data()
+        [UInt16(10), 20, 30, 40].forEach { pixelBytes.appendUInt16LE($0) }
+        data.appendDICOMLongElement(group: 0x7FE0, element: 0x0010, vr: "OW", bytes: pixelBytes)
+
+        let url = root.appendingPathComponent("slice.dcm")
+        try data.write(to: url)
+
+        let dcm = try DICOMLoader.parseHeader(at: url)
+        XCTAssertGreaterThan(dcm.pixelDataOffset, 262_144)
+
+        let volume = try DICOMLoader.loadSeries([dcm])
+        XCTAssertEqual(volume.width, 2)
+        XCTAssertEqual(volume.height, 2)
+        XCTAssertEqual(volume.pixels, [10, 20, 30, 40])
+    }
+
     func testPACSIndexBuilderCreatesDICOMSearchableSnapshot() {
         let dcm = DICOMFile()
         dcm.filePath = "/tmp/series/image001.dcm"
@@ -5970,6 +6009,18 @@ private extension Data {
         value.appendUInt16LE(uint16)
         appendDICOMElementHeader(group: group, element: element, vr: vr, length: value.count)
         append(value)
+    }
+
+    mutating func appendDICOMLongElement(group: UInt16,
+                                         element: UInt16,
+                                         vr: String,
+                                         bytes: Data) {
+        appendUInt16LE(group)
+        appendUInt16LE(element)
+        append(vr.data(using: .ascii)!)
+        appendUInt16LE(0)
+        appendUInt32LE(UInt32(bytes.count))
+        append(bytes)
     }
 
     private mutating func appendDICOMElementHeader(group: UInt16,

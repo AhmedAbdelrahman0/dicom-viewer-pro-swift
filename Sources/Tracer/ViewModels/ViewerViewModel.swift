@@ -1161,7 +1161,7 @@ public final class ViewerViewModel: ObservableObject {
 
     // MARK: - Loading
 
-    public func loadNIfTI(url: URL) async {
+    public func loadNIfTI(url: URL, autoFuse: Bool = true) async {
         let sourcePath = NIfTILoader.canonicalSourcePath(for: url)
         if let existing = loadedVolume(sourcePath: sourcePath) {
             displayVolume(existing)
@@ -1183,9 +1183,9 @@ public final class ViewerViewModel: ObservableObject {
             statusMessage = result.inserted
                 ? "Loaded: \(volume.seriesDescription) | \(Modality.normalize(volume.modality).displayName) | \(volume.width)×\(volume.height)×\(volume.depth)"
                 : "Already loaded: \(result.volume.seriesDescription)"
-            if result.inserted, shouldAutoFusePETCT(afterLoading: result.volume) {
+            if autoFuse, result.inserted, shouldAutoFusePETCT(afterLoading: result.volume) {
                 await autoFusePETCT()
-            } else if result.inserted, shouldAutoFusePETMR(afterLoading: result.volume) {
+            } else if autoFuse, result.inserted, shouldAutoFusePETMR(afterLoading: result.volume) {
                 await autoFusePETMR()
             }
         } catch {
@@ -1210,11 +1210,11 @@ public final class ViewerViewModel: ObservableObject {
         statusMessage = "Found \(series.count) series | added \(merge.added.count), updated \(merge.updated), skipped \(merge.skipped) duplicates"
 
         if let pair = bestPETCTSeriesPair(in: series) {
-            await openSeries(pair.ct)
-            await openSeries(pair.pet)
+            await openSeries(pair.ct, autoFuse: false)
+            await openSeries(pair.pet, autoFuse: false)
             let mrSeries = preferredMRDisplaySeries(in: series)
             for mr in mrSeries.prefix(6) {
-                await openSeries(mr)
+                await openSeries(mr, autoFuse: false)
             }
             await autoFusePETCT()
             if mrSeries.isEmpty {
@@ -1232,9 +1232,9 @@ public final class ViewerViewModel: ObservableObject {
         if let pair = bestPETMRSeriesPair(in: series) {
             let mrSeries = preferredMRDisplaySeries(in: series)
             for mr in mrSeries.prefix(6) {
-                await openSeries(mr)
+                await openSeries(mr, autoFuse: false)
             }
-            await openSeries(pair.pet)
+            await openSeries(pair.pet, autoFuse: false)
             await autoFusePETMR()
             statusMessage = "Opened PET/MR study: \(pair.mr.displayName) + \(pair.pet.displayName)"
             return
@@ -1243,7 +1243,7 @@ public final class ViewerViewModel: ObservableObject {
         let mrDisplaySeries = preferredMRDisplaySeries(in: series)
         if mrDisplaySeries.count >= 2 {
             for mr in mrDisplaySeries.prefix(6) {
-                await openSeries(mr)
+                await openSeries(mr, autoFuse: false)
             }
             if let primary = loadedMRVolumes.sorted(by: mrDisplaySort).first {
                 displayVolume(primary)
@@ -1260,7 +1260,7 @@ public final class ViewerViewModel: ObservableObject {
         }
     }
 
-    public func openSeries(_ series: DICOMSeries) async {
+    public func openSeries(_ series: DICOMSeries, autoFuse: Bool = true) async {
         if let existing = loadedVolume(seriesUID: series.uid) {
             displayVolume(existing)
             statusMessage = "Already loaded: \(series.displayName)"
@@ -1282,11 +1282,11 @@ public final class ViewerViewModel: ObservableObject {
                 ? "Loaded: \(volume.seriesDescription) | \(Modality.normalize(volume.modality).displayName) | \(volume.width)×\(volume.height)×\(volume.depth)"
                 : "Already loaded: \(series.displayName)"
 
-            if result.inserted, shouldAutoFusePETCT(afterLoading: result.volume) {
+            if autoFuse, result.inserted, shouldAutoFusePETCT(afterLoading: result.volume) {
                 await autoFusePETCT()
                 applyHangingProtocol(grid: .defaultPETCT, panes: HangingPaneConfiguration.defaultPETCT)
                 statusMessage = "Loaded and fused PET/CT: \(result.volume.seriesDescription.isEmpty ? series.displayName : result.volume.seriesDescription)"
-            } else if result.inserted, shouldAutoFusePETMR(afterLoading: result.volume) {
+            } else if autoFuse, result.inserted, shouldAutoFusePETMR(afterLoading: result.volume) {
                 await autoFusePETMR()
                 statusMessage = "Loaded and fused PET/MR: \(result.volume.seriesDescription.isEmpty ? series.displayName : result.volume.seriesDescription)"
             }
@@ -1370,13 +1370,13 @@ public final class ViewerViewModel: ObservableObject {
         indexCancellation.cancel()
     }
 
-    public func openIndexedSeries(_ entry: PACSIndexedSeriesSnapshot) async {
+    public func openIndexedSeries(_ entry: PACSIndexedSeriesSnapshot, autoFuse: Bool = true) async {
         switch entry.kind {
         case .dicom:
-            await openIndexedDICOMSeries(entry)
+            await openIndexedDICOMSeries(entry, autoFuse: autoFuse)
         case .nifti:
             let path = entry.filePaths.first ?? entry.sourcePath
-            await loadNIfTI(url: URL(fileURLWithPath: path))
+            await loadNIfTI(url: URL(fileURLWithPath: path), autoFuse: autoFuse)
         }
     }
 
@@ -1388,15 +1388,15 @@ public final class ViewerViewModel: ObservableObject {
             let anatomicalModality = Modality.normalize(anatomical.modality)
             if anatomicalModality == .MR {
                 for mr in preferredMRDisplaySeries(in: study.series).prefix(6) {
-                    await openIndexedSeries(mr)
+                    await openIndexedSeries(mr, autoFuse: false)
                 }
             } else {
-                await openIndexedSeries(anatomical)
+                await openIndexedSeries(anatomical, autoFuse: false)
                 for mr in preferredMRDisplaySeries(in: study.series).prefix(6) {
-                    await openIndexedSeries(mr)
+                    await openIndexedSeries(mr, autoFuse: false)
                 }
             }
-            await openIndexedSeries(pet)
+            await openIndexedSeries(pet, autoFuse: false)
             if anatomicalModality == .MR {
                 await autoFusePETMR()
             } else {
@@ -1417,7 +1417,7 @@ public final class ViewerViewModel: ObservableObject {
         let mrDisplaySeries = preferredMRDisplaySeries(in: study.series)
         if mrDisplaySeries.count >= 2 {
             for mr in mrDisplaySeries.prefix(6) {
-                await openIndexedSeries(mr)
+                await openIndexedSeries(mr, autoFuse: false)
             }
             if let primary = loadedMRVolumes.sorted(by: mrDisplaySort).first {
                 displayVolume(primary)
@@ -1624,7 +1624,8 @@ public final class ViewerViewModel: ObservableObject {
         statusMessage = "PET/MR fused: \(registrationNote). QA \(qaLabel)"
     }
 
-    private func openIndexedDICOMSeries(_ entry: PACSIndexedSeriesSnapshot) async {
+    private func openIndexedDICOMSeries(_ entry: PACSIndexedSeriesSnapshot,
+                                        autoFuse: Bool = true) async {
         isLoading = true
         statusMessage = "Loading \(entry.displayName)..."
         defer { isLoading = false }
@@ -1650,7 +1651,7 @@ public final class ViewerViewModel: ObservableObject {
                 )
             }.value
 
-            await openSeries(series)
+            await openSeries(series, autoFuse: autoFuse)
         } catch {
             statusMessage = "Mini-PACS load error: \(error.localizedDescription)"
         }
