@@ -104,7 +104,7 @@ public enum MONAITransforms {
 
     // MARK: - CropForeground
 
-    public struct VoxelBounds: Equatable, Sendable {
+    public struct VoxelBounds: Equatable, Hashable, Codable, Sendable {
         public let minZ: Int, maxZ: Int
         public let minY: Int, maxY: Int
         public let minX: Int, maxX: Int
@@ -112,6 +112,17 @@ public enum MONAITransforms {
         public var width: Int  { maxX - minX + 1 }
         public var height: Int { maxY - minY + 1 }
         public var depth: Int  { maxZ - minZ + 1 }
+
+        public init(minZ: Int, maxZ: Int,
+                    minY: Int, maxY: Int,
+                    minX: Int, maxX: Int) {
+            self.minZ = minZ
+            self.maxZ = maxZ
+            self.minY = minY
+            self.maxY = maxY
+            self.minX = minX
+            self.maxX = maxX
+        }
     }
 
     /// Bounding box of voxels where `select(v) == true`. `nil` if no voxel

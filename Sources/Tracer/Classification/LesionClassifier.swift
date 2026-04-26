@@ -39,7 +39,7 @@ public protocol LesionClassifier: Sendable {
 }
 
 /// One prediction — a class label with its softmax probability.
-public struct LabelPrediction: Equatable, Hashable, Sendable {
+public struct LabelPrediction: Equatable, Hashable, Codable, Sendable {
     public let label: String
     public let probability: Double
 

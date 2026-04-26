@@ -3532,6 +3532,196 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertFalse(LabelingTool.lesionSphere.helpText.isEmpty)
     }
 
+    // MARK: - Lesion detection module
+
+    func testLesionDetectorCatalogExposesEveryBackend() {
+        let ids = LesionDetectorCatalog.all.map(\.id)
+        XCTAssertTrue(ids.contains("nndetection-autopet"))
+        XCTAssertTrue(ids.contains("nndetection-lidc"))
+        XCTAssertTrue(ids.contains("deeplesion-ct"))
+        XCTAssertTrue(ids.contains("medsiglip-heatmap-detection"))
+        XCTAssertTrue(ids.contains("medgemma-describer"))
+        XCTAssertTrue(ids.contains("ct-fm-detection-dgx"))
+        // Every entry must require user configuration — Tracer never
+        // ships detection weights.
+        for entry in LesionDetectorCatalog.all {
+            XCTAssertTrue(entry.requiresConfiguration,
+                          "\(entry.id) should require user configuration")
+        }
+        // CT-FM uses the DGX backend.
+        XCTAssertEqual(LesionDetectorCatalog.byID("ct-fm-detection-dgx")?.backend,
+                       .dgxRemote)
+    }
+
+    func testLesionDetectionCodableRoundTrip() throws {
+        let original = LesionDetection(
+            bounds: MONAITransforms.VoxelBounds(minZ: 10, maxZ: 20,
+                                                minY: 30, maxY: 40,
+                                                minX: 50, maxX: 60),
+            predictions: [
+                LabelPrediction(label: "malignant", probability: 0.82),
+                LabelPrediction(label: "benign", probability: 0.18)
+            ],
+            detectionConfidence: 0.91,
+            anatomicalRegion: "right_upper_lobe",
+            rationale: "irregular margin, FDG SUVmax 8.4",
+            detectorID: "nndetection-lidc"
+        )
+        let encoded = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(LesionDetection.self, from: encoded)
+        XCTAssertEqual(decoded, original)
+        XCTAssertEqual(decoded.topLabel, "malignant")
+        XCTAssertEqual(decoded.topProbability, 0.82, accuracy: 1e-6)
+    }
+
+    func testLesionDetectionCenterAndVolumeHelpers() {
+        let det = LesionDetection(
+            bounds: MONAITransforms.VoxelBounds(minZ: 4, maxZ: 6,
+                                                minY: 10, maxY: 14,
+                                                minX: 20, maxX: 26),
+            detectorID: "test"
+        )
+        let center = det.centerVoxel
+        XCTAssertEqual(center.z, 5)
+        XCTAssertEqual(center.y, 12)
+        XCTAssertEqual(center.x, 23)
+        // Voxel count: 3 × 5 × 7 = 105
+        XCTAssertEqual(det.voxelCount, 3 * 5 * 7)
+        // mm³ with anisotropic spacing
+        let mm3 = det.volumeMM3(spacing: (x: 1, y: 1, z: 5))
+        XCTAssertEqual(mm3, 7 * 1 * 5 * 1 * 3 * 5, accuracy: 1e-9)
+    }
+
+    func testDetectionWireFormatClampsOutOfRangeBounds() {
+        let volume = ImageVolume(pixels: [Float](repeating: 0, count: 1000),
+                                 depth: 10, height: 10, width: 10,
+                                 modality: "CT")
+        let wire = DetectionWireFormat(detections: [
+            // Exceeds the volume on every axis — should clamp.
+            DetectionWireFormat.WireDetection(
+                bounds: [-5, 30, -10, 50, 0, 100],
+                predictions: [
+                    DetectionWireFormat.WirePrediction(label: "thing", probability: 0.5)
+                ],
+                detection_confidence: 0.7,
+                anatomical_region: nil,
+                rationale: nil
+            )
+        ])
+        let detections = wire.toDetections(detectorID: "test", volume: volume)
+        XCTAssertEqual(detections.count, 1)
+        let b = detections[0].bounds
+        XCTAssertEqual(b.minZ, 0)
+        XCTAssertEqual(b.maxZ, 9)
+        XCTAssertEqual(b.minY, 0)
+        XCTAssertEqual(b.maxY, 9)
+        XCTAssertEqual(b.minX, 0)
+        XCTAssertEqual(b.maxX, 9)
+    }
+
+    func testDetectionWireFormatDropsMalformedRows() {
+        let volume = ImageVolume(pixels: [Float](repeating: 0, count: 64),
+                                 depth: 4, height: 4, width: 4,
+                                 modality: "CT")
+        let wire = DetectionWireFormat(detections: [
+            DetectionWireFormat.WireDetection(
+                bounds: [1, 1, 1],   // malformed — only 3 of 6 ints
+                predictions: [],
+                detection_confidence: nil,
+                anatomical_region: nil,
+                rationale: nil
+            ),
+            DetectionWireFormat.WireDetection(
+                bounds: [0, 1, 0, 1, 0, 1],
+                predictions: [
+                    DetectionWireFormat.WirePrediction(label: "ok", probability: 0.9)
+                ],
+                detection_confidence: 1.0,
+                anatomical_region: nil,
+                rationale: nil
+            )
+        ])
+        let detections = wire.toDetections(detectorID: "t", volume: volume)
+        XCTAssertEqual(detections.count, 1, "Malformed bounds row dropped")
+        XCTAssertEqual(detections[0].topLabel, "ok")
+    }
+
+    func testDetectionWireFormatDecodesPythonExampleJSON() throws {
+        // Verbatim from the schema example in LesionDetector.swift's
+        // header comment — if this stops parsing, the wrapper-script
+        // contract documentation is wrong.
+        let json = """
+        {
+          "detections": [
+            {
+              "bounds": [10, 20, 30, 40, 50, 60],
+              "predictions": [
+                {"label": "lung_nodule_malignant", "probability": 0.87},
+                {"label": "lung_nodule_benign",    "probability": 0.13}
+              ],
+              "detection_confidence": 0.92,
+              "anatomical_region": "right_upper_lobe",
+              "rationale": "spiculated margin"
+            }
+          ]
+        }
+        """.data(using: .utf8)!
+        let wire = try JSONDecoder().decode(DetectionWireFormat.self, from: json)
+        XCTAssertEqual(wire.detections.count, 1)
+        XCTAssertEqual(wire.detections[0].predictions.first?.label, "lung_nodule_malignant")
+        XCTAssertEqual(wire.detections[0].anatomical_region, "right_upper_lobe")
+    }
+
+    func testDetectionUtilitiesRejectsAnatomicalGridMismatch() {
+        let primary = ImageVolume(pixels: [Float](repeating: 0, count: 8),
+                                  depth: 2, height: 2, width: 2,
+                                  modality: "CT")
+        let mismatched = ImageVolume(pixels: [Float](repeating: 0, count: 27),
+                                     depth: 3, height: 3, width: 3,
+                                     modality: "CT")
+        XCTAssertThrowsError(
+            try DetectionUtilities.validateInputs(volume: primary,
+                                                  anatomical: mismatched,
+                                                  requiresAnatomical: false)
+        ) { error in
+            guard case DetectionError.anatomicalGridMismatch = error else {
+                return XCTFail("Wrong error case: \(error)")
+            }
+        }
+    }
+
+    func testDetectionUtilitiesRejectsMissingAnatomicalWhenRequired() {
+        let primary = ImageVolume(pixels: [Float](repeating: 0, count: 8),
+                                  depth: 2, height: 2, width: 2,
+                                  modality: "PT")
+        XCTAssertThrowsError(
+            try DetectionUtilities.validateInputs(volume: primary,
+                                                  anatomical: nil,
+                                                  requiresAnatomical: true)
+        ) { error in
+            guard case DetectionError.anatomicalRequired = error else {
+                return XCTFail("Wrong error case: \(error)")
+            }
+        }
+    }
+
+    func testSubprocessLesionDetectorComposesPython3LaunchArguments() {
+        let envArgs = SubprocessLesionDetector.composeLaunchArguments(
+            executable: "/usr/bin/env",
+            script: "/tmp/detect.py",
+            extraArgs: ["--input", "/tmp/in.nii", "--anatomical", "/tmp/ct.nii"]
+        )
+        XCTAssertEqual(envArgs, ["python3", "/tmp/detect.py",
+                                 "--input", "/tmp/in.nii",
+                                 "--anatomical", "/tmp/ct.nii"])
+        let pyArgs = SubprocessLesionDetector.composeLaunchArguments(
+            executable: "/opt/homebrew/bin/python3",
+            script: "/tmp/detect.py",
+            extraArgs: []
+        )
+        XCTAssertEqual(pyArgs, ["/tmp/detect.py"])
+    }
+
     @MainActor
     func testNNUnetAssistantReadinessPreflightsCoreMLPackages() throws {
         let nnunet = NNUnetViewModel()
