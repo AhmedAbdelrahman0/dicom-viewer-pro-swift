@@ -20,6 +20,9 @@ public struct ContentView: View {
     @StateObject private var lesionDetector = LesionDetectorViewModel()
     @StateObject private var cohortForm = CohortFormViewModel()
     @StateObject private var petAC = PETACViewModel()
+    @StateObject private var reconstruction = NuclearReconstructionViewModel()
+    @StateObject private var syntheticCT = SyntheticCTViewModel()
+    @StateObject private var dosimetry = Lu177DosimetryViewModel()
     @State private var showingFileImporter = false
     @State private var showingDirectoryPicker = false
     @State private var fileImporterMode: FileImporterMode = .volume
@@ -32,6 +35,7 @@ public struct ContentView: View {
     @State private var showCohortPanel = false
     @State private var showLesionDetectorPanel = false
     @State private var showPETACPanel = false
+    @State private var showNuclearToolsPanel = false
     @State private var cohortStudies: [PACSWorklistStudy] = []
     @State private var showAboutWindow = false
     @State private var showOnboarding = false
@@ -169,6 +173,19 @@ public struct ContentView: View {
             PETACPanel(viewer: vm, ac: petAC)
                 .overlay(alignment: .topTrailing) {
                     closeInspectorButton { showPETACPanel = false }
+                }
+        }
+        .engineInspector(
+            isCompact: useCompactEnginePresentation,
+            isPresented: $showNuclearToolsPanel,
+            inspectorWidth: (min: 540, ideal: 620, max: 780)
+        ) {
+            NuclearToolsPanel(viewer: vm,
+                              reconstruction: reconstruction,
+                              syntheticCT: syntheticCT,
+                              dosimetry: dosimetry)
+                .overlay(alignment: .topTrailing) {
+                    closeInspectorButton { showNuclearToolsPanel = false }
                 }
         }
         .fileImporter(
@@ -546,13 +563,21 @@ public struct ContentView: View {
                       systemImage: "wand.and.rays")
             }
             .keyboardShortcut("k", modifiers: [.command, .shift])
+
+            Button {
+                showInspector(.nuclearTools)
+            } label: {
+                Label("Nuclear Tools — reconstruction, synthetic CT, Lu-177",
+                      systemImage: "atom")
+            }
+            .keyboardShortcut("u", modifiers: [.command, .shift])
         } label: {
             Label("AI Engines", systemImage: "cpu")
                 .font(.system(size: 12, weight: .medium))
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .help("AI Engines\n• MONAI Label (⌘⇧M)\n• nnU-Net (⌘⇧N)\n• PET Engine (⌘⇧P)\n• Classify (⌘⇧C)\n• Model Manager (⌘⇧W)\n• Cohort Batch (⌘⇧B)\n• Lesion Detection (⌘⇧D)\n• PET AC (⌘⇧K)\nPanels open as side inspectors — ⌘. to close.")
+        .help("AI Engines\n• MONAI Label (⌘⇧M)\n• nnU-Net (⌘⇧N)\n• PET Engine (⌘⇧P)\n• Classify (⌘⇧C)\n• Model Manager (⌘⇧W)\n• Cohort Batch (⌘⇧B)\n• Lesion Detection (⌘⇧D)\n• PET AC (⌘⇧K)\n• Nuclear Tools (⌘⇧U)\nPanels open as side inspectors — ⌘. to close.")
     }
 
     private var orientationMenu: some View {
@@ -931,6 +956,7 @@ public struct ContentView: View {
         showCohortPanel = false
         showLesionDetectorPanel = false
         showPETACPanel = false
+        showNuclearToolsPanel = false
         // Open the requested one next tick so the close animations settle.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
             switch which {
@@ -942,11 +968,12 @@ public struct ContentView: View {
             case .cohort: showCohortPanel = true
             case .lesionDetector: showLesionDetectorPanel = true
             case .petAC: showPETACPanel = true
+            case .nuclearTools: showNuclearToolsPanel = true
             }
         }
     }
 
-    private enum EngineInspector { case monai, nnunet, pet, classification, modelManager, cohort, lesionDetector, petAC }
+    private enum EngineInspector { case monai, nnunet, pet, classification, modelManager, cohort, lesionDetector, petAC, nuclearTools }
 
     /// Pull the full worklist (every indexed study in the SwiftData store)
     /// into the cohort panel. Called when the user opens the panel so the

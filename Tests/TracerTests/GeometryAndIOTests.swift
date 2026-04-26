@@ -5174,7 +5174,8 @@ final class GeometryAndIOTests: XCTestCase {
             patientName: "Test Patient",
             seriesDescription: "WB FDG NAC",
             studyDescription: "WB FDG",
-            suvScaleFactor: 1.234
+            suvScaleFactor: 1.234,
+            sourceFiles: ["/tmp/nac-pet.dcm"]
         )
         let acPixels: [Float] = (0..<8).map { Float($0) * 2 }
         let ac = PETACUtilities.makeACVolume(from: acPixels,
@@ -5192,6 +5193,8 @@ final class GeometryAndIOTests: XCTestCase {
                           "AC must use a fresh seriesUID — collision would hide it from PACS index")
         XCTAssertTrue(ac.seriesUID.hasPrefix("1.2.3.original.ac."),
                       "AC seriesUID should derive from NAC for traceability")
+        XCTAssertTrue(ac.sourceFiles.isEmpty,
+                      "Derived AC PET must not reuse NAC source files or the viewer can deduplicate it away.")
         XCTAssertTrue(ac.seriesDescription.contains("AC"))
         XCTAssertTrue(ac.seriesDescription.contains("deep-ac-test"))
     }

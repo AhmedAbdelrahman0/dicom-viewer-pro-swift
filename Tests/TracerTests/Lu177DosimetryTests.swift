@@ -101,6 +101,30 @@ final class Lu177DosimetryTests: XCTestCase {
         )
     }
 
+    func testDerivedDoseVolumesDoNotReuseSourceFileIdentity() throws {
+        let spect0 = makeVolume(pixels: [1], modality: "NM", sourceFiles: ["/tmp/spect-0.nii.gz"])
+        let spect1 = makeVolume(pixels: [1], modality: "NM", sourceFiles: ["/tmp/spect-1.nii.gz"])
+        let ct = makeVolume(pixels: [0], modality: "CT", sourceFiles: ["/tmp/ct.nii.gz"])
+        let result = try Lu177DosimetryEngine.createAbsorbedDoseMap(
+            timePoints: [
+                try Lu177DosimetryTimePoint(activityVolume: spect0, hoursPostAdministration: 0),
+                try Lu177DosimetryTimePoint(activityVolume: spect1, hoursPostAdministration: 1)
+            ],
+            ctVolume: ct,
+            options: try Lu177DosimetryOptions(tailModel: .noTail)
+        )
+
+        XCTAssertTrue(result.absorbedDoseMapGy.sourceFiles.isEmpty)
+        XCTAssertTrue(result.timeIntegratedActivityMapBqHoursPerML.sourceFiles.isEmpty)
+        XCTAssertTrue(try XCTUnwrap(result.densityMapGPerML).sourceFiles.isEmpty)
+
+        let cumulative = try Lu177DosimetryEngine.cumulativeTherapyDose(
+            referenceResult: result,
+            cycleCount: 4
+        )
+        XCTAssertTrue(cumulative.cumulativeDoseMapGy.sourceFiles.isEmpty)
+    }
+
     func testRecoveryCoefficientCorrectionBoostsSmallVOIActivity() throws {
         let spect0 = makeVolume(pixels: [1, 1, 5], modality: "NM")
         let spect1 = makeVolume(pixels: [1, 1, 5], modality: "NM")
@@ -486,7 +510,8 @@ final class Lu177DosimetryTests: XCTestCase {
                             height: Int = 1,
                             width: Int? = nil,
                             spacing: (Double, Double, Double) = (10, 10, 10),
-                            origin: (Double, Double, Double) = (0, 0, 0)) -> ImageVolume {
+                            origin: (Double, Double, Double) = (0, 0, 0),
+                            sourceFiles: [String] = []) -> ImageVolume {
         let resolvedWidth = width ?? pixels.count
         return ImageVolume(
             pixels: pixels,
@@ -498,7 +523,8 @@ final class Lu177DosimetryTests: XCTestCase {
             modality: modality,
             seriesUID: UUID().uuidString,
             studyUID: "study",
-            patientID: "patient"
+            patientID: "patient",
+            sourceFiles: sourceFiles
         )
     }
 }

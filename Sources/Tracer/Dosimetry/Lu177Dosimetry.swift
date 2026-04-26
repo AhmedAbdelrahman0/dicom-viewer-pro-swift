@@ -1128,7 +1128,7 @@ public enum Lu177DosimetryEngine {
             patientName: reference.patientName,
             seriesDescription: options.outputSeriesDescription,
             studyDescription: reference.studyDescription,
-            sourceFiles: reference.sourceFiles
+            sourceFiles: []
         )
         let tiaVolume = ImageVolume(
             pixels: tiaPixels,
@@ -1144,7 +1144,7 @@ public enum Lu177DosimetryEngine {
             patientName: reference.patientName,
             seriesDescription: "Lu-177 time-integrated activity",
             studyDescription: reference.studyDescription,
-            sourceFiles: reference.sourceFiles
+            sourceFiles: []
         )
         let densityVolume = ctVolume.map { ct in
             ImageVolume(
@@ -1161,7 +1161,7 @@ public enum Lu177DosimetryEngine {
                 patientName: ct.patientName,
                 seriesDescription: "CT-derived density map",
                 studyDescription: ct.studyDescription,
-                sourceFiles: ct.sourceFiles
+                sourceFiles: []
             )
         }
         let histograms = labelMap.map {
@@ -1235,7 +1235,7 @@ public enum Lu177DosimetryEngine {
             patientName: referenceVolume.patientName,
             seriesDescription: "Cumulative Lu-177 absorbed dose (\(cycles.count) cycles)",
             studyDescription: referenceVolume.studyDescription,
-            sourceFiles: referenceVolume.sourceFiles
+            sourceFiles: []
         )
         let scaledVOIs = referenceResult.report.voiSummaries.map { summary in
             Lu177VOIDoseSummary(

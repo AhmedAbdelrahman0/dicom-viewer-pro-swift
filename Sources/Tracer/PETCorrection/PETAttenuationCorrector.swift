@@ -163,7 +163,7 @@ public enum PETACUtilities {
             seriesDescription: "\(baseDescription) [\(correctorID)]",
             studyDescription: sourceNAC.studyDescription,
             suvScaleFactor: sourceNAC.suvScaleFactor,
-            sourceFiles: sourceNAC.sourceFiles
+            sourceFiles: []
         )
     }
 }

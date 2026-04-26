@@ -226,7 +226,7 @@ public enum SyntheticCTGenerator {
             patientName: petVolume.patientName,
             seriesDescription: options.seriesDescription,
             studyDescription: petVolume.studyDescription,
-            sourceFiles: petVolume.sourceFiles
+            sourceFiles: []
         )
         let report = SyntheticCTReport(
             sourceVolumeIdentity: petVolume.sessionIdentity,

@@ -22,7 +22,8 @@ final class SyntheticCTTests: XCTestCase {
             patientID: "patient",
             patientName: "name",
             seriesDescription: "PET",
-            studyDescription: "Study"
+            studyDescription: "Study",
+            sourceFiles: ["/tmp/source-pet.nii.gz"]
         )
         let options = try SyntheticCTOptions(smoothingRadiusVoxels: 0)
 
@@ -40,6 +41,8 @@ final class SyntheticCTTests: XCTestCase {
         XCTAssertEqual(result.volume.origin.z, pet.origin.z)
         XCTAssertEqual(result.volume.direction, pet.direction)
         XCTAssertEqual(result.volume.studyUID, "study")
+        XCTAssertTrue(result.volume.sourceFiles.isEmpty,
+                      "Derived synthetic CT must not reuse the source PET file identity.")
         XCTAssertEqual(result.report.dimensions, SyntheticCTDimensions(width: 2, height: 2, depth: 2))
         XCTAssertEqual(result.report.bodyVoxelCount, 5)
         XCTAssertNotNil(result.report.warning)
