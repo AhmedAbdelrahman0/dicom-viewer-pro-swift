@@ -34,6 +34,19 @@ public final class LabelingViewModel: ObservableObject {
     @Published public var gradientSearchRadius: Int = 30
     @Published public var regionGrowTolerance: Double = 50  // HU/intensity tolerance
 
+    /// Sphere radius in **mm** for the Quick Lesion tool. 8 mm covers a
+    /// typical small (≤ 1 cm) FDG-avid lesion comfortably while leaving
+    /// the surrounding background voxels out, which is what the
+    /// downstream radiomics features want for a sharp signature.
+    /// Range exposed in the UI: 3 – 30 mm.
+    @Published public var lesionSphereRadiusMM: Double = 8.0
+
+    /// Stable id used by `placeLesionSphere` so every quick-lesion
+    /// click joins the same class — separate connected components,
+    /// one classifier sweep over them all. Persisted only as a
+    /// memoised lookup; the actual class lives in the active label map.
+    public static let quickLesionClassName = "Quick Lesions"
+
     // MARK: - Landmark registration
 
     @Published public var landmarks: [LandmarkPair] = []
@@ -529,6 +542,122 @@ public final class LabelingViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Quick Lesion (sphere seed) tool
+
+    /// Drop a small spherical lesion mask centered on the given voxel,
+    /// painted into the "Quick Lesions" class of the active label map.
+    /// Skips the full segmentation pipeline so the user can produce a
+    /// classifier-ready label in seconds.
+    ///
+    /// Behaviour:
+    ///   • If no active label map exists, one is created on `parentVolume`'s
+    ///     grid.
+    ///   • If the "Quick Lesions" class doesn't yet exist, it's appended
+    ///     with an orange colour. Subsequent calls reuse the same class
+    ///     id, so two clicks → one class with two connected components,
+    ///     which `PETQuantification.compute(connectedComponents: true)`
+    ///     enumerates as two separate lesions.
+    ///   • Sphere geometry is computed in **mm space** (radius is in mm),
+    ///     so an anisotropic 5 mm × 5 mm × 3 mm volume gets a correctly-
+    ///     elongated voxel sphere.
+    ///   • Voxels outside the volume bounds are clipped silently.
+    ///   • The new class is set active so the user can continue clicking.
+    ///
+    /// - Returns: the class id used, or nil when the inputs are invalid.
+    @discardableResult
+    public func placeLesionSphere(centerVoxel seed: (z: Int, y: Int, x: Int),
+                                  radiusMM: Double,
+                                  parentVolume: ImageVolume) -> UInt16? {
+        guard radiusMM > 0 else { return nil }
+
+        // Ensure we have a label map on the same grid as the volume the
+        // user just clicked. Existing maps that don't match the click
+        // are left alone; we make a fresh one for this volume.
+        let map: LabelMap
+        if let existing = activeLabelMap,
+           existing.depth == parentVolume.depth,
+           existing.height == parentVolume.height,
+           existing.width == parentVolume.width {
+            map = existing
+        } else {
+            map = createLabelMap(for: parentVolume,
+                                 name: "Quick Lesions",
+                                 presetSet: nil)
+        }
+
+        // Find or create the "Quick Lesions" class entry. Reusing the
+        // same class id across multiple clicks means components stay
+        // separable in the classifier loop.
+        let classID: UInt16
+        if let existing = map.classes.first(where: {
+            $0.name.caseInsensitiveCompare(Self.quickLesionClassName) == .orderedSame
+        }) {
+            classID = existing.labelID
+        } else {
+            classID = map.addClass(LabelClass(
+                name: Self.quickLesionClassName,
+                category: .lesion,
+                color: .orange
+            ))
+        }
+        activeClassID = classID
+
+        // Mm-space sphere → voxel-space ellipsoid (handles anisotropic
+        // spacing). Distance check uses (dx_mm)² + (dy_mm)² + (dz_mm)²
+        // ≤ r² so the result is a real sphere in patient space.
+        let r2 = radiusMM * radiusMM
+        let sx = parentVolume.spacing.x
+        let sy = parentVolume.spacing.y
+        let sz = parentVolume.spacing.z
+        let xRadiusVox = max(1, Int((radiusMM / max(sx, 1e-9)).rounded(.up)))
+        let yRadiusVox = max(1, Int((radiusMM / max(sy, 1e-9)).rounded(.up)))
+        let zRadiusVox = max(1, Int((radiusMM / max(sz, 1e-9)).rounded(.up)))
+        let zMin = Swift.max(0, seed.z - zRadiusVox)
+        let zMax = Swift.min(parentVolume.depth - 1, seed.z + zRadiusVox)
+        let yMin = Swift.max(0, seed.y - yRadiusVox)
+        let yMax = Swift.min(parentVolume.height - 1, seed.y + yRadiusVox)
+        let xMin = Swift.max(0, seed.x - xRadiusVox)
+        let xMax = Swift.min(parentVolume.width - 1, seed.x + xRadiusVox)
+
+        let w = parentVolume.width, h = parentVolume.height
+        for z in zMin...zMax {
+            let dz = Double(z - seed.z) * sz
+            let dz2 = dz * dz
+            for y in yMin...yMax {
+                let dy = Double(y - seed.y) * sy
+                let yzSq = dz2 + dy * dy
+                if yzSq > r2 { continue }
+                let rowStart = z * h * w + y * w
+                for x in xMin...xMax {
+                    let dx = Double(x - seed.x) * sx
+                    if yzSq + dx * dx <= r2 {
+                        map.voxels[rowStart + x] = classID
+                    }
+                }
+            }
+        }
+
+        hasUnsavedChanges = true
+        map.objectWillChange.send()
+        return classID
+    }
+
+    /// Reset the "Quick Lesions" class back to background — useful when
+    /// the user wants to redo their seeds without juggling other classes.
+    /// No-op when the active map has no quick-lesion class.
+    public func clearQuickLesions() {
+        guard let map = activeLabelMap,
+              let cls = map.classes.first(where: {
+                  $0.name.caseInsensitiveCompare(Self.quickLesionClassName) == .orderedSame
+              }) else { return }
+        let id = cls.labelID
+        for i in 0..<map.voxels.count where map.voxels[i] == id {
+            map.voxels[i] = 0
+        }
+        hasUnsavedChanges = true
+        map.objectWillChange.send()
+    }
+
     // MARK: - I/O
 
     public func saveActiveLabel(to url: URL,
@@ -732,29 +861,31 @@ public struct LabelImportResult {
 }
 
 public enum LabelingTool: String, CaseIterable, Identifiable, Sendable {
-    case none, brush, eraser, threshold, suvGradient, regionGrow, landmark
+    case none, brush, eraser, threshold, suvGradient, regionGrow, landmark, lesionSphere
 
     public var id: String { rawValue }
     public var displayName: String {
         switch self {
-        case .none:       return "—"
-        case .brush:      return "Brush"
-        case .eraser:     return "Eraser"
-        case .threshold:  return "Threshold"
-        case .suvGradient: return "SUV Gradient"
-        case .regionGrow: return "Region Grow"
-        case .landmark:   return "Landmark"
+        case .none:         return "—"
+        case .brush:        return "Brush"
+        case .eraser:       return "Eraser"
+        case .threshold:    return "Threshold"
+        case .suvGradient:  return "SUV Gradient"
+        case .regionGrow:   return "Region Grow"
+        case .landmark:     return "Landmark"
+        case .lesionSphere: return "Quick Lesion"
         }
     }
     public var systemImage: String {
         switch self {
-        case .none:       return "hand.point.up"
-        case .brush:      return "paintbrush.pointed"
-        case .eraser:     return "eraser"
-        case .threshold:  return "thermometer.medium"
-        case .suvGradient: return "waveform.path.ecg"
-        case .regionGrow: return "drop"
-        case .landmark:   return "mappin.and.ellipse"
+        case .none:         return "hand.point.up"
+        case .brush:        return "paintbrush.pointed"
+        case .eraser:       return "eraser"
+        case .threshold:    return "thermometer.medium"
+        case .suvGradient:  return "waveform.path.ecg"
+        case .regionGrow:   return "drop"
+        case .landmark:     return "mappin.and.ellipse"
+        case .lesionSphere: return "circle.dashed"
         }
     }
 
@@ -793,6 +924,14 @@ public enum LabelingTool: String, CaseIterable, Identifiable, Sendable {
                  + "volumes. After 3+ pairs, a rigid transform is computed\n"
                  + "and TRE is reported. Use 'Migrate Label' to transfer\n"
                  + "the mask across volumes."
+        case .lesionSphere:
+            return "Quick Lesion (sphere seed)\n"
+                 + "Click a lesion to drop a small sphere mask centered\n"
+                 + "on the click point. Each click adds another sphere\n"
+                 + "into the same 'Quick Lesions' class so they show up\n"
+                 + "as separate connected components in classification.\n"
+                 + "Use this to skip the full segmentation pipeline when\n"
+                 + "you already know which lesions you want to classify."
         }
     }
 }

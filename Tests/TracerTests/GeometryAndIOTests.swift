@@ -3371,6 +3371,167 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertFalse(interpreter.actions(for: "open this study").contains(.openCohortPanel))
     }
 
+    // MARK: - Quick Lesion sphere tool
+
+    @MainActor
+    func testPlaceLesionSphereCreatesLabelAndQuickLesionsClassOnFirstClick() {
+        let labeling = LabelingViewModel()
+        let volume = ImageVolume(
+            pixels: [Float](repeating: 0, count: 6 * 6 * 6),
+            depth: 6, height: 6, width: 6,
+            spacing: (1, 1, 1),
+            modality: "PT",
+            seriesUID: "test-pet"
+        )
+        XCTAssertNil(labeling.activeLabelMap)
+        let id = labeling.placeLesionSphere(centerVoxel: (z: 3, y: 3, x: 3),
+                                            radiusMM: 1.0,
+                                            parentVolume: volume)
+        XCTAssertNotNil(id)
+        XCTAssertNotNil(labeling.activeLabelMap)
+        XCTAssertEqual(labeling.activeLabelMap?.classes.count, 1)
+        XCTAssertEqual(labeling.activeLabelMap?.classes[0].name, "Quick Lesions")
+        XCTAssertEqual(labeling.activeClassID, id)
+    }
+
+    @MainActor
+    func testPlaceLesionSphereReusesClassAcrossClicksAndSeparatesComponents() {
+        let labeling = LabelingViewModel()
+        let volume = ImageVolume(
+            pixels: [Float](repeating: 0, count: 12 * 12 * 12),
+            depth: 12, height: 12, width: 12,
+            spacing: (1, 1, 1),
+            modality: "PT",
+            seriesUID: "test"
+        )
+        // Two clicks far apart → same class id, two connected components
+        let id1 = labeling.placeLesionSphere(centerVoxel: (z: 2, y: 2, x: 2),
+                                             radiusMM: 1.0,
+                                             parentVolume: volume)
+        let id2 = labeling.placeLesionSphere(centerVoxel: (z: 9, y: 9, x: 9),
+                                             radiusMM: 1.0,
+                                             parentVolume: volume)
+        XCTAssertEqual(id1, id2, "Repeated clicks must reuse the Quick Lesions class id")
+        XCTAssertEqual(labeling.activeLabelMap?.classes.count, 1)
+
+        // Confirm voxel-level: both seeds have ≥1 marked voxel; the
+        // connected-component count under PETQuantification = 2.
+        guard let map = labeling.activeLabelMap else {
+            return XCTFail("Label map should exist")
+        }
+        XCTAssertEqual(map.voxels[2 * 12 * 12 + 2 * 12 + 2], id1)
+        XCTAssertEqual(map.voxels[9 * 12 * 12 + 9 * 12 + 9], id1)
+        let report = try? PETQuantification.compute(petVolume: volume,
+                                                    labelMap: map,
+                                                    classes: [id1!],
+                                                    connectedComponents: true)
+        XCTAssertEqual(report?.lesionCount, 2,
+                       "Two distinct seeds → two distinct connected components")
+    }
+
+    @MainActor
+    func testPlaceLesionSphereRespectsAnisotropicSpacing() {
+        let labeling = LabelingViewModel()
+        // Anisotropic — z-spacing is 5× xy-spacing. A 5 mm sphere should
+        // span ~5 voxels in xy but only 1 voxel in z.
+        let volume = ImageVolume(
+            pixels: [Float](repeating: 0, count: 30 * 30 * 30),
+            depth: 30, height: 30, width: 30,
+            spacing: (1, 1, 5),
+            modality: "PT"
+        )
+        _ = labeling.placeLesionSphere(centerVoxel: (z: 15, y: 15, x: 15),
+                                       radiusMM: 5.0,
+                                       parentVolume: volume)
+        guard let map = labeling.activeLabelMap else {
+            return XCTFail("Label map should exist")
+        }
+        // Center voxel marked.
+        let centerIdx = 15 * 30 * 30 + 15 * 30 + 15
+        XCTAssertGreaterThan(map.voxels[centerIdx], 0)
+        // Walk along x to find sphere extent in voxels.
+        var xExtent = 0
+        for dx in 0...20 {
+            let idx = 15 * 30 * 30 + 15 * 30 + (15 + dx)
+            if idx < map.voxels.count, map.voxels[idx] > 0 { xExtent = dx } else { break }
+        }
+        // 5 mm radius along 1 mm/voxel → ~5 voxels each side.
+        XCTAssertEqual(xExtent, 5, "X extent should match mm-radius / x-spacing")
+        // Walk along z. 5 mm / 5 mm = 1 voxel each side.
+        var zExtent = 0
+        for dz in 0...20 {
+            let idx = (15 + dz) * 30 * 30 + 15 * 30 + 15
+            if idx < map.voxels.count, map.voxels[idx] > 0 { zExtent = dz } else { break }
+        }
+        XCTAssertEqual(zExtent, 1, "Z extent should reflect anisotropic spacing")
+    }
+
+    @MainActor
+    func testPlaceLesionSphereClampsAtVolumeBoundary() {
+        let labeling = LabelingViewModel()
+        let volume = ImageVolume(
+            pixels: [Float](repeating: 0, count: 4 * 4 * 4),
+            depth: 4, height: 4, width: 4,
+            spacing: (1, 1, 1),
+            modality: "PT"
+        )
+        // Click at the very corner with a radius that would extend off
+        // the volume on three sides.
+        let id = labeling.placeLesionSphere(centerVoxel: (z: 0, y: 0, x: 0),
+                                            radiusMM: 5.0,
+                                            parentVolume: volume)
+        XCTAssertNotNil(id, "Out-of-range sphere still places (clipped)")
+        guard let map = labeling.activeLabelMap else { return XCTFail() }
+        // Corner voxel is marked.
+        XCTAssertEqual(map.voxels[0], id)
+        // Voxels outside the volume can't be inspected — what we want is
+        // that we DIDN'T crash on the negative-index walk.
+    }
+
+    @MainActor
+    func testPlaceLesionSphereRejectsZeroOrNegativeRadius() {
+        let labeling = LabelingViewModel()
+        let volume = ImageVolume(
+            pixels: [Float](repeating: 0, count: 8),
+            depth: 2, height: 2, width: 2,
+            modality: "PT"
+        )
+        XCTAssertNil(labeling.placeLesionSphere(centerVoxel: (z: 0, y: 0, x: 0),
+                                                radiusMM: 0,
+                                                parentVolume: volume))
+        XCTAssertNil(labeling.placeLesionSphere(centerVoxel: (z: 0, y: 0, x: 0),
+                                                radiusMM: -1,
+                                                parentVolume: volume))
+        XCTAssertNil(labeling.activeLabelMap,
+                     "Rejected calls don't create a label map")
+    }
+
+    @MainActor
+    func testClearQuickLesionsResetsClassToBackground() {
+        let labeling = LabelingViewModel()
+        let volume = ImageVolume(
+            pixels: [Float](repeating: 0, count: 8 * 8 * 8),
+            depth: 8, height: 8, width: 8,
+            modality: "PT"
+        )
+        _ = labeling.placeLesionSphere(centerVoxel: (z: 4, y: 4, x: 4),
+                                       radiusMM: 2.0,
+                                       parentVolume: volume)
+        let beforeMarked = labeling.activeLabelMap?.voxels.filter { $0 != 0 }.count ?? 0
+        XCTAssertGreaterThan(beforeMarked, 0)
+        labeling.clearQuickLesions()
+        let afterMarked = labeling.activeLabelMap?.voxels.filter { $0 != 0 }.count ?? -1
+        XCTAssertEqual(afterMarked, 0, "All Quick Lesions voxels should be cleared")
+        // The class entry stays so the next click reuses the same id.
+        XCTAssertEqual(labeling.activeLabelMap?.classes.first?.name, "Quick Lesions")
+    }
+
+    func testLabelingToolEnumIncludesLesionSphere() {
+        XCTAssertTrue(LabelingTool.allCases.contains(.lesionSphere))
+        XCTAssertEqual(LabelingTool.lesionSphere.displayName, "Quick Lesion")
+        XCTAssertFalse(LabelingTool.lesionSphere.helpText.isEmpty)
+    }
+
     @MainActor
     func testNNUnetAssistantReadinessPreflightsCoreMLPackages() throws {
         let nnunet = NNUnetViewModel()

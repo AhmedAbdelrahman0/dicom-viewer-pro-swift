@@ -855,6 +855,28 @@ public struct SliceView: View {
                 lastPaintPoint = p
             }
 
+        case .lesionSphere:
+            // One sphere per click. Drag without releasing doesn't keep
+            // dropping spheres — the user has to lift to seed another.
+            if lastPaintPoint == nil {
+                let (z, y, x) = vm.labeling.voxelCoordForClick(
+                    axis: axis, sliceIndex: vm.sliceIndices[axis],
+                    pixelX: p.0, pixelY: p.1
+                )
+                if let id = vm.labeling.placeLesionSphere(
+                    centerVoxel: (z: z, y: y, x: x),
+                    radiusMM: vm.labeling.lesionSphereRadiusMM,
+                    parentVolume: volume
+                ) {
+                    let count = vm.labeling.activeLabelMap?
+                        .classes
+                        .first { $0.labelID == id }?
+                        .name ?? "Quick Lesions"
+                    vm.statusMessage = "Dropped lesion seed (radius \(Int(vm.labeling.lesionSphereRadiusMM)) mm) into \(count)."
+                }
+                lastPaintPoint = p
+            }
+
         default: break
         }
     }
