@@ -996,6 +996,7 @@ struct StudyBrowserView: View {
 
     private func showSavedArchiveRoot(_ root: PACSArchiveRoot) {
         archiveFilterID = root.scopeID
+        searchText = ""
         worklistDisplayLimit = worklistDisplayPageSize
         browserMode = .worklist
     }

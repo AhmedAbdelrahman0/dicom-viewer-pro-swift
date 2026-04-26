@@ -922,6 +922,7 @@ public final class ViewerViewModel: ObservableObject {
             self?.labeling.redo()
             self?.startActiveVolumeMeasurement(method: .activeLabel, thresholdSummary: "Redo")
         }
+        saveOrUpdateCurrentStudySession(announce: false, includeLabelMaps: true)
     }
 
     public func addAnnotation(_ annotation: Annotation) {
@@ -3470,6 +3471,7 @@ public final class ViewerViewModel: ObservableObject {
         statusMessage = message
         volumeOperationStatus = nil
         volumeOperationTask = nil
+        saveOrUpdateCurrentStudySession(announce: false, includeLabelMaps: true)
     }
 
     private func measurementStatus(_ report: VolumeMeasurementReport) -> String {

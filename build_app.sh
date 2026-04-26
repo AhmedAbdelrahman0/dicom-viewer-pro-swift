@@ -83,6 +83,10 @@ cat > "$CONTENTS/Info.plist" <<PLIST
     <true/>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.medical</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Tracer uses the microphone only when you start push-to-talk dictation for reporting.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Tracer uses speech recognition to transcribe dictated radiology report text and voice commands.</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
     <key>NSSupportsAutomaticGraphicsSwitching</key>

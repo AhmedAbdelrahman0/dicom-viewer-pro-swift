@@ -302,11 +302,11 @@ final class DictationAITests: XCTestCase {
     // MARK: - ClosurePixelToTextSuggester
 
     func testClosureSuggesterCallsClosure() async throws {
-        var capturedContext: PixelToTextContext?
+        let capturedContext = PixelToTextContextBox()
         let suggester = ClosurePixelToTextSuggester(
             id: "test", displayName: "Test", isOnDevice: true
         ) { _, ctx in
-            capturedContext = ctx
+            await capturedContext.set(ctx)
             return ReportSentence(text: "From closure.", provenance: .vlmSuggested)
         }
         let result = try await suggester.suggest(
@@ -314,8 +314,9 @@ final class DictationAITests: XCTestCase {
             context: PixelToTextContext(modality: "MR", bodyPart: "brain")
         )
         XCTAssertEqual(result?.text, "From closure.")
-        XCTAssertEqual(capturedContext?.modality, "MR")
-        XCTAssertEqual(capturedContext?.bodyPart, "brain")
+        let context = await capturedContext.value
+        XCTAssertEqual(context?.modality, "MR")
+        XCTAssertEqual(context?.bodyPart, "brain")
     }
 
     // MARK: - Helpers
@@ -338,5 +339,15 @@ final class DictationAITests: XCTestCase {
             provider: provider, decode: nil,
             shouldInterpolate: false, intent: .defaultIntent
         )!
+    }
+}
+
+private actor PixelToTextContextBox {
+    private var storage: PixelToTextContext?
+
+    var value: PixelToTextContext? { storage }
+
+    func set(_ context: PixelToTextContext) {
+        storage = context
     }
 }

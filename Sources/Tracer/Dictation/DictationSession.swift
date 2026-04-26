@@ -79,6 +79,10 @@ public final class DictationSession: ObservableObject {
             statusMessage = "Stop dictation before switching engines."
             return
         }
+        eventTask?.cancel()
+        eventTask = nil
+        captureTask?.cancel()
+        captureTask = nil
         engine = newEngine
         engineDescription = newEngine.displayName
     }
@@ -139,9 +143,10 @@ public final class DictationSession: ObservableObject {
             capture.stop()
         }
         captureTask?.cancel()
+        captureTask = nil
+        eventTask?.cancel()
+        eventTask = nil
         await engine.cancel()
-        // Don't await eventTask — it'll finish naturally when the
-        // engine's stream emits its final event or terminates.
         partialTranscript = ""
     }
 
@@ -155,6 +160,7 @@ public final class DictationSession: ObservableObject {
     // MARK: - Pumps
 
     private func startPumps() {
+        captureTask?.cancel()
         let captureStream = capture.chunks
         let engineRef = engine
 
@@ -169,6 +175,7 @@ public final class DictationSession: ObservableObject {
             }
         }
 
+        guard eventTask == nil else { return }
         let eventStream = engine.events
         eventTask = Task { [weak self] in
             for await event in eventStream {

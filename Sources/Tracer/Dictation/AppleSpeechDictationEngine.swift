@@ -131,12 +131,15 @@ public final class AppleSpeechDictationEngine: DictationEngine, @unchecked Senda
 
     public func finish() async {
         #if canImport(Speech)
+        guard request != nil else {
+            lock.withLock { active = false }
+            eventsContinuation?.yield(.idle)
+            return
+        }
         request?.endAudio()
-        // The recognition task continues to flush; results arrive via
-        // `handleResult`. We mark the session inactive immediately so
-        // the next push-to-talk press can start even if Speech takes a
-        // moment to deliver its final idle callback.
-        lock.withLock { active = false }
+        // Keep the engine active until Speech delivers its final result
+        // or an error. This prevents a fast stop/start from mixing the
+        // previous utterance into the next recording session.
         #endif
     }
 
