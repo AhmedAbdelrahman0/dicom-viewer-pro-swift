@@ -542,7 +542,11 @@ public enum LabelIO {
         String(format: "%.12g", value)
     }
 
-    private static func gzip(_ data: Data) throws -> Data {
+    /// Gzip-compress a payload. Used by `saveNIfTIGz` for label maps and
+    /// (since the cohort AC step) by `CohortBatchProcessor` to compress
+    /// AC PET sidecars to `ac.nii.gz`. Raised to internal access so the
+    /// cohort module can reuse the same compression path.
+    static func gzip(_ data: Data) throws -> Data {
         var capacity = max(64, data.count + data.count / 16 + 64)
         while capacity < Int(Int32.max) {
             var compressed = Data(count: capacity)

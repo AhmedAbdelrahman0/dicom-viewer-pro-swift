@@ -164,6 +164,9 @@ public final class CohortResultsStore: ObservableObject {
             "top_classification",
             "top_classification_confidence",
             "load_sec",
+            "ac_sec",
+            "ac_fallback_to_nac",
+            "ac_path",
             "segmentation_sec",
             "classification_sec",
             "error",
@@ -208,7 +211,7 @@ public final class CohortResultsStore: ObservableObject {
     /// trivial for the solver.
     private static func csvRow(for r: CohortStudyResult) -> String {
         var columns: [String] = []
-        columns.reserveCapacity(19)
+        columns.reserveCapacity(22)
         columns.append(csvEscape(r.id))
         columns.append(csvEscape(r.patientID))
         columns.append(csvEscape(r.patientName))
@@ -223,6 +226,13 @@ public final class CohortResultsStore: ObservableObject {
         columns.append(csvEscape(r.topClassification ?? ""))
         columns.append(r.topClassificationConfidence.map { String(format: "%.4f", $0) } ?? "")
         columns.append(r.loadSeconds.map { String(format: "%.2f", $0) } ?? "")
+        // PET AC step (3 columns inserted between load and segmentation so
+        // the column order matches the pipeline order in the processor).
+        // ac_fallback_to_nac is "true" / "false" / "" — empty when the
+        // job didn't include AC at all.
+        columns.append(r.attenuationCorrectionSeconds.map { String(format: "%.2f", $0) } ?? "")
+        columns.append(r.attenuationCorrectionFallbackToNAC.map { $0 ? "true" : "false" } ?? "")
+        columns.append(csvEscape(r.attenuationCorrectionPath ?? ""))
         columns.append(r.segmentationSeconds.map { String(format: "%.2f", $0) } ?? "")
         columns.append(r.classificationSeconds.map { String(format: "%.2f", $0) } ?? "")
         columns.append(csvEscape(r.errorMessage ?? ""))

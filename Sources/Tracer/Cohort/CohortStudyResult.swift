@@ -44,11 +44,29 @@ public struct CohortStudyResult: Codable, Hashable, Sendable, Identifiable {
     public var topClassification: String?
     public var topClassificationConfidence: Double?
 
+    // MARK: - Optional PET attenuation correction step
+
+    /// Wall-clock seconds the AC step took. nil if AC wasn't part of
+    /// the job, or if the AC step failed before producing a result.
+    public var attenuationCorrectionSeconds: Double?
+    /// Path to the AC PET sidecar written under `<studyDir>/ac.nii.gz`.
+    /// nil when AC didn't run or fell back to NAC.
+    public var attenuationCorrectionPath: String?
+    /// Set when the job had AC enabled, AC failed for this study, AND
+    /// `petACFallbackToNACOnFailure` is on. The downstream segmentation
+    /// + classification ran on NAC; a column in the cohort CSV flags it
+    /// so the user can quarantine those rows in their analysis.
+    public var attenuationCorrectionFallbackToNAC: Bool?
+    /// Last-line stderr / model log from the AC step. nil = no signal
+    /// either way; empty string = AC ran cleanly.
+    public var attenuationCorrectionLog: String?
+
     public enum Status: String, Codable, Sendable, CaseIterable {
         case pending
         case running
         case done
         case failedLoad
+        case failedAttenuationCorrection   // AC failed AND fallback was disabled
         case failedSegmentation
         case failedClassification
         case cancelled
@@ -56,20 +74,22 @@ public struct CohortStudyResult: Codable, Hashable, Sendable, Identifiable {
 
         public var displayName: String {
             switch self {
-            case .pending:              return "Pending"
-            case .running:              return "Running"
-            case .done:                 return "Done"
-            case .failedLoad:           return "Load failed"
-            case .failedSegmentation:   return "Segmentation failed"
-            case .failedClassification: return "Classification failed"
-            case .cancelled:            return "Cancelled"
-            case .skipped:              return "Skipped"
+            case .pending:                       return "Pending"
+            case .running:                       return "Running"
+            case .done:                          return "Done"
+            case .failedLoad:                    return "Load failed"
+            case .failedAttenuationCorrection:   return "AC failed"
+            case .failedSegmentation:            return "Segmentation failed"
+            case .failedClassification:          return "Classification failed"
+            case .cancelled:                     return "Cancelled"
+            case .skipped:                       return "Skipped"
             }
         }
 
         public var isTerminal: Bool {
             switch self {
-            case .done, .failedLoad, .failedSegmentation, .failedClassification, .skipped:
+            case .done, .failedLoad, .failedAttenuationCorrection,
+                 .failedSegmentation, .failedClassification, .skipped:
                 return true
             case .pending, .running, .cancelled:
                 return false
@@ -78,7 +98,8 @@ public struct CohortStudyResult: Codable, Hashable, Sendable, Identifiable {
 
         public var isFailure: Bool {
             switch self {
-            case .failedLoad, .failedSegmentation, .failedClassification:
+            case .failedLoad, .failedAttenuationCorrection,
+                 .failedSegmentation, .failedClassification:
                 return true
             default:
                 return false

@@ -3371,6 +3371,159 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertFalse(interpreter.actions(for: "open this study").contains(.openCohortPanel))
     }
 
+    // MARK: - Cohort PET AC integration
+
+    func testCohortJobDecodesOldCheckpointWithoutACFields() throws {
+        // Synthesise a pre-AC cohort checkpoint (no `petAC*` keys) and
+        // verify the new decoder defaults the AC fields cleanly. Critical
+        // — without this, anyone resuming a Sept-shipped cohort would get
+        // a JSON decode failure and lose their checkpoint.
+        let oldJSON = """
+        {
+          "id": "old-job",
+          "name": "pre-AC cohort",
+          "outputRoot": "file:///tmp/old/",
+          "nnunetEntryID": "dataset-221-autopet",
+          "segmentationMode": "subprocess",
+          "useFullEnsemble": false,
+          "disableTTA": true,
+          "classifierEntryID": null,
+          "classifierModelPath": "",
+          "classifierBinaryPath": "",
+          "classifierProjectorPath": "",
+          "classifierEnvironment": "",
+          "zeroShotPrompts": "",
+          "zeroShotLabels": "",
+          "zeroShotTokenIDs": "",
+          "candidateLabels": "",
+          "runClassifierOnDGX": false,
+          "classifyClassIDs": [],
+          "maxConcurrent": 2,
+          "skipIfResultsExist": true,
+          "modalityAllowList": []
+        }
+        """.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(CohortJob.self, from: oldJSON)
+        XCTAssertEqual(decoded.id, "old-job")
+        XCTAssertEqual(decoded.nnunetEntryID, "dataset-221-autopet")
+        XCTAssertNil(decoded.petACEntryID, "AC defaults to nil on old checkpoints")
+        XCTAssertEqual(decoded.petACScriptPath, "")
+        XCTAssertEqual(decoded.petACPythonExecutable, "/usr/bin/env")
+        XCTAssertEqual(decoded.petACTimeoutSeconds, 600)
+        XCTAssertTrue(decoded.petACFallbackToNACOnFailure,
+                      "Default policy: keep the cohort moving when AC fails")
+    }
+
+    func testCohortJobRoundTripsACFields() throws {
+        let original = CohortJob(
+            id: "ac-job",
+            outputRoot: URL(fileURLWithPath: "/tmp/ac"),
+            nnunetEntryID: "dataset-221-autopet",
+            petACEntryID: "deep-ac-dgx",
+            petACScriptPath: "~/scripts/deep_ac.py",
+            petACEnvironment: "activate=conda activate ac\nCUDA_VISIBLE_DEVICES=0",
+            petACExtraArgs: "--device cuda:0",
+            petACTimeoutSeconds: 900,
+            petACUseAnatomicalChannel: true,
+            petACFallbackToNACOnFailure: false
+        )
+        let encoded = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(CohortJob.self, from: encoded)
+        XCTAssertEqual(decoded.petACEntryID, "deep-ac-dgx")
+        XCTAssertEqual(decoded.petACScriptPath, "~/scripts/deep_ac.py")
+        XCTAssertEqual(decoded.petACTimeoutSeconds, 900)
+        XCTAssertTrue(decoded.petACUseAnatomicalChannel)
+        XCTAssertFalse(decoded.petACFallbackToNACOnFailure)
+        XCTAssertTrue(decoded.petACEnvironment.contains("activate=conda activate ac"))
+    }
+
+    func testCohortStudyResultStatusGainsAttenuationCorrectionFailure() {
+        XCTAssertTrue(CohortStudyResult.Status.failedAttenuationCorrection.isFailure)
+        XCTAssertTrue(CohortStudyResult.Status.failedAttenuationCorrection.isTerminal)
+        XCTAssertEqual(CohortStudyResult.Status.failedAttenuationCorrection.displayName,
+                       "AC failed")
+    }
+
+    func testLoadedStudyReplacingPETSwapsPETChannelOnly() {
+        // PET-only study — primary IS the PET, replacement should swap primary.
+        let pet = ImageVolume(pixels: [Float](repeating: 0, count: 8),
+                              depth: 2, height: 2, width: 2,
+                              modality: "PT", seriesUID: "PET-NAC")
+        let petAC = ImageVolume(pixels: [Float](repeating: 1, count: 8),
+                                depth: 2, height: 2, width: 2,
+                                modality: "PT", seriesUID: "PET-AC")
+        let petOnly = CohortStudyLoader.LoadedStudy(primary: pet, auxiliary: [])
+        let swapped1 = petOnly.replacingPET(with: petAC)
+        XCTAssertEqual(swapped1.primary.seriesUID, "PET-AC")
+        XCTAssertTrue(swapped1.auxiliary.isEmpty)
+
+        // PET/CT study — primary is CT, PET is auxiliary[0]; replacement
+        // should swap auxiliary[0] only.
+        let ct = ImageVolume(pixels: [Float](repeating: 0, count: 8),
+                             depth: 2, height: 2, width: 2,
+                             modality: "CT", seriesUID: "CT")
+        let petCT = CohortStudyLoader.LoadedStudy(primary: ct, auxiliary: [pet])
+        let swapped2 = petCT.replacingPET(with: petAC)
+        XCTAssertEqual(swapped2.primary.seriesUID, "CT", "CT base must be preserved")
+        XCTAssertEqual(swapped2.auxiliary.count, 1)
+        XCTAssertEqual(swapped2.auxiliary[0].seriesUID, "PET-AC")
+
+        // No PET in load set — replacement is a no-op (defensive case).
+        let mr = ImageVolume(pixels: [Float](repeating: 0, count: 8),
+                             depth: 2, height: 2, width: 2,
+                             modality: "MR", seriesUID: "MR-only")
+        let mrOnly = CohortStudyLoader.LoadedStudy(primary: mr, auxiliary: [])
+        let swapped3 = mrOnly.replacingPET(with: petAC)
+        XCTAssertEqual(swapped3.primary.seriesUID, "MR-only",
+                       "Studies with no PET are returned unchanged")
+    }
+
+    @MainActor
+    func testCohortResultsStoreCSVIncludesACColumns() throws {
+        let store = CohortResultsStore()
+        let job = CohortJob(id: "with-ac",
+                            outputRoot: URL(fileURLWithPath: "/tmp"),
+                            petACEntryID: "deep-ac-subprocess")
+        var cp = CohortCheckpoint(job: job)
+        var done = CohortStudyResult(id: "s1",
+                                     patientID: "P1",
+                                     patientName: "AC OK",
+                                     studyDate: "20260425",
+                                     status: .done)
+        done.attenuationCorrectionSeconds = 4.2
+        done.attenuationCorrectionFallbackToNAC = false
+        done.attenuationCorrectionPath = "/tmp/with-ac/s1/ac.nii.gz"
+        cp.results["s1"] = done
+
+        var fallback = CohortStudyResult(id: "s2",
+                                         patientID: "P2",
+                                         patientName: "AC fell back",
+                                         studyDate: "20260425",
+                                         status: .done)
+        fallback.attenuationCorrectionFallbackToNAC = true
+        cp.results["s2"] = fallback
+
+        let cpURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cp-\(UUID().uuidString).json")
+        try cp.save(to: cpURL)
+        store.load(checkpointURL: cpURL)
+        defer { try? FileManager.default.removeItem(at: cpURL) }
+
+        let csvURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cohort-\(UUID().uuidString).csv")
+        defer { try? FileManager.default.removeItem(at: csvURL) }
+        try store.exportCohortCSV(to: csvURL)
+
+        let csv = try String(contentsOf: csvURL, encoding: .utf8)
+        XCTAssertTrue(csv.contains("ac_sec"), "Header must include ac_sec column")
+        XCTAssertTrue(csv.contains("ac_fallback_to_nac"))
+        XCTAssertTrue(csv.contains("ac_path"))
+        XCTAssertTrue(csv.contains("4.20"), "AC duration recorded for s1")
+        XCTAssertTrue(csv.contains("/tmp/with-ac/s1/ac.nii.gz"))
+        XCTAssertTrue(csv.contains("true"), "Fallback flag emitted for s2")
+    }
+
     // MARK: - PET attenuation correction
 
     func testPETACCatalogExposesEveryBackend() {

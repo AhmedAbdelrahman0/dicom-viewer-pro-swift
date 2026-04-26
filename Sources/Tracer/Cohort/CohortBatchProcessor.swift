@@ -134,7 +134,7 @@ public actor CohortBatchProcessor {
         await updateAndPersist(studyID: studyID, result: result)
 
         // 1. Load
-        let loaded: CohortStudyLoader.LoadedStudy
+        var loaded: CohortStudyLoader.LoadedStudy
         do {
             guard let study = studiesByID[studyID] else {
                 throw CohortError.worklistEntryMissing(id: studyID)
@@ -150,6 +150,43 @@ public actor CohortBatchProcessor {
             result.finishedAt = Date()
             await updateAndPersist(studyID: studyID, result: result)
             return
+        }
+
+        // 1b. Optional: PET attenuation correction. When the job has an AC
+        // entry configured, run it on the NAC PET in `loaded` and swap the
+        // AC PET back into the load set so segmentation + quantification +
+        // classification all see the corrected values. Failure handling
+        // depends on `petACFallbackToNACOnFailure` — see the toggle's docs.
+        if let acID = checkpoint.job.petACEntryID,
+           let acEntry = PETACCatalog.byID(acID) {
+            let acOutcome = await runAttenuationCorrection(
+                job: checkpoint.job,
+                entry: acEntry,
+                loaded: loaded,
+                studyDir: studyDir
+            )
+            switch acOutcome {
+            case .success(let acRun):
+                loaded = loaded.replacingPET(with: acRun.acPET)
+                result.attenuationCorrectionSeconds = acRun.durationSeconds
+                result.attenuationCorrectionPath = acRun.persistedPath
+                result.attenuationCorrectionFallbackToNAC = false
+                result.attenuationCorrectionLog = acRun.logSnippet
+            case .failedFallback(let message):
+                result.attenuationCorrectionSeconds = nil
+                result.attenuationCorrectionPath = nil
+                result.attenuationCorrectionFallbackToNAC = true
+                result.attenuationCorrectionLog = message
+                NSLog("Cohort AC failed for \(studyID), continuing on NAC: \(message)")
+            case .failedAbort(let message):
+                result.status = .failedAttenuationCorrection
+                result.attenuationCorrectionFallbackToNAC = false
+                result.attenuationCorrectionLog = message
+                result.errorMessage = message
+                result.finishedAt = Date()
+                await updateAndPersist(studyID: studyID, result: result)
+                return
+            }
         }
 
         // 2. Segment
@@ -236,6 +273,132 @@ public actor CohortBatchProcessor {
         result.status = .done
         result.finishedAt = Date()
         await updateAndPersist(studyID: studyID, result: result)
+    }
+
+    // MARK: - Attenuation correction dispatch
+
+    /// Outcome of the per-study AC step. Three terminal shapes; the caller
+    /// decides what to do with each.
+    enum ACStepOutcome {
+        /// AC ran cleanly. The new PET is in `acPET`, persisted at
+        /// `persistedPath`, and timing/log are surfaced into the result row.
+        case success(ACSuccess)
+        /// AC failed AND `petACFallbackToNACOnFailure` is true. Caller
+        /// continues the pipeline on the original NAC; the row is flagged.
+        case failedFallback(message: String)
+        /// AC failed AND fallback is disabled. Caller marks the study
+        /// `failedAttenuationCorrection` and skips segmentation/classification.
+        case failedAbort(message: String)
+    }
+
+    struct ACSuccess: Sendable {
+        let acPET: ImageVolume
+        let persistedPath: String?
+        let durationSeconds: Double
+        let logSnippet: String?
+    }
+
+    /// Locate the PET channel, run the configured AC corrector, persist
+    /// the result as `<studyDir>/ac.nii.gz`, and return an outcome that
+    /// honours the job's NAC-fallback policy.
+    private func runAttenuationCorrection(job: CohortJob,
+                                          entry: PETACCatalog.Entry,
+                                          loaded: CohortStudyLoader.LoadedStudy,
+                                          studyDir: URL) async -> ACStepOutcome {
+        // Find the PET volume in the load set. PET-only → primary;
+        // PET/CT → first auxiliary PET. Other configurations have no
+        // PET to correct, so AC is a no-op (we just return success
+        // with the original PET so timing fields stay nil and the row
+        // doesn't claim it ran AC when it didn't).
+        let petVolume: ImageVolume? = {
+            if Modality.normalize(loaded.primary.modality) == .PT { return loaded.primary }
+            return loaded.auxiliary.first { Modality.normalize($0.modality) == .PT }
+        }()
+        guard let petVolume else {
+            // No PET to correct — silently skip without claiming AC ran.
+            return .failedFallback(message: "No PET channel found in the study; AC skipped.")
+        }
+
+        // Pick an anatomical channel if the entry needs one (or the
+        // toggle is on). Same priority as the per-study panel.
+        let anatomical: ImageVolume? = {
+            guard entry.requiresAnatomicalChannel || job.petACUseAnatomicalChannel else {
+                return nil
+            }
+            // Prefer CT/MR primary in PET/CT loads.
+            if Modality.normalize(loaded.primary.modality) != .PT { return loaded.primary }
+            return loaded.auxiliary.first {
+                let m = Modality.normalize($0.modality)
+                return m == .CT || m == .MR
+            }
+        }()
+
+        // Build the corrector + run.
+        let corrector: PETAttenuationCorrector
+        do {
+            corrector = try CohortPETACFactory.make(job: job, entry: entry)
+        } catch {
+            let message = "AC corrector init failed: \(error.localizedDescription)"
+            return job.petACFallbackToNACOnFailure
+                ? .failedFallback(message: message)
+                : .failedAbort(message: message)
+        }
+
+        do {
+            // Progress sink swallowed at cohort level — the per-study
+            // panel surfaces it for interactive runs; cohort runs would
+            // overwhelm the UI, so we keep just the final logSnippet.
+            let acResult = try await corrector.attenuationCorrect(
+                nacPET: petVolume,
+                anatomical: anatomical,
+                progress: { _ in }
+            )
+            // Persist next to the segmentation. Same atomic-write pattern.
+            try FileManager.default.createDirectory(at: studyDir,
+                                                    withIntermediateDirectories: true)
+            let acURL = studyDir.appendingPathComponent("ac.nii.gz")
+            do {
+                let raw = try acVolumeToNIfTI(acResult.acPET)
+                try raw.write(to: acURL, options: [.atomic])
+                return .success(ACSuccess(
+                    acPET: acResult.acPET,
+                    persistedPath: acURL.path,
+                    durationSeconds: acResult.durationSeconds,
+                    logSnippet: acResult.logSnippet
+                ))
+            } catch {
+                // AC produced a volume but we couldn't persist it — still
+                // a success because the in-memory PET is good and the
+                // pipeline can continue. Caller sees `persistedPath = nil`.
+                NSLog("Cohort AC: persist failed for \(acURL.path) — \(error.localizedDescription)")
+                return .success(ACSuccess(
+                    acPET: acResult.acPET,
+                    persistedPath: nil,
+                    durationSeconds: acResult.durationSeconds,
+                    logSnippet: acResult.logSnippet
+                ))
+            }
+        } catch {
+            let message = "AC inference failed: \(error.localizedDescription)"
+            return job.petACFallbackToNACOnFailure
+                ? .failedFallback(message: message)
+                : .failedAbort(message: message)
+        }
+    }
+
+    /// Encode an `ImageVolume` as gzip-compressed NIfTI bytes. Tracer's
+    /// `NIfTIWriter` writes uncompressed `.nii`; for cohort sidecars we
+    /// gzip via `LabelIO.gzip(_:)` so the output is `.nii.gz` like every
+    /// other piece of label/segmentation data the cohort emits.
+    private func acVolumeToNIfTI(_ volume: ImageVolume) throws -> Data {
+        // Write uncompressed to a temp file (`NIfTIWriter` only supports
+        // file output today), read back, gzip. One alloc per study.
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracer-ac-encode-\(UUID().uuidString).nii")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        try NIfTIWriter.write(volume, to: tmp)
+        let raw = try Data(contentsOf: tmp)
+        return try LabelIO.gzip(raw)
     }
 
     // MARK: - Segmentation dispatch

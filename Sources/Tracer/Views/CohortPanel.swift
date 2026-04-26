@@ -34,6 +34,16 @@ public struct CohortPanel: View {
     @State private var sortColumn: SortColumn = .studyDate
     @State private var sortAscending: Bool = false
 
+    // PET attenuation correction (optional pre-segmentation step)
+    @State private var petACEntryID: String = ""           // empty = skip AC
+    @State private var petACScriptPath: String = ""
+    @State private var petACPythonExecutable: String = "/usr/bin/env"
+    @State private var petACEnvironment: String = ""
+    @State private var petACExtraArgs: String = ""
+    @State private var petACTimeoutSeconds: Double = 600
+    @State private var petACUseAnatomicalChannel: Bool = false
+    @State private var petACFallbackToNACOnFailure: Bool = true
+
     enum SortColumn: String, CaseIterable, Identifiable {
         case studyDate
         case patientName
@@ -172,6 +182,8 @@ public struct CohortPanel: View {
                     .controlSize(.small)
             }
 
+            petACSection
+
             Picker("Classify with", selection: $classifierEntryID) {
                 Text("— skip classification —").tag("")
                 ForEach(LesionClassifierCatalog.all, id: \.id) {
@@ -206,6 +218,92 @@ public struct CohortPanel: View {
                 Spacer()
             }
             .controlSize(.small)
+        }
+    }
+
+    // MARK: - PET AC step (optional)
+
+    @ViewBuilder
+    private var petACSection: some View {
+        Picker("AC step (NAC → AC PET)", selection: $petACEntryID) {
+            Text("— skip AC —").tag("")
+            ForEach(PETACCatalog.all, id: \.id) { entry in
+                Text(entry.displayName).tag(entry.id)
+            }
+        }
+        .pickerStyle(.menu)
+
+        if !petACEntryID.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                if let entry = PETACCatalog.byID(petACEntryID) {
+                    Text(entry.description)
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if entry.requiresAnatomicalChannel {
+                        Label("Needs a co-registered CT or MR per study",
+                              systemImage: "exclamationmark.triangle.fill")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(.orange)
+                    }
+                }
+
+                let entry = PETACCatalog.byID(petACEntryID)
+                let isRemote = entry?.backend == .dgxRemote
+
+                HStack {
+                    TextField(isRemote
+                              ? "~/scripts/deep_ac.py (on the DGX)"
+                              : "path/to/deep_ac.py",
+                              text: $petACScriptPath)
+                        .textFieldStyle(.roundedBorder)
+                        .disableAutocorrection(true)
+                }
+
+                if !isRemote {
+                    TextField("Python interpreter (default /usr/bin/env)",
+                              text: $petACPythonExecutable)
+                        .textFieldStyle(.roundedBorder)
+                        .disableAutocorrection(true)
+                }
+
+                Text(isRemote
+                     ? "Environment / activation (first `activate=…` line runs before the script)"
+                     : "Environment overrides (KEY=VALUE per line)")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.secondary)
+                TextEditor(text: $petACEnvironment)
+                    .font(.system(size: 11, design: .monospaced))
+                    .frame(height: 50)
+                    .background(RoundedRectangle(cornerRadius: 4)
+                        .stroke(Color.secondary.opacity(0.3)))
+
+                TextField("Extra script arguments (optional)", text: $petACExtraArgs)
+                    .textFieldStyle(.roundedBorder)
+                    .disableAutocorrection(true)
+
+                HStack {
+                    Toggle("Use anatomical channel",
+                           isOn: $petACUseAnatomicalChannel)
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .disabled(entry?.requiresAnatomicalChannel == true)
+                    Stepper("AC timeout: \(Int(petACTimeoutSeconds))s",
+                            value: $petACTimeoutSeconds,
+                            in: 30...3600,
+                            step: 30)
+                        .controlSize(.small)
+                }
+
+                Toggle("Fall back to NAC if AC fails (recommended)",
+                       isOn: $petACFallbackToNACOnFailure)
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .help("On: AC failure is logged, segmentation runs on the original NAC, study is flagged in the CSV. Off: AC failure marks the study failedAttenuationCorrection and skips segmentation/classification.")
+            }
+            .padding(8)
+            .background(RoundedRectangle(cornerRadius: 4)
+                .fill(Color.accentColor.opacity(0.06)))
         }
     }
 
@@ -392,14 +490,15 @@ public struct CohortPanel: View {
     private func statusChip(_ status: CohortStudyResult.Status) -> some View {
         let (icon, color): (String, Color) = {
             switch status {
-            case .pending:              return ("circle", .secondary)
-            case .running:              return ("hourglass", .orange)
-            case .done:                 return ("checkmark.circle.fill", .green)
-            case .failedLoad:           return ("exclamationmark.octagon.fill", .red)
-            case .failedSegmentation:   return ("exclamationmark.triangle.fill", .red)
-            case .failedClassification: return ("exclamationmark.triangle.fill", .orange)
-            case .cancelled:            return ("xmark.circle", .secondary)
-            case .skipped:              return ("arrow.right.circle", .blue)
+            case .pending:                       return ("circle", .secondary)
+            case .running:                       return ("hourglass", .orange)
+            case .done:                          return ("checkmark.circle.fill", .green)
+            case .failedLoad:                    return ("exclamationmark.octagon.fill", .red)
+            case .failedAttenuationCorrection:   return ("wand.and.rays", .red)
+            case .failedSegmentation:            return ("exclamationmark.triangle.fill", .red)
+            case .failedClassification:          return ("exclamationmark.triangle.fill", .orange)
+            case .cancelled:                     return ("xmark.circle", .secondary)
+            case .skipped:                       return ("arrow.right.circle", .blue)
             }
         }()
         return Image(systemName: icon)
@@ -425,7 +524,15 @@ public struct CohortPanel: View {
             classifierEntryID: classifierEntryID.isEmpty ? nil : classifierEntryID,
             maxConcurrent: maxConcurrent,
             skipIfResultsExist: skipIfResultsExist,
-            modalityAllowList: modalityAllow
+            modalityAllowList: modalityAllow,
+            petACEntryID: petACEntryID.isEmpty ? nil : petACEntryID,
+            petACScriptPath: petACScriptPath,
+            petACPythonExecutable: petACPythonExecutable,
+            petACEnvironment: petACEnvironment,
+            petACExtraArgs: petACExtraArgs,
+            petACTimeoutSeconds: petACTimeoutSeconds,
+            petACUseAnatomicalChannel: petACUseAnatomicalChannel,
+            petACFallbackToNACOnFailure: petACFallbackToNACOnFailure
         )
         if job.classifierEntryID != nil {
             classifier.applyCohortConfiguration(to: &job)
