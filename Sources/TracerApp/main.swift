@@ -16,6 +16,7 @@ private final class TracerAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        installApplicationIcon()
         installMenu()
         openMainWindow()
     }
@@ -81,6 +82,12 @@ private final class TracerAppDelegate: NSObject, NSApplicationDelegate {
         guard let screen = window.screen ?? NSScreen.main else { return }
         let constrained = window.constrainFrameRect(window.frame, to: screen)
         window.setFrame(constrained, display: true, animate: false)
+    }
+
+    private func installApplicationIcon() {
+        guard let iconURL = Bundle.module.url(forResource: "AppIcon", withExtension: "icns"),
+              let icon = NSImage(contentsOf: iconURL) else { return }
+        NSApp.applicationIconImage = icon
     }
 
     @objc private func fitMainWindowToDisplay() {

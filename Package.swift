@@ -21,7 +21,10 @@ let package = Package(
         .executableTarget(
             name: "TracerApp",
             dependencies: ["Tracer"],
-            path: "Sources/TracerApp"
+            path: "Sources/TracerApp",
+            resources: [
+                .copy("Resources/AppIcon.icns"),
+            ]
         ),
         .testTarget(
             name: "TracerTests",
