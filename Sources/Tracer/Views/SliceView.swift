@@ -235,10 +235,10 @@ public struct SliceView: View {
                     default: return v.depth - 1
                     }
                 }()
-                let currentIndex = max(0, min(maxIdx, vm.sliceIndices[axis]))
+                let currentIndex = max(0, min(maxIdx, vm.displayedSliceIndex(axis: axis, mode: displayMode)))
                 let binding = Binding<Double>(
                     get: { Double(currentIndex) },
-                    set: { vm.setSlice(axis: axis, index: Int($0)) }
+                    set: { vm.setSlice(axis: axis, index: Int($0), mode: displayMode) }
                 )
                 Text("\(currentIndex + 1)/\(maxIdx + 1)")
                     .font(.system(size: 10, design: .monospaced))
@@ -430,7 +430,11 @@ public struct SliceView: View {
         if transform.flipVertical {
             py = Int(imgH) - 1 - py
         }
-        let (vz, vy, vx) = volumeVoxel(px: px, py: py, sliceIndex: vm.sliceIndices[axis])
+        let (vz, vy, vx) = volumeVoxel(
+            px: px,
+            py: py,
+            sliceIndex: vm.displayedSliceIndex(axis: axis, mode: displayMode)
+        )
         guard vx >= 0, vx < volume.width,
               vy >= 0, vy < volume.height,
               vz >= 0, vz < volume.depth else {
@@ -545,9 +549,7 @@ public struct SliceView: View {
             }
             Button("Center slices on cursor") {
                 if let sample = hoverSample {
-                    vm.setSlice(axis: 0, index: sample.voxelX)
-                    vm.setSlice(axis: 1, index: sample.voxelY)
-                    vm.setSlice(axis: 2, index: sample.voxelZ)
+                    vm.centerSlices(on: sample.world)
                 }
             }
             .disabled(hoverSample == nil)
@@ -684,7 +686,7 @@ public struct SliceView: View {
         let steps = Int(wheelAccumulator / threshold)
         guard steps != 0 else { return }
         wheelAccumulator -= CGFloat(steps) * threshold
-        vm.scroll(axis: axis, delta: steps)
+        vm.scroll(axis: axis, delta: steps, mode: displayMode)
     }
     #endif
 
@@ -998,14 +1000,15 @@ public struct SliceView: View {
     }
 
     private func worldPoint(for point: CGPoint, volume: ImageVolume) -> SIMD3<Double> {
+        let index = vm.displayedSliceIndex(axis: axis, mode: displayMode)
         let voxel: SIMD3<Double>
         switch axis {
         case 0:
-            voxel = SIMD3<Double>(Double(vm.sliceIndices[axis]), Double(point.x), Double(point.y))
+            voxel = SIMD3<Double>(Double(index), Double(point.x), Double(point.y))
         case 1:
-            voxel = SIMD3<Double>(Double(point.x), Double(vm.sliceIndices[axis]), Double(point.y))
+            voxel = SIMD3<Double>(Double(point.x), Double(index), Double(point.y))
         default:
-            voxel = SIMD3<Double>(Double(point.x), Double(point.y), Double(vm.sliceIndices[axis]))
+            voxel = SIMD3<Double>(Double(point.x), Double(point.y), Double(index))
         }
         return volume.worldPoint(voxel: voxel)
     }
@@ -1077,10 +1080,11 @@ public struct SliceView: View {
     }
 
     private func crossReferenceLines(imageSize: CGSize) -> [CrossReferenceOverlayLine] {
-        guard vm.volumeForDisplayMode(displayMode) != nil else { return [] }
+        guard let volume = vm.volumeForDisplayMode(displayMode) else { return [] }
         let width = max(1, Int(imageSize.width.rounded(.down)))
         let height = max(1, Int(imageSize.height.rounded(.down)))
-        let transform = vm.displayTransform(for: axis, volume: vm.volumeForDisplayMode(displayMode))
+        let transform = vm.displayTransform(for: axis, volume: volume)
+        let linkedIndices = vm.displayedSliceIndices(for: volume)
 
         func clamped(_ value: Int, max upperBound: Int) -> Int {
             max(0, min(upperBound - 1, value))
@@ -1137,18 +1141,18 @@ public struct SliceView: View {
         switch axis {
         case 0:
             return [
-                vertical(axis: 1, at: vm.sliceIndices[1]),
-                horizontal(axis: 2, at: vm.sliceIndices[2])
+                vertical(axis: 1, at: linkedIndices.cor),
+                horizontal(axis: 2, at: linkedIndices.ax)
             ]
         case 1:
             return [
-                vertical(axis: 0, at: vm.sliceIndices[0]),
-                horizontal(axis: 2, at: vm.sliceIndices[2])
+                vertical(axis: 0, at: linkedIndices.sag),
+                horizontal(axis: 2, at: linkedIndices.ax)
             ]
         default:
             return [
-                vertical(axis: 0, at: vm.sliceIndices[0]),
-                horizontal(axis: 1, at: vm.sliceIndices[1])
+                vertical(axis: 0, at: linkedIndices.sag),
+                horizontal(axis: 1, at: linkedIndices.cor)
             ]
         }
     }

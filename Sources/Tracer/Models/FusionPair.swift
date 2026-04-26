@@ -61,6 +61,11 @@ public final class FusionPair: ObservableObject {
         Modality.normalize(overlayVolume.modality) == .PT
     }
 
+    public var isPETMR: Bool {
+        Modality.normalize(baseVolume.modality) == .MR &&
+        Modality.normalize(overlayVolume.modality) == .PT
+    }
+
     public var baseGridLabel: String {
         "\(baseVolume.width)x\(baseVolume.height)x\(baseVolume.depth)"
     }

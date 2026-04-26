@@ -669,6 +669,21 @@ public struct ContentView: View {
             } label: {
                 Label("PET/CT Default", systemImage: "square.2.layers.3d")
             }
+            Button {
+                vm.resetMRIHangingProtocol()
+            } label: {
+                Label("MRI Multi-Series", systemImage: "brain.head.profile")
+            }
+            Button {
+                vm.resetPETMRHangingProtocol()
+            } label: {
+                Label("PET/MR Fusion", systemImage: "brain")
+            }
+            Button {
+                vm.resetUnifiedHangingProtocol()
+            } label: {
+                Label("Unified CT/MR/PET", systemImage: "rectangle.grid.3x2")
+            }
         } label: {
             Label(vm.hangingGrid.displayName, systemImage: "rectangle.grid.2x2")
                 .font(.system(size: 12, weight: .medium))

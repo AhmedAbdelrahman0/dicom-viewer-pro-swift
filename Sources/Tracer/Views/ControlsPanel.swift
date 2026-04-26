@@ -413,23 +413,34 @@ private struct DynamicTACChart: View {
 private struct FusionTab: View {
     @EnvironmentObject var vm: ViewerViewModel
     @State private var selectedCTID: UUID?
+    @State private var selectedMRID: UUID?
     @State private var selectedPETID: UUID?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text("PET/CT Fusion")
+                Text("Fusion")
                     .font(.headline)
                 Spacer()
                 Button {
                     Task { await vm.autoFusePETCT() }
                 } label: {
-                    Label("Auto", systemImage: "wand.and.stars")
+                    Label("PET/CT", systemImage: "wand.and.stars")
                         .font(.system(size: 11, weight: .medium))
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .disabled(vm.loadedCTVolumes.isEmpty || vm.loadedPETVolumes.isEmpty)
+
+                Button {
+                    Task { await vm.autoFusePETMR() }
+                } label: {
+                    Label("PET/MR", systemImage: "brain.head.profile")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(vm.loadedMRVolumes.isEmpty || vm.loadedPETVolumes.isEmpty)
             }
 
             fusionBuilder
@@ -445,7 +456,7 @@ private struct FusionTab: View {
                     Text(pair.registrationNote)
                         .font(.system(size: 10))
                         .foregroundColor(.secondary)
-                    Text("CT grid \(pair.baseGridLabel) · PET grid \(pair.overlayGridLabel)")
+                    Text("Base grid \(pair.baseGridLabel) · overlay grid \(pair.overlayGridLabel)")
                         .font(.system(size: 10, design: .monospaced))
                         .foregroundColor(.secondary)
                 }
@@ -546,7 +557,7 @@ private struct FusionTab: View {
             } else {
                 Text("No overlay loaded")
                     .foregroundColor(.secondary)
-                Text("Load a CT and PET series, then use Auto or choose volumes above. PET is resampled into the CT grid using DICOM/NIfTI world geometry.")
+                Text("Load PET plus CT or MR, then use Auto or choose volumes above. PET is resampled into the selected anatomical grid using DICOM/NIfTI world geometry plus the selected registration mode.")
                     .font(.caption)
                     .foregroundColor(.secondary)
                 if vm.activePETQuantificationVolume != nil {
@@ -767,15 +778,33 @@ private struct FusionTab: View {
                 Text("Hanging Protocol")
                     .font(.subheadline)
                 Spacer()
-                Button {
-                    vm.resetPETHangingProtocol()
+                Menu {
+                    Button {
+                        vm.resetPETHangingProtocol()
+                    } label: {
+                        Label("PET/CT", systemImage: "square.2.layers.3d")
+                    }
+                    Button {
+                        vm.resetMRIHangingProtocol()
+                    } label: {
+                        Label("MRI", systemImage: "brain.head.profile")
+                    }
+                    Button {
+                        vm.resetPETMRHangingProtocol()
+                    } label: {
+                        Label("PET/MR", systemImage: "brain")
+                    }
+                    Button {
+                        vm.resetUnifiedHangingProtocol()
+                    } label: {
+                        Label("Unified", systemImage: "rectangle.grid.3x2")
+                    }
                 } label: {
-                    Label("Reset", systemImage: "arrow.counterclockwise")
-                        .labelStyle(.iconOnly)
+                    Label("Preset", systemImage: "rectangle.grid.2x2")
                 }
-                .buttonStyle(.bordered)
+                .menuStyle(.borderlessButton)
                 .controlSize(.mini)
-                .help("Restore PET/CT default: fused, CT, PET, and PET MIP panes.")
+                .help("Apply a modality-specific hanging protocol.")
             }
 
             HStack(spacing: 8) {
@@ -842,15 +871,18 @@ private struct FusionTab: View {
 
     private var fusionBuilder: some View {
         VStack(alignment: .leading, spacing: 10) {
-            if vm.loadedCTVolumes.isEmpty || vm.loadedPETVolumes.isEmpty {
+            if vm.loadedPETVolumes.isEmpty ||
+                (vm.loadedCTVolumes.isEmpty && vm.loadedMRVolumes.isEmpty) {
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "info.circle")
                         .foregroundColor(.secondary)
-                    Text("Open the CT series and the PET series from the worklist first. Loaded CT: \(vm.loadedCTVolumes.count), PET: \(vm.loadedPETVolumes.count).")
+                    Text("Open PET plus CT or MR from the worklist first. Loaded CT: \(vm.loadedCTVolumes.count), MR: \(vm.loadedMRVolumes.count), PET: \(vm.loadedPETVolumes.count).")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
-            } else {
+            }
+
+            if !vm.loadedCTVolumes.isEmpty && !vm.loadedPETVolumes.isEmpty {
                 Picker("CT", selection: ctSelection) {
                     ForEach(vm.loadedCTVolumes) { volume in
                         Text(volumeLabel(volume)).tag(Optional(volume.id))
@@ -874,11 +906,167 @@ private struct FusionTab: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(selectedCTVolume == nil || selectedPETVolume == nil)
             }
+
+            if !vm.loadedMRVolumes.isEmpty && !vm.loadedPETVolumes.isEmpty {
+                Divider()
+
+                Picker("MR", selection: mrSelection) {
+                    ForEach(vm.loadedMRVolumes.sorted(by: mrSort)) { volume in
+                        Text(mrVolumeLabel(volume)).tag(Optional(volume.id))
+                    }
+                }
+
+                Picker("PET", selection: petSelection) {
+                    ForEach(vm.loadedPETVolumes) { volume in
+                        Text(volumeLabel(volume)).tag(Optional(volume.id))
+                    }
+                }
+
+                Picker("PET/MR registration", selection: Binding(
+                    get: { vm.petMRRegistrationMode },
+                    set: { vm.setPETMRRegistrationMode($0) }
+                )) {
+                    ForEach(PETMRRegistrationMode.allCases) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                .help(vm.petMRRegistrationMode.helpText)
+
+                petMRDeformablePanel
+
+                Button {
+                    guard let mr = selectedMRVolume,
+                          let pet = selectedPETVolume else { return }
+                    Task { await vm.fusePETMR(base: mr, overlay: pet) }
+                } label: {
+                    Label("Fuse Selected PET/MR", systemImage: "brain.head.profile")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(selectedMRVolume == nil || selectedPETVolume == nil)
+            }
         }
         .onAppear {
             selectedCTID = selectedCTID ?? vm.loadedCTVolumes.first?.id
+            selectedMRID = selectedMRID ?? vm.loadedMRVolumes.sorted(by: mrSort).first?.id
             selectedPETID = selectedPETID ?? vm.loadedPETVolumes.first?.id
         }
+    }
+
+    private var petMRDeformablePanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Deformable backend")
+                    .font(.system(size: 11, weight: .semibold))
+                Spacer()
+                Text(vm.petMRDeformableRegistration.backend.needsExternalRunner ? "external" : "built-in")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+
+            Picker("Backend", selection: deformableBackendBinding) {
+                ForEach(PETMRDeformableBackend.allCases) { backend in
+                    Text(backend.displayName).tag(backend)
+                }
+            }
+            .help(vm.petMRDeformableRegistration.backend.adapterHelp)
+
+            if vm.petMRDeformableRegistration.backend.needsExternalRunner {
+                TextField("Executable / wrapper", text: deformableExecutableBinding)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11, design: .monospaced))
+                    .help("Absolute path, or a command name available on PATH. ANTs defaults to antsRegistration.")
+
+                if vm.petMRDeformableRegistration.backend != .antsSyN {
+                    TextField("Model path", text: deformableModelBinding)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 11, design: .monospaced))
+                        .help("Optional model weights/path passed to --model for SynthMorph, VoxelMorph, or custom wrappers.")
+                }
+
+                TextField("Extra arguments", text: deformableExtraArgumentsBinding)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11, design: .monospaced))
+
+                HStack {
+                    Text("Timeout")
+                    Slider(value: deformableTimeoutBinding, in: 60...7200, step: 60)
+                    Text("\(Int(vm.petMRDeformableRegistration.timeoutSeconds))s")
+                        .font(.system(size: 10, design: .monospaced))
+                        .frame(width: 52, alignment: .trailing)
+                }
+            }
+
+            Text(vm.petMRDeformableRegistration.readinessMessage)
+                .font(.caption)
+                .foregroundColor(vm.petMRDeformableRegistration.isExternalConfigured ||
+                                 !vm.petMRDeformableRegistration.backend.needsExternalRunner ? .secondary : .orange)
+        }
+        .padding(8)
+        .background(Color.secondary.opacity(0.08))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(TracerTheme.hairline, lineWidth: 1)
+        )
+        .cornerRadius(6)
+    }
+
+    private var deformableBackendBinding: Binding<PETMRDeformableBackend> {
+        Binding(
+            get: { vm.petMRDeformableRegistration.backend },
+            set: { backend in
+                var next = vm.petMRDeformableRegistration
+                next.backend = backend
+                if next.executablePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    next.executablePath = backend.defaultExecutableName
+                }
+                vm.setPETMRDeformableRegistration(next)
+            }
+        )
+    }
+
+    private var deformableExecutableBinding: Binding<String> {
+        Binding(
+            get: { vm.petMRDeformableRegistration.executablePath },
+            set: { value in
+                var next = vm.petMRDeformableRegistration
+                next.executablePath = value
+                vm.setPETMRDeformableRegistration(next)
+            }
+        )
+    }
+
+    private var deformableModelBinding: Binding<String> {
+        Binding(
+            get: { vm.petMRDeformableRegistration.modelPath },
+            set: { value in
+                var next = vm.petMRDeformableRegistration
+                next.modelPath = value
+                vm.setPETMRDeformableRegistration(next)
+            }
+        )
+    }
+
+    private var deformableExtraArgumentsBinding: Binding<String> {
+        Binding(
+            get: { vm.petMRDeformableRegistration.extraArguments },
+            set: { value in
+                var next = vm.petMRDeformableRegistration
+                next.extraArguments = value
+                vm.setPETMRDeformableRegistration(next)
+            }
+        )
+    }
+
+    private var deformableTimeoutBinding: Binding<Double> {
+        Binding(
+            get: { vm.petMRDeformableRegistration.timeoutSeconds },
+            set: { value in
+                var next = vm.petMRDeformableRegistration
+                next.timeoutSeconds = value
+                vm.setPETMRDeformableRegistration(next)
+            }
+        )
     }
 
     private var ctSelection: Binding<UUID?> {
@@ -895,9 +1083,21 @@ private struct FusionTab: View {
         )
     }
 
+    private var mrSelection: Binding<UUID?> {
+        Binding(
+            get: { selectedMRID ?? vm.loadedMRVolumes.sorted(by: mrSort).first?.id },
+            set: { selectedMRID = $0 }
+        )
+    }
+
     private var selectedCTVolume: ImageVolume? {
         let id = selectedCTID ?? vm.loadedCTVolumes.first?.id
         return vm.loadedCTVolumes.first { $0.id == id }
+    }
+
+    private var selectedMRVolume: ImageVolume? {
+        let id = selectedMRID ?? vm.loadedMRVolumes.sorted(by: mrSort).first?.id
+        return vm.loadedMRVolumes.first { $0.id == id }
     }
 
     private var selectedPETVolume: ImageVolume? {
@@ -910,6 +1110,31 @@ private struct FusionTab: View {
             ? Modality.normalize(volume.modality).displayName
             : volume.seriesDescription
         return "\(name) · \(volume.width)x\(volume.height)x\(volume.depth)"
+    }
+
+    private func mrVolumeLabel(_ volume: ImageVolume) -> String {
+        "\(MRSequenceRole.role(for: volume).shortName) · \(volumeLabel(volume))"
+    }
+
+    private func mrSort(_ lhs: ImageVolume, _ rhs: ImageVolume) -> Bool {
+        let lhsRole = MRSequenceRole.role(for: lhs)
+        let rhsRole = MRSequenceRole.role(for: rhs)
+        let lhsRank = mrRank(lhsRole)
+        let rhsRank = mrRank(rhsRole)
+        if lhsRank != rhsRank { return lhsRank < rhsRank }
+        return lhs.seriesDescription.localizedStandardCompare(rhs.seriesDescription) == .orderedAscending
+    }
+
+    private func mrRank(_ role: MRSequenceRole) -> Int {
+        switch role {
+        case .t1: return 0
+        case .t2: return 1
+        case .flair: return 2
+        case .dwi: return 3
+        case .adc: return 4
+        case .postContrast: return 5
+        case .other: return 10
+        }
     }
 
     private var suvQuantificationPanel: some View {
@@ -1108,7 +1333,7 @@ private struct DisplayTab: View {
                 get: { vm.linkZoomPanAcrossPanes },
                 set: { vm.setLinkZoomPanAcrossPanes($0) }
             ))
-                .help("When enabled, zooming or panning one viewport applies the same transform to every PET/CT hanging pane.")
+                .help("When enabled, zooming or panning one viewport applies the same transform to every linked hanging pane.")
 
             HStack {
                 Button {

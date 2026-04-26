@@ -2,7 +2,7 @@ import Foundation
 import simd
 
 /// A rigid/affine transform expressed as a 4×4 matrix in LPS space.
-public struct Transform3D {
+public struct Transform3D: Sendable {
     public var matrix: simd_double4x4
 
     public init(matrix: simd_double4x4 = matrix_identity_double4x4) {

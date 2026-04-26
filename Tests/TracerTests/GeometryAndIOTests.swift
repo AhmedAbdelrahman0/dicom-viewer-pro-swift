@@ -69,6 +69,181 @@ final class GeometryAndIOTests: XCTestCase {
         )
     }
 
+    private func makeTestVolume(modality: String,
+                                description: String,
+                                width: Int = 8,
+                                height: Int = 8,
+                                depth: Int = 8,
+                                spacing: (Double, Double, Double) = (1, 1, 1),
+                                origin: (Double, Double, Double) = (0, 0, 0),
+                                fill: Float = 1) -> ImageVolume {
+        ImageVolume(
+            pixels: [Float](repeating: fill, count: width * height * depth),
+            depth: depth,
+            height: height,
+            width: width,
+            spacing: spacing,
+            origin: origin,
+            modality: modality,
+            seriesDescription: description
+        )
+    }
+
+    private func makeFakeDeformableWrapper(in root: URL) throws -> URL {
+        let scriptURL = root.appendingPathComponent("fake-deformable.sh")
+        let script = """
+        #!/bin/sh
+        moving=""
+        output=""
+        transform=""
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --moving) moving="$2"; shift 2 ;;
+            --output) output="$2"; shift 2 ;;
+            --transform) transform="$2"; shift 2 ;;
+            --fixed|--model) shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        if [ -z "$moving" ] || [ -z "$output" ]; then
+          echo "missing moving/output" >&2
+          exit 2
+        fi
+        cp "$moving" "$output"
+        if [ -n "$transform" ]; then
+          printf fake-transform > "$transform"
+        fi
+        echo "fake deformable complete"
+        """
+        try Data(script.utf8).write(to: scriptURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        return scriptURL
+    }
+
+    func testMRSequenceRoleInfersCommonClinicalSequences() {
+        XCTAssertEqual(MRSequenceRole.role(for: makeTestVolume(modality: "MR", description: "3D T1 MPRAGE")), .t1)
+        XCTAssertEqual(MRSequenceRole.role(for: makeTestVolume(modality: "MR", description: "Ax T2 FSE")), .t2)
+        XCTAssertEqual(MRSequenceRole.role(for: makeTestVolume(modality: "MR", description: "Sag FLAIR")), .flair)
+        XCTAssertEqual(MRSequenceRole.role(for: makeTestVolume(modality: "MR", description: "DWI b1000 TRACE")), .dwi)
+        XCTAssertEqual(MRSequenceRole.role(for: makeTestVolume(modality: "MR", description: "ADC MAP")), .adc)
+        XCTAssertEqual(MRSequenceRole.role(for: makeTestVolume(modality: "MR", description: "T1 post gadolinium")), .postContrast)
+    }
+
+    @MainActor
+    func testMRHangingPanesSelectMatchingLoadedSequences() {
+        let vm = ViewerViewModel()
+        let t1 = makeTestVolume(modality: "MR", description: "T1 MPRAGE")
+        let flair = makeTestVolume(modality: "MR", description: "Ax FLAIR")
+        let adc = makeTestVolume(modality: "MR", description: "ADC")
+        vm.loadedVolumes = [flair, adc, t1]
+        vm.displayVolume(t1)
+
+        XCTAssertTrue(vm.volumeForDisplayMode(.mrT1) === t1)
+        XCTAssertTrue(vm.volumeForDisplayMode(.mrFLAIR) === flair)
+        XCTAssertTrue(vm.volumeForDisplayMode(.mrADC) === adc)
+
+        vm.resetMRIHangingProtocol()
+        XCTAssertEqual(vm.hangingGrid, .threeByTwo)
+        XCTAssertEqual(vm.hangingPanes.map(\.kind), HangingPaneConfiguration.defaultMRI.map(\.kind))
+    }
+
+    @MainActor
+    func testCrossReferencesUseWorldCoordinatesAcrossDifferentMRGrids() {
+        let vm = ViewerViewModel()
+        let t1 = makeTestVolume(modality: "MR", description: "T1", width: 10, height: 10, depth: 10)
+        let t2 = makeTestVolume(modality: "MR", description: "T2", width: 20, height: 20, depth: 20, spacing: (0.5, 0.5, 0.5))
+        vm.loadedVolumes = [t1, t2]
+        vm.displayVolume(t1)
+
+        let world = t1.worldPoint(voxel: SIMD3<Double>(4, 5, 6))
+        vm.centerSlices(on: world)
+
+        XCTAssertEqual(vm.displayedSliceIndex(axis: 0, mode: .mrT1), 4)
+        XCTAssertEqual(vm.displayedSliceIndex(axis: 1, mode: .mrT1), 5)
+        XCTAssertEqual(vm.displayedSliceIndex(axis: 2, mode: .mrT1), 6)
+        XCTAssertEqual(vm.displayedSliceIndex(axis: 0, mode: .mrT2), 8)
+        XCTAssertEqual(vm.displayedSliceIndex(axis: 1, mode: .mrT2), 10)
+        XCTAssertEqual(vm.displayedSliceIndex(axis: 2, mode: .mrT2), 12)
+    }
+
+    func testPETMRRegistrationInitializesPETToMRWorldAlignment() {
+        let mr = makeTestVolume(modality: "MR", description: "T1", origin: (0, 0, 0))
+        let pet = makeTestVolume(modality: "PT", description: "FDG PET", origin: (12, -4, 2))
+
+        let result = PETMRRegistrationEngine.estimatePETToMR(
+            pet: pet,
+            mr: mr,
+            mode: .rigidAnatomical
+        )
+
+        let petCenter = pet.worldPoint(voxel: SIMD3<Double>(3.5, 3.5, 3.5))
+        let mrCenter = mr.worldPoint(voxel: SIMD3<Double>(3.5, 3.5, 3.5))
+        let mapped = result.movingToFixed.apply(to: petCenter)
+
+        XCTAssertEqual(mapped.x, mrCenter.x, accuracy: 1e-6)
+        XCTAssertEqual(mapped.y, mrCenter.y, accuracy: 1e-6)
+        XCTAssertEqual(mapped.z, mrCenter.z, accuracy: 1e-6)
+        XCTAssertGreaterThan(result.displacementMM, 12)
+    }
+
+    func testPETMRDeformableRunnerLoadsWarpedOutputFromWrapper() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PETMRDeformableRunner-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let wrapper = try makeFakeDeformableWrapper(in: root)
+        let fixed = makeTestVolume(modality: "MR", description: "T1", fill: 10)
+        let moving = makeTestVolume(modality: "PT", description: "FDG PET", fill: 2)
+        let config = PETMRDeformableRegistrationConfiguration(
+            backend: .customScript,
+            executablePath: wrapper.path,
+            timeoutSeconds: 30
+        )
+
+        let result = try await PETMRDeformableRegistrationRunner.register(
+            fixed: fixed,
+            movingPrealigned: moving,
+            configuration: config
+        )
+
+        XCTAssertEqual(result.backend, .customScript)
+        XCTAssertEqual(result.warpedMoving.width, fixed.width)
+        XCTAssertEqual(result.warpedMoving.height, fixed.height)
+        XCTAssertEqual(result.warpedMoving.depth, fixed.depth)
+        XCTAssertEqual(result.warpedMoving.intensityRange.min, 2, accuracy: 1e-6)
+        XCTAssertTrue(result.stdout.contains("fake deformable complete"))
+    }
+
+    @MainActor
+    func testPETMRFusionRoutesThroughConfiguredDeformableBackend() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PETMRFusionDeformable-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let wrapper = try makeFakeDeformableWrapper(in: root)
+        let vm = ViewerViewModel()
+        let mr = makeTestVolume(modality: "MR", description: "T1", fill: 10)
+        let pet = makeTestVolume(modality: "PT", description: "FDG PET", origin: (4, 0, 0), fill: 2)
+        vm.loadedVolumes = [mr, pet]
+        vm.displayVolume(mr)
+        vm.petMRRegistrationMode = .rigidThenDeformable
+        vm.petMRDeformableRegistration = PETMRDeformableRegistrationConfiguration(
+            backend: .customScript,
+            executablePath: wrapper.path,
+            timeoutSeconds: 30
+        )
+
+        await vm.fusePETMR(base: mr, overlay: pet)
+
+        let pair = try XCTUnwrap(vm.fusion)
+        XCTAssertTrue(pair.isPETMR)
+        XCTAssertTrue(pair.isGeometryResampled)
+        XCTAssertEqual(pair.displayedOverlay.width, mr.width)
+        XCTAssertTrue(pair.registrationNote.contains("Custom script deformable registration"))
+    }
+
     func testVolumeWorldVoxelRoundTripUsesDirection() {
         let direction = simd_double3x3(
             SIMD3<Double>(0, 1, 0),

@@ -236,6 +236,8 @@ public final class ViewerViewModel: ObservableObject {
     @Published public var mipColormap: Colormap = .grayscale
     @Published public var overlayWindow: Double = 6
     @Published public var overlayLevel: Double = 3
+    @Published public var petMRRegistrationMode: PETMRRegistrationMode = .rigidThenDeformable
+    @Published public var petMRDeformableRegistration = PETMRDeformableRegistrationConfiguration()
     @Published public var hangingGrid: HangingGridLayout = .defaultPETCT
     @Published public var suvSettings = SUVCalculationSettings()
     @Published public var hangingPanes: [HangingPaneConfiguration] = HangingPaneConfiguration.defaultPETCT
@@ -290,6 +292,8 @@ public final class ViewerViewModel: ObservableObject {
         var mipColormap: Colormap
         var overlayWindow: Double
         var overlayLevel: Double
+        var petMRRegistrationMode: PETMRRegistrationMode
+        var petMRDeformableRegistration: PETMRDeformableRegistrationConfiguration
         var hangingGrid: HangingGridLayout
         var hangingPanes: [HangingPaneConfiguration]
         var annotations: [Annotation]
@@ -339,6 +343,17 @@ public final class ViewerViewModel: ObservableObject {
         loadedVolumes.filter { Modality.normalize($0.modality) == .PT }
     }
 
+    public var loadedMRVolumes: [ImageVolume] {
+        loadedVolumes.filter { Modality.normalize($0.modality) == .MR }
+    }
+
+    public var loadedAnatomicalVolumes: [ImageVolume] {
+        loadedVolumes.filter {
+            let modality = Modality.normalize($0.modality)
+            return modality == .CT || modality == .MR
+        }
+    }
+
     public var activePETQuantificationVolume: ImageVolume? {
         if let fusion {
             return fusion.displayedOverlay
@@ -384,10 +399,31 @@ public final class ViewerViewModel: ObservableObject {
 
     public func volumeForDisplayMode(_ mode: SliceDisplayMode) -> ImageVolume? {
         switch mode {
-        case .fused, .ctOnly:
+        case .primary:
+            return currentVolume
+        case .fused:
             return fusion?.baseVolume ?? currentVolume
+        case .ctOnly:
+            if let base = fusion?.baseVolume, Modality.normalize(base.modality) == .CT {
+                return base
+            }
+            return loadedCTVolumes.first ?? currentVolume
         case .petOnly:
             return activePETQuantificationVolume ?? currentVolume
+        case .mrT1:
+            return preferredMRVolume(for: .t1) ?? currentVolume
+        case .mrT2:
+            return preferredMRVolume(for: .t2) ?? currentVolume
+        case .mrFLAIR:
+            return preferredMRVolume(for: .flair) ?? currentVolume
+        case .mrDWI:
+            return preferredMRVolume(for: .dwi) ?? currentVolume
+        case .mrADC:
+            return preferredMRVolume(for: .adc) ?? currentVolume
+        case .mrPost:
+            return preferredMRVolume(for: .postContrast) ?? currentVolume
+        case .mrOther:
+            return preferredMRVolume(for: .other) ?? currentVolume
         }
     }
 
@@ -509,6 +545,22 @@ public final class ViewerViewModel: ObservableObject {
         }
     }
 
+    public func setPETMRRegistrationMode(_ mode: PETMRRegistrationMode) {
+        let before = petMRRegistrationMode
+        petMRRegistrationMode = mode
+        recordValueChange(name: "PET/MR registration mode", before: before, after: mode) { vm, value in
+            vm.petMRRegistrationMode = value
+        }
+    }
+
+    public func setPETMRDeformableRegistration(_ configuration: PETMRDeformableRegistrationConfiguration) {
+        let before = petMRDeformableRegistration
+        petMRDeformableRegistration = configuration
+        recordValueChange(name: "PET/MR deformable backend", before: before, after: configuration) { vm, value in
+            vm.petMRDeformableRegistration = value
+        }
+    }
+
     public func setHangingPaneKind(index: Int, kind: HangingPaneKind) {
         guard hangingPanes.indices.contains(index) else { return }
         let before = hangingPanes
@@ -558,6 +610,55 @@ public final class ViewerViewModel: ObservableObject {
         let afterPanes = hangingPanes
         recordHistoryIfNeeded(
             name: "Reset hanging protocol",
+            changed: beforeGrid != afterGrid || beforePanes != afterPanes
+        ) { [weak self] in
+            self?.applyHangingProtocol(grid: beforeGrid, panes: beforePanes)
+        } redo: { [weak self] in
+            self?.applyHangingProtocol(grid: afterGrid, panes: afterPanes)
+        }
+    }
+
+    public func resetMRIHangingProtocol() {
+        let beforeGrid = hangingGrid
+        let beforePanes = hangingPanes
+        applyHangingProtocol(grid: .threeByTwo, panes: HangingPaneConfiguration.defaultMRI)
+        let afterGrid = hangingGrid
+        let afterPanes = hangingPanes
+        recordHistoryIfNeeded(
+            name: "MRI hanging protocol",
+            changed: beforeGrid != afterGrid || beforePanes != afterPanes
+        ) { [weak self] in
+            self?.applyHangingProtocol(grid: beforeGrid, panes: beforePanes)
+        } redo: { [weak self] in
+            self?.applyHangingProtocol(grid: afterGrid, panes: afterPanes)
+        }
+    }
+
+    public func resetPETMRHangingProtocol() {
+        let beforeGrid = hangingGrid
+        let beforePanes = hangingPanes
+        applyHangingProtocol(grid: .threeByTwo, panes: HangingPaneConfiguration.defaultPETMR)
+        let afterGrid = hangingGrid
+        let afterPanes = hangingPanes
+        recordHistoryIfNeeded(
+            name: "PET/MR hanging protocol",
+            changed: beforeGrid != afterGrid || beforePanes != afterPanes
+        ) { [weak self] in
+            self?.applyHangingProtocol(grid: beforeGrid, panes: beforePanes)
+        } redo: { [weak self] in
+            self?.applyHangingProtocol(grid: afterGrid, panes: afterPanes)
+        }
+    }
+
+    public func resetUnifiedHangingProtocol() {
+        let beforeGrid = hangingGrid
+        let beforePanes = hangingPanes
+        applyHangingProtocol(grid: HangingGridLayout(columns: 4, rows: 2),
+                             panes: HangingPaneConfiguration.defaultUnified)
+        let afterGrid = hangingGrid
+        let afterPanes = hangingPanes
+        recordHistoryIfNeeded(
+            name: "Unified hanging protocol",
             changed: beforeGrid != afterGrid || beforePanes != afterPanes
         ) { [weak self] in
             self?.applyHangingProtocol(grid: beforeGrid, panes: beforePanes)
@@ -1011,6 +1112,8 @@ public final class ViewerViewModel: ObservableObject {
             mipColormap: mipColormap,
             overlayWindow: overlayWindow,
             overlayLevel: overlayLevel,
+            petMRRegistrationMode: petMRRegistrationMode,
+            petMRDeformableRegistration: petMRDeformableRegistration,
             hangingGrid: hangingGrid,
             hangingPanes: hangingPanes,
             annotations: annotations,
@@ -1036,6 +1139,8 @@ public final class ViewerViewModel: ObservableObject {
         overlayOpacity = snapshot.overlayOpacity
         overlayColormap = snapshot.overlayColormap
         mipColormap = snapshot.mipColormap
+        petMRRegistrationMode = snapshot.petMRRegistrationMode
+        petMRDeformableRegistration = snapshot.petMRDeformableRegistration
         applyPETOverlayWindow(window: snapshot.overlayWindow, level: snapshot.overlayLevel)
         fusion?.opacity = snapshot.overlayOpacity
         fusion?.colormap = snapshot.overlayColormap
@@ -1078,6 +1183,11 @@ public final class ViewerViewModel: ObservableObject {
             statusMessage = result.inserted
                 ? "Loaded: \(volume.seriesDescription) | \(Modality.normalize(volume.modality).displayName) | \(volume.width)×\(volume.height)×\(volume.depth)"
                 : "Already loaded: \(result.volume.seriesDescription)"
+            if result.inserted, shouldAutoFusePETCT(afterLoading: result.volume) {
+                await autoFusePETCT()
+            } else if result.inserted, shouldAutoFusePETMR(afterLoading: result.volume) {
+                await autoFusePETMR()
+            }
         } catch {
             statusMessage = "Error: \(error.localizedDescription)"
         }
@@ -1102,9 +1212,44 @@ public final class ViewerViewModel: ObservableObject {
         if let pair = bestPETCTSeriesPair(in: series) {
             await openSeries(pair.ct)
             await openSeries(pair.pet)
+            let mrSeries = preferredMRDisplaySeries(in: series)
+            for mr in mrSeries.prefix(6) {
+                await openSeries(mr)
+            }
             await autoFusePETCT()
-            applyHangingProtocol(grid: .defaultPETCT, panes: HangingPaneConfiguration.defaultPETCT)
-            statusMessage = "Opened PET/CT study: \(pair.ct.displayName) + \(pair.pet.displayName)"
+            if mrSeries.isEmpty {
+                applyHangingProtocol(grid: .defaultPETCT, panes: HangingPaneConfiguration.defaultPETCT)
+            } else {
+                applyHangingProtocol(grid: HangingGridLayout(columns: 4, rows: 2),
+                                     panes: HangingPaneConfiguration.defaultUnified)
+            }
+            statusMessage = mrSeries.isEmpty
+                ? "Opened PET/CT study: \(pair.ct.displayName) + \(pair.pet.displayName)"
+                : "Opened unified CT/MR/PET study: \(pair.ct.displayName) + \(pair.pet.displayName) + \(min(6, mrSeries.count)) MR"
+            return
+        }
+
+        if let pair = bestPETMRSeriesPair(in: series) {
+            let mrSeries = preferredMRDisplaySeries(in: series)
+            for mr in mrSeries.prefix(6) {
+                await openSeries(mr)
+            }
+            await openSeries(pair.pet)
+            await autoFusePETMR()
+            statusMessage = "Opened PET/MR study: \(pair.mr.displayName) + \(pair.pet.displayName)"
+            return
+        }
+
+        let mrDisplaySeries = preferredMRDisplaySeries(in: series)
+        if mrDisplaySeries.count >= 2 {
+            for mr in mrDisplaySeries.prefix(6) {
+                await openSeries(mr)
+            }
+            if let primary = loadedMRVolumes.sorted(by: mrDisplaySort).first {
+                displayVolume(primary)
+            }
+            resetMRIHangingProtocol()
+            statusMessage = "Opened MRI study with \(min(6, mrDisplaySeries.count)) linked sequences"
             return
         }
 
@@ -1141,6 +1286,9 @@ public final class ViewerViewModel: ObservableObject {
                 await autoFusePETCT()
                 applyHangingProtocol(grid: .defaultPETCT, panes: HangingPaneConfiguration.defaultPETCT)
                 statusMessage = "Loaded and fused PET/CT: \(result.volume.seriesDescription.isEmpty ? series.displayName : result.volume.seriesDescription)"
+            } else if result.inserted, shouldAutoFusePETMR(afterLoading: result.volume) {
+                await autoFusePETMR()
+                statusMessage = "Loaded and fused PET/MR: \(result.volume.seriesDescription.isEmpty ? series.displayName : result.volume.seriesDescription)"
             }
         } catch {
             statusMessage = "Error: \(error.localizedDescription)"
@@ -1233,14 +1381,49 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     public func openWorklistStudy(_ study: PACSWorklistStudy) async {
-        let ct = study.preferredAnatomicalSeriesForPETCT
+        let anatomical = study.preferredAnatomicalSeriesForPETCT
         let pet = study.preferredPETSeriesForPETCT
 
-        if let ct, let pet {
-            await openIndexedSeries(ct)
+        if let anatomical, let pet {
+            let anatomicalModality = Modality.normalize(anatomical.modality)
+            if anatomicalModality == .MR {
+                for mr in preferredMRDisplaySeries(in: study.series).prefix(6) {
+                    await openIndexedSeries(mr)
+                }
+            } else {
+                await openIndexedSeries(anatomical)
+                for mr in preferredMRDisplaySeries(in: study.series).prefix(6) {
+                    await openIndexedSeries(mr)
+                }
+            }
             await openIndexedSeries(pet)
-            await autoFusePETCT()
-            statusMessage = "Opened PET/CT study: \(study.patientName.isEmpty ? study.patientID : study.patientName)"
+            if anatomicalModality == .MR {
+                await autoFusePETMR()
+            } else {
+                await autoFusePETCT()
+                if !preferredMRDisplaySeries(in: study.series).isEmpty {
+                    applyHangingProtocol(grid: HangingGridLayout(columns: 4, rows: 2),
+                                         panes: HangingPaneConfiguration.defaultUnified)
+                }
+            }
+            let hasMRSeries = !preferredMRDisplaySeries(in: study.series).isEmpty
+            let label = anatomicalModality == .MR
+                ? "PET/MR"
+                : (hasMRSeries ? "unified CT/MR/PET" : "PET/CT")
+            statusMessage = "Opened \(label) study: \(study.patientName.isEmpty ? study.patientID : study.patientName)"
+            return
+        }
+
+        let mrDisplaySeries = preferredMRDisplaySeries(in: study.series)
+        if mrDisplaySeries.count >= 2 {
+            for mr in mrDisplaySeries.prefix(6) {
+                await openIndexedSeries(mr)
+            }
+            if let primary = loadedMRVolumes.sorted(by: mrDisplaySort).first {
+                displayVolume(primary)
+            }
+            resetMRIHangingProtocol()
+            statusMessage = "Opened MRI study: \(study.patientName.isEmpty ? study.patientID : study.patientName)"
             return
         }
 
@@ -1290,6 +1473,14 @@ public final class ViewerViewModel: ObservableObject {
         await fusePETCT(base: pair.ct, overlay: pair.pet)
     }
 
+    public func autoFusePETMR() async {
+        guard let pair = bestPETMRPair() else {
+            statusMessage = "Load at least one MR and one PET volume first"
+            return
+        }
+        await fusePETMR(base: pair.mr, overlay: pair.pet)
+    }
+
     public func fusePETCT(base: ImageVolume, overlay: ImageVolume) async {
         isLoading = true
         statusMessage = "Fusing PET/CT..."
@@ -1311,6 +1502,83 @@ public final class ViewerViewModel: ObservableObject {
         } catch {
             statusMessage = "PET/CT fusion error: \(error.localizedDescription)"
         }
+    }
+
+    public func fusePETMR(base: ImageVolume, overlay: ImageVolume) async {
+        isLoading = true
+        statusMessage = "Fusing PET/MR..."
+        defer { isLoading = false }
+
+        let mr = Modality.normalize(base.modality) == .MR ? base : overlay
+        let pet = Modality.normalize(base.modality) == .PT ? base : overlay
+
+        guard Modality.normalize(mr.modality) == .MR,
+              Modality.normalize(pet.modality) == .PT else {
+            statusMessage = "PET/MR fusion needs one MR volume and one PET volume"
+            return
+        }
+
+        let mode = petMRRegistrationMode
+        let alreadyAligned = hasMatchingGrid(mr, pet)
+        let registrationModeForInitializer: PETMRRegistrationMode = mode == .geometry ? .geometry : .rigidAnatomical
+        let registration = PETMRRegistrationEngine.estimatePETToMR(
+            pet: pet,
+            mr: mr,
+            mode: alreadyAligned ? .geometry : registrationModeForInitializer
+        )
+
+        let resampled: ImageVolume?
+        var registrationNote = registration.note
+        if alreadyAligned {
+            resampled = nil
+        } else if mode == .rigidThenDeformable,
+                  petMRDeformableRegistration.isExternalConfigured {
+            let prealigned = await Task.detached(priority: .userInitiated) {
+                VolumeResampler.resample(source: pet,
+                                         target: mr,
+                                         transform: registration.fixedToMoving,
+                                         mode: .linear)
+            }.value
+            do {
+                statusMessage = "Running \(petMRDeformableRegistration.backend.displayName) PET/MR deformable registration..."
+                let deformable = try await PETMRDeformableRegistrationRunner.register(
+                    fixed: mr,
+                    movingPrealigned: prealigned,
+                    configuration: petMRDeformableRegistration
+                )
+                resampled = deformable.warpedMoving
+                registrationNote = "\(registration.note). \(deformable.note)"
+            } catch {
+                resampled = prealigned
+                registrationNote = "\(registration.note). External deformable registration failed; using rigid prealignment. \(error.localizedDescription)"
+            }
+        } else if mode == .rigidThenDeformable {
+            let deformable = PETMRRegistrationEngine.estimatePETToMR(
+                pet: pet,
+                mr: mr,
+                mode: .rigidThenDeformable
+            )
+            resampled = await Task.detached(priority: .userInitiated) {
+                VolumeResampler.resample(source: pet,
+                                         target: mr,
+                                         transform: deformable.fixedToMoving,
+                                         mode: .linear)
+            }.value
+            registrationNote = "\(deformable.note). Configure ANTs/SynthMorph/VoxelMorph for dense deformable refinement."
+        } else {
+            resampled = await Task.detached(priority: .userInitiated) {
+                VolumeResampler.resample(source: pet,
+                                         target: mr,
+                                         transform: registration.fixedToMoving,
+                                         mode: .linear)
+            }.value
+        }
+
+        let pair = configureFusion(base: mr, overlay: pet, resampledOverlay: resampled)
+        pair.registrationNote = registrationNote
+        pair.objectWillChange.send()
+        applyHangingProtocol(grid: .threeByTwo, panes: HangingPaneConfiguration.defaultPETMR)
+        statusMessage = "PET/MR fused: \(registrationNote)"
     }
 
     private func openIndexedDICOMSeries(_ entry: PACSIndexedSeriesSnapshot) async {
@@ -1541,10 +1809,79 @@ public final class ViewerViewModel: ObservableObject {
         return best.map { ($0.ct, $0.pet) }
     }
 
+    private func bestPETMRSeriesPair(in series: [DICOMSeries]) -> (mr: DICOMSeries, pet: DICOMSeries)? {
+        let mrSeries = preferredMRDisplaySeries(in: series)
+        let petSeries = series
+            .filter { Modality.normalize($0.modality) == .PT }
+            .sorted { $0.instanceCount > $1.instanceCount }
+        guard !mrSeries.isEmpty, !petSeries.isEmpty else { return nil }
+
+        var best: (mr: DICOMSeries, pet: DICOMSeries, score: Int)?
+        for mr in mrSeries {
+            for pet in petSeries {
+                var score = min(mr.instanceCount, pet.instanceCount)
+                if !mr.studyUID.isEmpty, mr.studyUID == pet.studyUID { score += 10_000 }
+                if !mr.patientID.isEmpty, mr.patientID == pet.patientID { score += 1_000 }
+                if !mr.patientName.isEmpty, mr.patientName == pet.patientName { score += 250 }
+                if !mr.accessionNumber.isEmpty, mr.accessionNumber == pet.accessionNumber { score += 250 }
+                score += mrSequencePreferenceScore(description: mr.description, modality: mr.modality)
+                if best == nil || score > best!.score {
+                    best = (mr, pet, score)
+                }
+            }
+        }
+        return best.map { ($0.mr, $0.pet) }
+    }
+
+    private func preferredMRDisplaySeries(in series: [DICOMSeries]) -> [DICOMSeries] {
+        series
+            .filter { Modality.normalize($0.modality) == .MR }
+            .sorted { lhs, rhs in
+                let lhsScore = mrSequencePreferenceScore(description: lhs.description, modality: lhs.modality)
+                let rhsScore = mrSequencePreferenceScore(description: rhs.description, modality: rhs.modality)
+                if lhsScore != rhsScore { return lhsScore > rhsScore }
+                if lhs.instanceCount != rhs.instanceCount { return lhs.instanceCount > rhs.instanceCount }
+                return lhs.displayName.localizedStandardCompare(rhs.displayName) == .orderedAscending
+            }
+    }
+
+    private func preferredMRDisplaySeries(in series: [PACSIndexedSeriesSnapshot]) -> [PACSIndexedSeriesSnapshot] {
+        series
+            .filter { Modality.normalize($0.modality) == .MR }
+            .sorted { lhs, rhs in
+                let lhsScore = mrSequencePreferenceScore(description: lhs.seriesDescription, modality: lhs.modality)
+                let rhsScore = mrSequencePreferenceScore(description: rhs.seriesDescription, modality: rhs.modality)
+                if lhsScore != rhsScore { return lhsScore > rhsScore }
+                if lhs.instanceCount != rhs.instanceCount { return lhs.instanceCount > rhs.instanceCount }
+                return lhs.displayName.localizedStandardCompare(rhs.displayName) == .orderedAscending
+            }
+    }
+
+    private func mrSequencePreferenceScore(description: String, modality: String) -> Int {
+        let roles: [MRSequenceRole] = [.t1, .t2, .flair, .dwi, .adc, .postContrast, .other]
+        guard let role = roles.max(by: {
+            $0.score(seriesDescription: description, modality: modality) <
+                $1.score(seriesDescription: description, modality: modality)
+        }) else { return 0 }
+        let roleScore = role.score(seriesDescription: description, modality: modality)
+        return roleScore + (100 - mrRoleSortRank(role))
+    }
+
     private func shouldAutoFusePETCT(afterLoading volume: ImageVolume) -> Bool {
         let modality = Modality.normalize(volume.modality)
         guard modality == .CT || modality == .PT else { return false }
         guard !loadedCTVolumes.isEmpty, !loadedPETVolumes.isEmpty else { return false }
+        if let fusion {
+            return fusion.baseVolume.id != volume.id && fusion.overlayVolume.id != volume.id
+        }
+        return true
+    }
+
+    private func shouldAutoFusePETMR(afterLoading volume: ImageVolume) -> Bool {
+        let modality = Modality.normalize(volume.modality)
+        guard modality == .MR || modality == .PT else { return false }
+        guard loadedCTVolumes.isEmpty else { return false }
+        guard !loadedMRVolumes.isEmpty, !loadedPETVolumes.isEmpty else { return false }
         if let fusion {
             return fusion.baseVolume.id != volume.id && fusion.overlayVolume.id != volume.id
         }
@@ -1582,8 +1919,8 @@ public final class ViewerViewModel: ObservableObject {
         pair.resampledOverlay = resampledOverlay
         pair.isGeometryResampled = resampledOverlay != nil
         pair.registrationNote = resampledOverlay == nil
-            ? "PET/overlay already matches base grid"
-            : "PET/overlay resampled into CT/base world geometry"
+            ? "Overlay already matches base grid"
+            : "Overlay resampled into base world geometry"
         applyFusionDisplayDefaults(for: overlay, pair: pair)
         fusion = pair
         return pair
@@ -1680,6 +2017,87 @@ public final class ViewerViewModel: ObservableObject {
         return (best.ct, best.pet)
     }
 
+    private func bestPETMRPair() -> (mr: ImageVolume, pet: ImageVolume)? {
+        let mrs = loadedMRVolumes.sorted(by: mrDisplaySort)
+        let pets = loadedPETVolumes
+        guard !mrs.isEmpty, !pets.isEmpty else { return nil }
+
+        if let current = currentVolume {
+            let currentModality = Modality.normalize(current.modality)
+            if currentModality == .MR,
+               let pet = pets.max(by: { fusionScore(mr: current, pet: $0) < fusionScore(mr: current, pet: $1) }) {
+                return (current, pet)
+            }
+            if currentModality == .PT,
+               let mr = mrs.max(by: { fusionScore(mr: $0, pet: current) < fusionScore(mr: $1, pet: current) }) {
+                return (mr, current)
+            }
+        }
+
+        var best: (mr: ImageVolume, pet: ImageVolume, score: Int)?
+        for mr in mrs {
+            for pet in pets {
+                let score = fusionScore(mr: mr, pet: pet)
+                if best == nil || score > best!.score {
+                    best = (mr, pet, score)
+                }
+            }
+        }
+        guard let best else { return nil }
+        return (best.mr, best.pet)
+    }
+
+    public func preferredMRVolume(for role: MRSequenceRole) -> ImageVolume? {
+        let mrs = loadedMRVolumes
+        guard !mrs.isEmpty else { return nil }
+
+        if role == .other {
+            return mrs.first { MRSequenceRole.role(for: $0) == .other } ?? mrs.first
+        }
+
+        if let exact = mrs.max(by: { role.score(volume: $0) < role.score(volume: $1) }),
+           role.score(volume: exact) > 0 {
+            return exact
+        }
+
+        // MR protocols should stay populated even when series names are
+        // vendor-specific or sparse. Fall back to a deterministic sequence
+        // rank rather than leaving panes blank.
+        let ordered = mrs.sorted(by: mrDisplaySort)
+        let index: Int
+        switch role {
+        case .t1: index = 0
+        case .t2: index = min(1, ordered.count - 1)
+        case .flair: index = min(2, ordered.count - 1)
+        case .dwi: index = min(3, ordered.count - 1)
+        case .adc: index = min(4, ordered.count - 1)
+        case .postContrast: index = min(5, ordered.count - 1)
+        case .other: index = 0
+        }
+        return ordered[index]
+    }
+
+    private func mrDisplaySort(_ lhs: ImageVolume, _ rhs: ImageVolume) -> Bool {
+        let lhsRole = MRSequenceRole.role(for: lhs)
+        let rhsRole = MRSequenceRole.role(for: rhs)
+        let lhsRank = mrRoleSortRank(lhsRole)
+        let rhsRank = mrRoleSortRank(rhsRole)
+        if lhsRank != rhsRank { return lhsRank < rhsRank }
+        return lhs.seriesDescription.localizedStandardCompare(rhs.seriesDescription) == .orderedAscending
+    }
+
+    private func mrRoleSortRank(_ role: MRSequenceRole) -> Int {
+        switch role {
+        case .t1: return 0
+        case .t2: return 1
+        case .flair: return 2
+        case .dwi: return 3
+        case .adc: return 4
+        case .postContrast: return 5
+        case .other: return 10
+        }
+    }
+
     private func fusionScore(ct: ImageVolume, pet: ImageVolume) -> Int {
         var score = 0
         if !ct.studyUID.isEmpty, ct.studyUID == pet.studyUID { score += 8 }
@@ -1693,6 +2111,26 @@ public final class ViewerViewModel: ObservableObject {
         return score
     }
 
+    private func fusionScore(mr: ImageVolume, pet: ImageVolume) -> Int {
+        var score = 0
+        if !mr.studyUID.isEmpty, mr.studyUID == pet.studyUID { score += 8 }
+        if !mr.patientID.isEmpty, mr.patientID == pet.patientID { score += 4 }
+        if !mr.patientName.isEmpty, mr.patientName == pet.patientName { score += 2 }
+        let role = MRSequenceRole.role(for: mr)
+        switch role {
+        case .t1: score += 4
+        case .t2, .flair: score += 3
+        case .postContrast: score += 2
+        default: score += 1
+        }
+        if abs(mr.origin.x - pet.origin.x) < 75,
+           abs(mr.origin.y - pet.origin.y) < 75,
+           abs(mr.origin.z - pet.origin.z) < 75 {
+            score += 1
+        }
+        return score
+    }
+
     // MARK: - Volume display
 
     public func displayVolume(_ volume: ImageVolume) {
@@ -1700,6 +2138,12 @@ public final class ViewerViewModel: ObservableObject {
         autoWindowTask = nil
         currentVolume = volume
         sliceIndices = [volume.width / 2, volume.height / 2, volume.depth / 2]
+        let center = volume.worldPoint(voxel: SIMD3<Double>(
+            Double(sliceIndices[0]),
+            Double(sliceIndices[1]),
+            Double(sliceIndices[2])
+        ))
+        labeling.crosshair.world = WorldPoint(x: center.x, y: center.y, z: center.z)
 
         // Auto window/level
         let (w, l) = autoWindowLevel(pixels: volume.pixels)
@@ -1729,7 +2173,7 @@ public final class ViewerViewModel: ObservableObject {
     // MARK: - Slice navigation
 
     public func scroll(axis: Int, delta: Int) {
-        guard let v = currentVolume else { return }
+        guard let v = currentVolume, delta != 0 else { return }
         let max: Int
         switch axis {
         case 0: max = v.width - 1
@@ -1737,6 +2181,20 @@ public final class ViewerViewModel: ObservableObject {
         default: max = v.depth - 1
         }
         sliceIndices[axis] = Swift.max(0, Swift.min(max, sliceIndices[axis] + delta))
+        syncCrosshairToCurrentSliceIndices()
+    }
+
+    public func scroll(axis: Int, delta: Int, mode: SliceDisplayMode) {
+        guard delta != 0,
+              let v = volumeForDisplayMode(mode) ?? currentVolume else { return }
+        let max: Int
+        switch axis {
+        case 0: max = v.width - 1
+        case 1: max = v.height - 1
+        default: max = v.depth - 1
+        }
+        let current = displayedSliceIndex(axis: axis, volume: v)
+        setSlice(axis: axis, index: Swift.max(0, Swift.min(max, current + delta)), mode: mode)
     }
 
     public func scrollAllSlices(delta: Int) {
@@ -1756,6 +2214,87 @@ public final class ViewerViewModel: ObservableObject {
         default: max = v.depth - 1
         }
         sliceIndices[axis] = Swift.max(0, Swift.min(max, index))
+        syncCrosshairToCurrentSliceIndices()
+    }
+
+    public func setSlice(axis: Int, index: Int, mode: SliceDisplayMode) {
+        guard let v = volumeForDisplayMode(mode) ?? currentVolume else { return }
+        let max: Int
+        switch axis {
+        case 0: max = v.width - 1
+        case 1: max = v.height - 1
+        default: max = v.depth - 1
+        }
+        let clampedIndex = Swift.max(0, Swift.min(max, index))
+        let currentWorld = SIMD3<Double>(
+            labeling.crosshair.world.x,
+            labeling.crosshair.world.y,
+            labeling.crosshair.world.z
+        )
+        var voxel = v.voxelCoordinates(from: currentWorld)
+        switch axis {
+        case 0: voxel.x = Double(clampedIndex)
+        case 1: voxel.y = Double(clampedIndex)
+        default: voxel.z = Double(clampedIndex)
+        }
+        let world = v.worldPoint(voxel: voxel)
+        labeling.crosshair.world = WorldPoint(x: world.x, y: world.y, z: world.z)
+
+        if let currentVolume {
+            let currentVoxel = currentVolume.voxelIndex(from: world)
+            sliceIndices = [currentVoxel.x, currentVoxel.y, currentVoxel.z]
+        } else {
+            switch axis {
+            case 0: sliceIndices[0] = clampedIndex
+            case 1: sliceIndices[1] = clampedIndex
+            default: sliceIndices[2] = clampedIndex
+            }
+        }
+    }
+
+    public func displayedSliceIndex(axis: Int, mode: SliceDisplayMode) -> Int {
+        guard let volume = volumeForDisplayMode(mode) ?? currentVolume else {
+            return sliceIndices.indices.contains(axis) ? sliceIndices[axis] : 0
+        }
+        return displayedSliceIndex(axis: axis, volume: volume)
+    }
+
+    public func displayedSliceIndices(for volume: ImageVolume) -> (sag: Int, cor: Int, ax: Int) {
+        if labeling.crosshair.enabled {
+            return labeling.crosshair.sliceIndices(for: labeling.crosshair.world, in: volume)
+        }
+        return (
+            sag: Swift.max(0, Swift.min(volume.width - 1, sliceIndices[0])),
+            cor: Swift.max(0, Swift.min(volume.height - 1, sliceIndices[1])),
+            ax: Swift.max(0, Swift.min(volume.depth - 1, sliceIndices[2]))
+        )
+    }
+
+    public func centerSlices(on world: SIMD3<Double>) {
+        labeling.crosshair.world = WorldPoint(x: world.x, y: world.y, z: world.z)
+        if let currentVolume {
+            let voxel = currentVolume.voxelIndex(from: world)
+            sliceIndices = [voxel.x, voxel.y, voxel.z]
+        }
+    }
+
+    private func syncCrosshairToCurrentSliceIndices() {
+        guard let currentVolume, sliceIndices.count >= 3 else { return }
+        let world = currentVolume.worldPoint(voxel: SIMD3<Double>(
+            Double(sliceIndices[0]),
+            Double(sliceIndices[1]),
+            Double(sliceIndices[2])
+        ))
+        labeling.crosshair.world = WorldPoint(x: world.x, y: world.y, z: world.z)
+    }
+
+    private func displayedSliceIndex(axis: Int, volume: ImageVolume) -> Int {
+        let indices = displayedSliceIndices(for: volume)
+        switch axis {
+        case 0: return indices.sag
+        case 1: return indices.cor
+        default: return indices.ax
+        }
     }
 
     public func displayTransform(for axis: Int, volume: ImageVolume? = nil) -> SliceDisplayTransform {
@@ -2699,13 +3238,7 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     private func sliceIndex(axis: Int, volume: ImageVolume) -> Int {
-        let maxIndex: Int
-        switch axis {
-        case 0: maxIndex = volume.width - 1
-        case 1: maxIndex = volume.height - 1
-        default: maxIndex = volume.depth - 1
-        }
-        return Swift.max(0, Swift.min(maxIndex, sliceIndices[axis]))
+        displayedSliceIndex(axis: axis, volume: volume)
     }
 
     private func sliceIndex(axis: Int, labelMap: LabelMap) -> Int {
