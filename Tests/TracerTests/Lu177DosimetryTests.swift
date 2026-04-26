@@ -29,6 +29,49 @@ final class Lu177DosimetryTests: XCTestCase {
         XCTAssertTrue(result.report.warnings.contains { $0.contains("Tail integration is disabled") })
     }
 
+    func testSingleTimePointDoseMapUsesEffectiveHalfLifeBackExtrapolation() throws {
+        let spect = makeVolume(pixels: [10], modality: "NM")
+        let point = try Lu177DosimetryTimePoint(
+            activityVolume: spect,
+            hoursPostAdministration: 24
+        )
+        let model = try Lu177SingleTimePointModel(
+            effectiveHalfLifeHours: 48,
+            modelName: "Kidney prior-cycle fit"
+        )
+        let doseModel = try Lu177DoseModel(meanEnergyMeVPerDecay: 1)
+        let options = try Lu177DosimetryOptions(
+            tailModel: .noTail,
+            doseModel: doseModel
+        )
+
+        let result = try Lu177DosimetryEngine.createSingleTimePointAbsorbedDoseMap(
+            timePoint: point,
+            singleTimePointModel: model,
+            options: options
+        )
+
+        let lambda = Foundation.log(2.0) / 48
+        let expectedTIA = 10 * Foundation.exp(lambda * 24) / lambda
+        let expectedDose = expectedTIA * 3_600 * doseModel.joulesPerDecay * 1_000
+        XCTAssertEqual(result.report.acquisitionMode, .singleTimePoint)
+        XCTAssertEqual(Double(result.timeIntegratedActivityMapBqHoursPerML.pixels[0]), expectedTIA, accuracy: expectedTIA * 1e-5)
+        XCTAssertEqual(Double(result.absorbedDoseMapGy.pixels[0]), expectedDose, accuracy: expectedDose * 1e-5)
+        XCTAssertTrue(result.report.warnings.contains { $0.contains("Single-time-point dosimetry uses Kidney prior-cycle fit") })
+    }
+
+    func testMultipleTimePointWorkflowRequiresAtLeastTwoTimePoints() throws {
+        let spect = makeVolume(pixels: [1], modality: "NM")
+        let point = try Lu177DosimetryTimePoint(activityVolume: spect, hoursPostAdministration: 24)
+
+        XCTAssertThrowsError(try Lu177DosimetryEngine.createMultipleTimePointAbsorbedDoseMap(timePoints: [point])) { error in
+            XCTAssertEqual(
+                error as? Lu177DosimetryError,
+                .invalidInput("Multiple-time-point dosimetry requires at least two SPECT/CT time points.")
+            )
+        }
+    }
+
     func testCTDensityMapReducesDoseInHighDensityBoneLikeVoxel() throws {
         let spect0 = makeVolume(pixels: [1, 1], modality: "NM")
         let spect1 = makeVolume(pixels: [1, 1], modality: "NM")
@@ -56,6 +99,60 @@ final class Lu177DosimetryTests: XCTestCase {
             Double(result.absorbedDoseMapGy.pixels[0]) / 2,
             accuracy: Double(result.absorbedDoseMapGy.pixels[0]) * 1e-5
         )
+    }
+
+    func testDosimetryCurvesBuildVOITimeActivityAndDoseCurves() throws {
+        let spect0 = makeVolume(pixels: [1, 2, 3, 4], modality: "NM", height: 2, width: 2)
+        let spect1 = makeVolume(pixels: [0.5, 1, 1.5, 2], modality: "NM", height: 2, width: 2)
+        let labelMap = LabelMap(parentSeriesUID: spect0.seriesUID, depth: 1, height: 2, width: 2)
+        labelMap.classes = [
+            LabelClass(labelID: 1, name: "Kidney", category: .organ, color: .red),
+            LabelClass(labelID: 2, name: "Tumor", category: .tumor, color: .yellow)
+        ]
+        labelMap.voxels = [1, 1, 2, 0]
+        let points = [
+            try Lu177DosimetryTimePoint(activityVolume: spect0, hoursPostAdministration: 0),
+            try Lu177DosimetryTimePoint(activityVolume: spect1, hoursPostAdministration: 2)
+        ]
+        let options = try Lu177DosimetryOptions(
+            physicalHalfLifeHours: 160,
+            tailModel: .monoExponentialFitWithPhysicalFallback,
+            doseModel: try Lu177DoseModel(meanEnergyMeVPerDecay: 1)
+        )
+
+        let curves = try Lu177DosimetryEngine.createDosimetryCurves(
+            timePoints: points,
+            labelMap: labelMap,
+            options: options
+        )
+
+        let kidney = try XCTUnwrap(curves.first { $0.name == "Kidney" })
+        XCTAssertEqual(kidney.acquisitionMode, .multipleTimePoint)
+        XCTAssertEqual(kidney.points.count, 2)
+        XCTAssertEqual(kidney.points[0].activityBq, 3, accuracy: 1e-8)
+        XCTAssertEqual(kidney.points[1].activityBq, 1.5, accuracy: 1e-8)
+        XCTAssertEqual(kidney.effectiveHalfLifeHours ?? 0, 2, accuracy: 1e-5)
+        XCTAssertGreaterThan(kidney.timeIntegratedActivityBqHours, 0)
+        XCTAssertGreaterThan(kidney.absorbedDoseGy, 0)
+    }
+
+    func testSingleTimePointDosimetryCurveUsesProvidedEffectiveHalfLife() throws {
+        let spect = makeVolume(pixels: [10, 0], modality: "NM")
+        let point = try Lu177DosimetryTimePoint(activityVolume: spect, hoursPostAdministration: 24)
+        let model = try Lu177SingleTimePointModel(effectiveHalfLifeHours: 72)
+
+        let curves = try Lu177DosimetryEngine.createDosimetryCurves(
+            timePoints: [point],
+            singleTimePointModel: model
+        )
+
+        let curve = try XCTUnwrap(curves.first)
+        let lambda = Foundation.log(2.0) / 72
+        let expectedTIA = 10 * Foundation.exp(lambda * 24) / lambda
+        XCTAssertEqual(curve.acquisitionMode, .singleTimePoint)
+        XCTAssertEqual(curve.effectiveHalfLifeHours ?? 0, 72, accuracy: 1e-8)
+        XCTAssertEqual(curve.timeIntegratedActivityBqHours, expectedTIA, accuracy: expectedTIA * 1e-8)
+        XCTAssertTrue(curve.warnings.contains { $0.contains("Single-time-point curve uses") })
     }
 
     func testMonteCarloDoseTransportSpreadsDoseBeyondSourceVoxel() throws {
@@ -230,6 +327,62 @@ final class Lu177DosimetryTests: XCTestCase {
         XCTAssertEqual(result.report.voiSummaries[0].volumeML, 2)
         XCTAssertEqual(result.report.voiSummaries[1].className, "Tumor")
         XCTAssertEqual(result.report.voiSummaries[1].voxelCount, 1)
+    }
+
+    func testCumulativeTherapyDoseScalesReferenceDoseForFourCycles() throws {
+        let spect0 = makeVolume(pixels: [2, 4], modality: "NM")
+        let spect1 = makeVolume(pixels: [2, 4], modality: "NM")
+        let reference = try Lu177DosimetryEngine.createAbsorbedDoseMap(
+            timePoints: [
+                try Lu177DosimetryTimePoint(activityVolume: spect0, hoursPostAdministration: 0),
+                try Lu177DosimetryTimePoint(activityVolume: spect1, hoursPostAdministration: 1)
+            ],
+            options: try Lu177DosimetryOptions(
+                tailModel: .noTail,
+                doseModel: try Lu177DoseModel(meanEnergyMeVPerDecay: 1)
+            )
+        )
+
+        let cumulative = try Lu177DosimetryEngine.cumulativeTherapyDose(
+            referenceResult: reference,
+            cycleCount: 4
+        )
+
+        XCTAssertEqual(cumulative.cycleCount, 4)
+        XCTAssertEqual(cumulative.totalRelativeDoseScale, 4)
+        XCTAssertEqual(
+            Double(cumulative.cumulativeDoseMapGy.pixels[0]),
+            Double(reference.absorbedDoseMapGy.pixels[0]) * 4,
+            accuracy: Double(reference.absorbedDoseMapGy.pixels[0]) * 1e-5
+        )
+        XCTAssertEqual(cumulative.meanDoseGy, reference.report.meanDoseGy * 4, accuracy: reference.report.meanDoseGy * 1e-5)
+    }
+
+    func testCumulativeTherapyDoseUsesAdministeredActivityScalesForSixCycles() throws {
+        let spect0 = makeVolume(pixels: [1], modality: "NM")
+        let spect1 = makeVolume(pixels: [1], modality: "NM")
+        let reference = try Lu177DosimetryEngine.createAbsorbedDoseMap(
+            timePoints: [
+                try Lu177DosimetryTimePoint(activityVolume: spect0, hoursPostAdministration: 0),
+                try Lu177DosimetryTimePoint(activityVolume: spect1, hoursPostAdministration: 1)
+            ],
+            options: try Lu177DosimetryOptions(tailModel: .noTail)
+        )
+
+        let cumulative = try Lu177DosimetryEngine.cumulativeTherapyDose(
+            referenceResult: reference,
+            administeredActivitiesGBq: [7.4, 7.4, 3.7, 7.4, 3.7, 7.4]
+        )
+
+        XCTAssertEqual(cumulative.cycleCount, 6)
+        XCTAssertEqual(cumulative.totalRelativeDoseScale, 5, accuracy: 1e-8)
+        XCTAssertEqual(cumulative.cycles[2].relativeDoseScale, 0.5, accuracy: 1e-8)
+        XCTAssertEqual(
+            Double(cumulative.cumulativeDoseMapGy.pixels[0]),
+            Double(reference.absorbedDoseMapGy.pixels[0]) * 5,
+            accuracy: Double(reference.absorbedDoseMapGy.pixels[0]) * 1e-5
+        )
+        XCTAssertTrue(cumulative.warnings.contains { $0.contains("same biodistribution") })
     }
 
     func testGridMismatchThrowsBeforeDoseComputation() throws {

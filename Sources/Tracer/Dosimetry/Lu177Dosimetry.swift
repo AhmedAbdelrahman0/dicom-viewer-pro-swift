@@ -54,6 +54,18 @@ public enum Lu177DoseCalculationMethod: String, CaseIterable, Sendable {
     }
 }
 
+public enum Lu177DosimetryAcquisitionMode: String, CaseIterable, Sendable {
+    case singleTimePoint
+    case multipleTimePoint
+
+    public var displayName: String {
+        switch self {
+        case .singleTimePoint: return "Single time point"
+        case .multipleTimePoint: return "Multiple time points"
+        }
+    }
+}
+
 public struct Lu177SPECTCalibration: Equatable, Sendable {
     public let bqPerMLPerCount: Double
     public let backgroundCounts: Double
@@ -285,6 +297,85 @@ public struct Lu177DosimetryOptions: Equatable, Sendable {
     }
 }
 
+public struct Lu177SingleTimePointModel: Equatable, Sendable {
+    public let effectiveHalfLifeHours: Double
+    public let modelName: String
+    public let extrapolateBackToAdministration: Bool
+
+    public init(effectiveHalfLifeHours: Double,
+                modelName: String = "Single-time-point effective half-life",
+                extrapolateBackToAdministration: Bool = true) throws {
+        guard effectiveHalfLifeHours > 0, effectiveHalfLifeHours.isFinite else {
+            throw Lu177DosimetryError.invalidInput("Single-time-point effective half-life must be a positive finite number of hours.")
+        }
+        self.effectiveHalfLifeHours = effectiveHalfLifeHours
+        self.modelName = modelName
+        self.extrapolateBackToAdministration = extrapolateBackToAdministration
+    }
+
+    public var decayConstantPerHour: Double {
+        log(2) / effectiveHalfLifeHours
+    }
+}
+
+public struct Lu177DosimetryCurvePoint: Equatable, Sendable {
+    public let timeHours: Double
+    public let activityBq: Double
+    public let meanActivityConcentrationBqPerML: Double
+    public let doseRateGyPerHour: Double
+}
+
+public struct Lu177DosimetryCurve: Identifiable, Equatable, Sendable {
+    public let id: String
+    public let labelID: UInt16?
+    public let name: String
+    public let acquisitionMode: Lu177DosimetryAcquisitionMode
+    public let points: [Lu177DosimetryCurvePoint]
+    public let effectiveHalfLifeHours: Double?
+    public let timeIntegratedActivityBqHours: Double
+    public let absorbedDoseGy: Double
+    public let warnings: [String]
+}
+
+public struct Lu177TherapyCycleDose: Identifiable, Equatable, Sendable {
+    public let id: Int
+    public let cycleNumber: Int
+    public let administeredActivityGBq: Double?
+    public let relativeDoseScale: Double
+
+    public init(cycleNumber: Int,
+                administeredActivityGBq: Double?,
+                relativeDoseScale: Double) throws {
+        guard cycleNumber > 0 else {
+            throw Lu177DosimetryError.invalidInput("Therapy cycle number must be positive.")
+        }
+        if let administeredActivityGBq {
+            guard administeredActivityGBq > 0, administeredActivityGBq.isFinite else {
+                throw Lu177DosimetryError.invalidInput("Administered activity must be a positive finite GBq value.")
+            }
+        }
+        guard relativeDoseScale >= 0, relativeDoseScale.isFinite else {
+            throw Lu177DosimetryError.invalidInput("Relative cycle dose scale must be non-negative and finite.")
+        }
+        self.id = cycleNumber
+        self.cycleNumber = cycleNumber
+        self.administeredActivityGBq = administeredActivityGBq
+        self.relativeDoseScale = relativeDoseScale
+    }
+}
+
+public struct Lu177CumulativeTherapyDoseResult: Sendable {
+    public let cycleCount: Int
+    public let cycles: [Lu177TherapyCycleDose]
+    public let totalRelativeDoseScale: Double
+    public let cumulativeDoseMapGy: ImageVolume
+    public let minDoseGy: Double
+    public let meanDoseGy: Double
+    public let maxDoseGy: Double
+    public let voiSummaries: [Lu177VOIDoseSummary]
+    public let warnings: [String]
+}
+
 public struct Lu177VOIDoseSummary: Identifiable, Equatable, Sendable {
     public let id: UInt16
     public let classID: UInt16
@@ -300,6 +391,7 @@ public struct Lu177VOIDoseSummary: Identifiable, Equatable, Sendable {
 public struct Lu177DosimetryReport: Equatable, Sendable {
     public let sourceVolumeIdentity: String
     public let timePointHours: [Double]
+    public let acquisitionMode: Lu177DosimetryAcquisitionMode
     public let tailModel: Lu177TailModel
     public let doseModelName: String
     public let doseCalculationMethod: Lu177DoseCalculationMethod
@@ -345,99 +437,190 @@ public enum Lu177DosimetryEngine {
         let densityPixels = ctVolume.map {
             $0.pixels.map { options.densityCalibration.densityGPerML(hu: $0) }
         } ?? [Float](repeating: 1, count: reference.pixels.count)
-        let dosePixels = absorbedDosePixels(
-            timeIntegratedActivityBqHoursPerML: tiaPixels,
-            densityGPerML: densityPixels,
-            doseModel: options.doseModel,
-            referenceVolume: reference
+        return makeDosimetryResult(
+            reference: reference,
+            timePointHours: times,
+            acquisitionMode: sorted.count == 1 ? .singleTimePoint : .multipleTimePoint,
+            tiaPixels: tiaPixels,
+            densityPixels: densityPixels,
+            ctVolume: ctVolume,
+            labelMap: labelMap,
+            options: options,
+            extraWarnings: []
         )
+    }
 
-        let doseVolume = ImageVolume(
-            pixels: dosePixels,
-            depth: reference.depth,
-            height: reference.height,
-            width: reference.width,
-            spacing: reference.spacing,
-            origin: reference.origin,
-            direction: reference.direction,
-            modality: "DOSE",
-            studyUID: reference.studyUID,
-            patientID: reference.patientID,
-            patientName: reference.patientName,
-            seriesDescription: options.outputSeriesDescription,
-            studyDescription: reference.studyDescription,
-            sourceFiles: reference.sourceFiles
-        )
-        let tiaVolume = ImageVolume(
-            pixels: tiaPixels,
-            depth: reference.depth,
-            height: reference.height,
-            width: reference.width,
-            spacing: reference.spacing,
-            origin: reference.origin,
-            direction: reference.direction,
-            modality: "NM",
-            studyUID: reference.studyUID,
-            patientID: reference.patientID,
-            patientName: reference.patientName,
-            seriesDescription: "Lu-177 time-integrated activity",
-            studyDescription: reference.studyDescription,
-            sourceFiles: reference.sourceFiles
-        )
-        let densityVolume = ctVolume.map { ct in
-            ImageVolume(
-                pixels: densityPixels,
-                depth: ct.depth,
-                height: ct.height,
-                width: ct.width,
-                spacing: ct.spacing,
-                origin: ct.origin,
-                direction: ct.direction,
-                modality: "DENSITY",
-                studyUID: ct.studyUID,
-                patientID: ct.patientID,
-                patientName: ct.patientName,
-                seriesDescription: "CT-derived density map",
-                studyDescription: ct.studyDescription,
-                sourceFiles: ct.sourceFiles
-            )
+    public static func createSingleTimePointAbsorbedDoseMap(timePoint: Lu177DosimetryTimePoint,
+                                                            singleTimePointModel: Lu177SingleTimePointModel,
+                                                            ctVolume: ImageVolume? = nil,
+                                                            labelMap: LabelMap? = nil,
+                                                            options: Lu177DosimetryOptions = .standard) throws -> Lu177DosimetryResult {
+        let reference = timePoint.activityVolume
+        if let ctVolume {
+            try validateSameGrid(reference, ctVolume, role: "CT density map")
         }
+        if let labelMap {
+            try validateLabelGrid(reference, labelMap)
+        }
+        let activity = try timePoint.activityConcentrationPixels()
+        let tiaPixels = integrateSingleTimePointActivityConcentration(
+            activity: activity,
+            timeHours: timePoint.hoursPostAdministration,
+            model: singleTimePointModel
+        )
+        let densityPixels = ctVolume.map {
+            $0.pixels.map { options.densityCalibration.densityGPerML(hu: $0) }
+        } ?? [Float](repeating: 1, count: reference.pixels.count)
+        let warning = singleTimePointModel.extrapolateBackToAdministration
+            ? "Single-time-point dosimetry uses \(singleTimePointModel.modelName) and extrapolates measured activity back to administration."
+            : "Single-time-point dosimetry uses \(singleTimePointModel.modelName) only from the imaging time onward."
 
-        let warnings = warningsForWorkflow(
-            timePoints: sorted,
-            hasCT: ctVolume != nil,
+        return makeDosimetryResult(
+            reference: reference,
+            timePointHours: [timePoint.hoursPostAdministration],
+            acquisitionMode: .singleTimePoint,
+            tiaPixels: tiaPixels,
+            densityPixels: densityPixels,
+            ctVolume: ctVolume,
+            labelMap: labelMap,
+            options: options,
+            extraWarnings: [
+                warning,
+                "Single-time-point dosimetry is an approximation; verify the assumed effective half-life against serial imaging or local protocol."
+            ]
+        )
+    }
+
+    public static func createMultipleTimePointAbsorbedDoseMap(timePoints: [Lu177DosimetryTimePoint],
+                                                              ctVolume: ImageVolume? = nil,
+                                                              labelMap: LabelMap? = nil,
+                                                              options: Lu177DosimetryOptions = .standard) throws -> Lu177DosimetryResult {
+        guard timePoints.count >= 2 else {
+            throw Lu177DosimetryError.invalidInput("Multiple-time-point dosimetry requires at least two SPECT/CT time points.")
+        }
+        return try createAbsorbedDoseMap(
+            timePoints: timePoints,
+            ctVolume: ctVolume,
+            labelMap: labelMap,
             options: options
         )
-        let report = Lu177DosimetryReport(
-            sourceVolumeIdentity: reference.sessionIdentity,
-            timePointHours: times,
-            tailModel: options.tailModel,
-            doseModelName: options.doseModel.name,
-            doseCalculationMethod: options.doseModel.calculationMethod,
-            minDoseGy: Double(dosePixels.min() ?? 0),
-            meanDoseGy: mean(dosePixels),
-            maxDoseGy: Double(dosePixels.max() ?? 0),
-            totalTimeIntegratedActivityBqHours: totalTimeIntegratedActivity(
-                tiaPixels,
-                reference: reference
-            ),
-            voiSummaries: labelMap.map {
-                computeVOISummaries(
-                    dosePixels: dosePixels,
-                    tiaPixels: tiaPixels,
-                    labelMap: $0,
-                    reference: reference
-                )
-            } ?? [],
-            warnings: warnings
-        )
+    }
 
-        return Lu177DosimetryResult(
-            absorbedDoseMapGy: doseVolume,
-            timeIntegratedActivityMapBqHoursPerML: tiaVolume,
-            densityMapGPerML: densityVolume,
-            report: report
-        )
+    public static func integrateSingleTimePointActivityConcentration(activity: [Float],
+                                                                     timeHours: Double,
+                                                                     model: Lu177SingleTimePointModel) -> [Float] {
+        guard timeHours >= 0, timeHours.isFinite else { return [] }
+        let lambda = model.decayConstantPerHour
+        let scale = model.extrapolateBackToAdministration
+            ? exp(lambda * timeHours) / lambda
+            : 1 / lambda
+        return activity.map {
+            let value = max(0, Double($0)) * scale
+            return Float(value.isFinite ? value : 0)
+        }
+    }
+
+    public static func createDosimetryCurves(timePoints: [Lu177DosimetryTimePoint],
+                                             labelMap: LabelMap? = nil,
+                                             ctVolume: ImageVolume? = nil,
+                                             singleTimePointModel: Lu177SingleTimePointModel? = nil,
+                                             options: Lu177DosimetryOptions = .standard) throws -> [Lu177DosimetryCurve] {
+        let sorted = try validateAndSort(timePoints)
+        let reference = sorted[0].activityVolume
+        for point in sorted.dropFirst() {
+            try validateSameGrid(reference, point.activityVolume, role: "SPECT time point")
+        }
+        if let labelMap {
+            try validateLabelGrid(reference, labelMap)
+        }
+        if let ctVolume {
+            try validateSameGrid(reference, ctVolume, role: "CT density map")
+        }
+
+        let activities = try sorted.map { try $0.activityConcentrationPixels() }
+        let times = sorted.map(\.hoursPostAdministration)
+        let densityPixels = ctVolume.map {
+            $0.pixels.map { options.densityCalibration.densityGPerML(hu: $0) }
+        } ?? [Float](repeating: 1, count: reference.pixels.count)
+        let regions = curveRegions(reference: reference, labelMap: labelMap, densityPixels: densityPixels)
+        let acquisitionMode: Lu177DosimetryAcquisitionMode = sorted.count == 1 ? .singleTimePoint : .multipleTimePoint
+
+        return try regions.map { region in
+            let points = activities.indices.map { timeIndex in
+                curvePoint(
+                    timeHours: times[timeIndex],
+                    activityPixels: activities[timeIndex],
+                    region: region,
+                    doseModel: options.doseModel
+                )
+            }
+            let scalarActivities = points.map(\.activityBq)
+            let effectiveHalfLife = effectiveHalfLifeForCurve(
+                activitiesBq: scalarActivities,
+                timesHours: times,
+                physicalHalfLifeHours: options.physicalHalfLifeHours,
+                singleTimePointModel: singleTimePointModel
+            )
+            let tia = try integratedCurveActivityBqHours(
+                activitiesBq: scalarActivities,
+                timesHours: times,
+                options: options,
+                singleTimePointModel: singleTimePointModel
+            )
+            let dose = region.massKG > 0
+                ? tia * 3_600 * options.doseModel.joulesPerDecay / region.massKG
+                : 0
+            var warnings: [String] = []
+            if acquisitionMode == .singleTimePoint {
+                if let singleTimePointModel {
+                    warnings.append("Single-time-point curve uses \(singleTimePointModel.modelName), effective half-life \(singleTimePointModel.effectiveHalfLifeHours) h.")
+                } else {
+                    warnings.append("Single-time-point curve used the physical half-life fallback because no effective half-life model was supplied.")
+                }
+            }
+            return Lu177DosimetryCurve(
+                id: region.id,
+                labelID: region.labelID,
+                name: region.name,
+                acquisitionMode: acquisitionMode,
+                points: points,
+                effectiveHalfLifeHours: effectiveHalfLife,
+                timeIntegratedActivityBqHours: tia,
+                absorbedDoseGy: dose.isFinite ? dose : 0,
+                warnings: warnings
+            )
+        }
+    }
+
+    public static func cumulativeTherapyDose(referenceResult: Lu177DosimetryResult,
+                                             cycleCount: Int) throws -> Lu177CumulativeTherapyDoseResult {
+        guard cycleCount > 0 else {
+            throw Lu177DosimetryError.invalidInput("Therapy cycle count must be positive.")
+        }
+        let cycles = try (1...cycleCount).map {
+            try Lu177TherapyCycleDose(cycleNumber: $0, administeredActivityGBq: nil, relativeDoseScale: 1)
+        }
+        return makeCumulativeTherapyDose(referenceResult: referenceResult, cycles: cycles)
+    }
+
+    public static func cumulativeTherapyDose(referenceResult: Lu177DosimetryResult,
+                                             administeredActivitiesGBq: [Double],
+                                             referenceAdministeredActivityGBq: Double? = nil) throws -> Lu177CumulativeTherapyDoseResult {
+        guard !administeredActivitiesGBq.isEmpty else {
+            throw Lu177DosimetryError.invalidInput("At least one therapy cycle activity is required.")
+        }
+        let referenceActivity = referenceAdministeredActivityGBq ?? administeredActivitiesGBq[0]
+        guard referenceActivity > 0, referenceActivity.isFinite else {
+            throw Lu177DosimetryError.invalidInput("Reference administered activity must be a positive finite GBq value.")
+        }
+        let cycles = try administeredActivitiesGBq.enumerated().map { offset, activity in
+            try Lu177TherapyCycleDose(
+                cycleNumber: offset + 1,
+                administeredActivityGBq: activity,
+                relativeDoseScale: activity / referenceActivity
+            )
+        }
+        return makeCumulativeTherapyDose(referenceResult: referenceResult, cycles: cycles)
     }
 
     public static func integrateActivityConcentration(activities: [[Float]],
@@ -655,6 +838,283 @@ public enum Lu177DosimetryEngine {
         z * height * width + y * width + x
     }
 
+    private static func makeDosimetryResult(reference: ImageVolume,
+                                            timePointHours: [Double],
+                                            acquisitionMode: Lu177DosimetryAcquisitionMode,
+                                            tiaPixels: [Float],
+                                            densityPixels: [Float],
+                                            ctVolume: ImageVolume?,
+                                            labelMap: LabelMap?,
+                                            options: Lu177DosimetryOptions,
+                                            extraWarnings: [String]) -> Lu177DosimetryResult {
+        let dosePixels = absorbedDosePixels(
+            timeIntegratedActivityBqHoursPerML: tiaPixels,
+            densityGPerML: densityPixels,
+            doseModel: options.doseModel,
+            referenceVolume: reference
+        )
+
+        let doseVolume = ImageVolume(
+            pixels: dosePixels,
+            depth: reference.depth,
+            height: reference.height,
+            width: reference.width,
+            spacing: reference.spacing,
+            origin: reference.origin,
+            direction: reference.direction,
+            modality: "DOSE",
+            studyUID: reference.studyUID,
+            patientID: reference.patientID,
+            patientName: reference.patientName,
+            seriesDescription: options.outputSeriesDescription,
+            studyDescription: reference.studyDescription,
+            sourceFiles: reference.sourceFiles
+        )
+        let tiaVolume = ImageVolume(
+            pixels: tiaPixels,
+            depth: reference.depth,
+            height: reference.height,
+            width: reference.width,
+            spacing: reference.spacing,
+            origin: reference.origin,
+            direction: reference.direction,
+            modality: "NM",
+            studyUID: reference.studyUID,
+            patientID: reference.patientID,
+            patientName: reference.patientName,
+            seriesDescription: "Lu-177 time-integrated activity",
+            studyDescription: reference.studyDescription,
+            sourceFiles: reference.sourceFiles
+        )
+        let densityVolume = ctVolume.map { ct in
+            ImageVolume(
+                pixels: densityPixels,
+                depth: ct.depth,
+                height: ct.height,
+                width: ct.width,
+                spacing: ct.spacing,
+                origin: ct.origin,
+                direction: ct.direction,
+                modality: "DENSITY",
+                studyUID: ct.studyUID,
+                patientID: ct.patientID,
+                patientName: ct.patientName,
+                seriesDescription: "CT-derived density map",
+                studyDescription: ct.studyDescription,
+                sourceFiles: ct.sourceFiles
+            )
+        }
+
+        var warnings = warningsForWorkflow(
+            timePointCount: timePointHours.count,
+            hasCT: ctVolume != nil,
+            options: options
+        )
+        warnings.append(contentsOf: extraWarnings)
+        let report = Lu177DosimetryReport(
+            sourceVolumeIdentity: reference.sessionIdentity,
+            timePointHours: timePointHours,
+            acquisitionMode: acquisitionMode,
+            tailModel: options.tailModel,
+            doseModelName: options.doseModel.name,
+            doseCalculationMethod: options.doseModel.calculationMethod,
+            minDoseGy: Double(dosePixels.min() ?? 0),
+            meanDoseGy: mean(dosePixels),
+            maxDoseGy: Double(dosePixels.max() ?? 0),
+            totalTimeIntegratedActivityBqHours: totalTimeIntegratedActivity(
+                tiaPixels,
+                reference: reference
+            ),
+            voiSummaries: labelMap.map {
+                computeVOISummaries(
+                    dosePixels: dosePixels,
+                    tiaPixels: tiaPixels,
+                    labelMap: $0,
+                    reference: reference
+                )
+            } ?? [],
+            warnings: warnings
+        )
+
+        return Lu177DosimetryResult(
+            absorbedDoseMapGy: doseVolume,
+            timeIntegratedActivityMapBqHoursPerML: tiaVolume,
+            densityMapGPerML: densityVolume,
+            report: report
+        )
+    }
+
+    private static func makeCumulativeTherapyDose(referenceResult: Lu177DosimetryResult,
+                                                  cycles: [Lu177TherapyCycleDose]) -> Lu177CumulativeTherapyDoseResult {
+        let totalScale = cycles.reduce(0) { $0 + $1.relativeDoseScale }
+        let referenceVolume = referenceResult.absorbedDoseMapGy
+        let cumulativePixels = referenceVolume.pixels.map {
+            Float(Double($0) * totalScale)
+        }
+        let cumulativeVolume = ImageVolume(
+            pixels: cumulativePixels,
+            depth: referenceVolume.depth,
+            height: referenceVolume.height,
+            width: referenceVolume.width,
+            spacing: referenceVolume.spacing,
+            origin: referenceVolume.origin,
+            direction: referenceVolume.direction,
+            modality: "DOSE",
+            studyUID: referenceVolume.studyUID,
+            patientID: referenceVolume.patientID,
+            patientName: referenceVolume.patientName,
+            seriesDescription: "Cumulative Lu-177 absorbed dose (\(cycles.count) cycles)",
+            studyDescription: referenceVolume.studyDescription,
+            sourceFiles: referenceVolume.sourceFiles
+        )
+        let scaledVOIs = referenceResult.report.voiSummaries.map { summary in
+            Lu177VOIDoseSummary(
+                id: summary.id,
+                classID: summary.classID,
+                className: summary.className,
+                voxelCount: summary.voxelCount,
+                volumeML: summary.volumeML,
+                meanDoseGy: summary.meanDoseGy * totalScale,
+                minDoseGy: summary.minDoseGy * totalScale,
+                maxDoseGy: summary.maxDoseGy * totalScale,
+                timeIntegratedActivityBqHours: summary.timeIntegratedActivityBqHours * totalScale
+            )
+        }
+        let warnings = [
+            "Cumulative therapy dose assumes each cycle has the same biodistribution and clearance as the reference dosimetry result, scaled only by administered activity.",
+            "Use measured per-cycle SPECT/CT dosimetry when organ dose limits or adaptive treatment decisions are clinically important."
+        ]
+        return Lu177CumulativeTherapyDoseResult(
+            cycleCount: cycles.count,
+            cycles: cycles,
+            totalRelativeDoseScale: totalScale,
+            cumulativeDoseMapGy: cumulativeVolume,
+            minDoseGy: Double(cumulativePixels.min() ?? 0),
+            meanDoseGy: mean(cumulativePixels),
+            maxDoseGy: Double(cumulativePixels.max() ?? 0),
+            voiSummaries: scaledVOIs,
+            warnings: warnings
+        )
+    }
+
+    private struct CurveRegion {
+        let id: String
+        let labelID: UInt16?
+        let name: String
+        let indices: [Int]
+        let volumeML: Double
+        let massKG: Double
+    }
+
+    private static func curveRegions(reference: ImageVolume,
+                                     labelMap: LabelMap?,
+                                     densityPixels: [Float]) -> [CurveRegion] {
+        let voxelVolumeML = reference.spacing.x * reference.spacing.y * reference.spacing.z / 1_000
+        if let labelMap {
+            let classIDs = Set(labelMap.voxels.filter { $0 != 0 })
+            return classIDs.sorted().compactMap { classID in
+                let indices = labelMap.voxels.indices.filter { labelMap.voxels[$0] == classID }
+                guard !indices.isEmpty else { return nil }
+                let massKG = indices.reduce(0) {
+                    $0 + max(0.001, Double(densityPixels[$1])) * voxelVolumeML / 1_000
+                }
+                return CurveRegion(
+                    id: "label_\(classID)",
+                    labelID: classID,
+                    name: labelMap.classInfo(id: classID)?.name ?? "class_\(classID)",
+                    indices: indices,
+                    volumeML: Double(indices.count) * voxelVolumeML,
+                    massKG: massKG
+                )
+            }
+        }
+
+        let indices = Array(reference.pixels.indices)
+        let massKG = indices.reduce(0) {
+            $0 + max(0.001, Double(densityPixels[$1])) * voxelVolumeML / 1_000
+        }
+        return [
+            CurveRegion(
+                id: "whole_volume",
+                labelID: nil,
+                name: "Whole SPECT volume",
+                indices: indices,
+                volumeML: Double(indices.count) * voxelVolumeML,
+                massKG: massKG
+            )
+        ]
+    }
+
+    private static func curvePoint(timeHours: Double,
+                                   activityPixels: [Float],
+                                   region: CurveRegion,
+                                   doseModel: Lu177DoseModel) -> Lu177DosimetryCurvePoint {
+        let activityBq = region.indices.reduce(0) {
+            $0 + Double(activityPixels[$1]) * region.volumeML / Double(max(region.indices.count, 1))
+        }
+        let meanActivityConcentration = region.volumeML > 0 ? activityBq / region.volumeML : 0
+        let doseRate = region.massKG > 0
+            ? activityBq * doseModel.joulesPerDecay / region.massKG
+            : 0
+        return Lu177DosimetryCurvePoint(
+            timeHours: timeHours,
+            activityBq: activityBq,
+            meanActivityConcentrationBqPerML: meanActivityConcentration,
+            doseRateGyPerHour: doseRate * 3_600
+        )
+    }
+
+    private static func integratedCurveActivityBqHours(activitiesBq: [Double],
+                                                       timesHours: [Double],
+                                                       options: Lu177DosimetryOptions,
+                                                       singleTimePointModel: Lu177SingleTimePointModel?) throws -> Double {
+        guard activitiesBq.count == timesHours.count, !activitiesBq.isEmpty else { return 0 }
+        if activitiesBq.count == 1 {
+            if let singleTimePointModel {
+                let scale = singleTimePointModel.extrapolateBackToAdministration
+                    ? exp(singleTimePointModel.decayConstantPerHour * timesHours[0]) / singleTimePointModel.decayConstantPerHour
+                    : 1 / singleTimePointModel.decayConstantPerHour
+                return max(0, activitiesBq[0]) * scale
+            }
+            return max(0, activitiesBq[0]) / options.physicalDecayConstantPerHour
+        }
+
+        var total = 0.0
+        for index in 0..<(activitiesBq.count - 1) {
+            let dt = max(0, timesHours[index + 1] - timesHours[index])
+            total += 0.5 * (max(0, activitiesBq[index]) + max(0, activitiesBq[index + 1])) * dt
+        }
+        if options.tailModel != .noTail, let last = activitiesBq.last {
+            let lambda = scalarDecayConstantForTail(
+                activitiesBq: activitiesBq,
+                timesHours: timesHours,
+                physicalLambda: options.physicalDecayConstantPerHour,
+                tailModel: options.tailModel
+            )
+            total += max(0, last) / lambda
+        }
+        return total
+    }
+
+    private static func effectiveHalfLifeForCurve(activitiesBq: [Double],
+                                                  timesHours: [Double],
+                                                  physicalHalfLifeHours: Double,
+                                                  singleTimePointModel: Lu177SingleTimePointModel?) -> Double? {
+        if let singleTimePointModel {
+            return singleTimePointModel.effectiveHalfLifeHours
+        }
+        guard activitiesBq.count >= 2 else {
+            return physicalHalfLifeHours
+        }
+        let lambda = scalarDecayConstantForTail(
+            activitiesBq: activitiesBq,
+            timesHours: timesHours,
+            physicalLambda: log(2) / physicalHalfLifeHours,
+            tailModel: .monoExponentialFitWithPhysicalFallback
+        )
+        return log(2) / lambda
+    }
+
     private static func validateAndSort(_ timePoints: [Lu177DosimetryTimePoint]) throws -> [Lu177DosimetryTimePoint] {
         guard !timePoints.isEmpty else {
             throw Lu177DosimetryError.invalidInput("At least one Lu-177 SPECT time point is required.")
@@ -743,6 +1203,39 @@ public enum Lu177DosimetryEngine {
         return physicalLambda
     }
 
+    private static func scalarDecayConstantForTail(activitiesBq: [Double],
+                                                   timesHours: [Double],
+                                                   physicalLambda: Double,
+                                                   tailModel: Lu177TailModel) -> Double {
+        guard tailModel == .monoExponentialFitWithPhysicalFallback,
+              activitiesBq.count == timesHours.count,
+              activitiesBq.count >= 2 else {
+            return physicalLambda
+        }
+
+        let points = activitiesBq.indices.compactMap { index -> (time: Double, logActivity: Double)? in
+            let activity = activitiesBq[index]
+            guard activity > 0, activity.isFinite else { return nil }
+            return (timesHours[index], log(activity))
+        }
+        guard points.count >= 2 else { return physicalLambda }
+
+        let meanTime = points.reduce(0) { $0 + $1.time } / Double(points.count)
+        let meanLogActivity = points.reduce(0) { $0 + $1.logActivity } / Double(points.count)
+        var numerator = 0.0
+        var denominator = 0.0
+        for point in points {
+            numerator += (point.time - meanTime) * (point.logActivity - meanLogActivity)
+            denominator += pow(point.time - meanTime, 2)
+        }
+        guard denominator > 0 else { return physicalLambda }
+        let fittedLambda = -(numerator / denominator)
+        if fittedLambda.isFinite, fittedLambda > physicalLambda {
+            return fittedLambda
+        }
+        return physicalLambda
+    }
+
     private static func computeVOISummaries(dosePixels: [Float],
                                             tiaPixels: [Float],
                                             labelMap: LabelMap,
@@ -779,7 +1272,7 @@ public enum Lu177DosimetryEngine {
         return tiaPixels.reduce(0) { $0 + Double($1) * voxelVolumeML }
     }
 
-    private static func warningsForWorkflow(timePoints: [Lu177DosimetryTimePoint],
+    private static func warningsForWorkflow(timePointCount: Int,
                                             hasCT: Bool,
                                             options: Lu177DosimetryOptions) -> [String] {
         var warnings: [String]
@@ -801,7 +1294,7 @@ public enum Lu177DosimetryEngine {
         if let monteCarlo = options.doseModel.monteCarloOptions {
             warnings.append("Monte Carlo settings: \(monteCarlo.historiesPerSourceVoxel) histories/source voxel, \(monteCarlo.maxTotalHistories) history budget, seed \(monteCarlo.randomSeed).")
         }
-        if timePoints.count == 1 {
+        if timePointCount == 1 {
             warnings.append("Only one SPECT time point was supplied; time integration uses the configured tail model without measured clearance.")
         }
         if options.tailModel == .noTail {
