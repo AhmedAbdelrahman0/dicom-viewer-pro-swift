@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 
 private enum StudyBrowserMode: String, CaseIterable, Identifiable {
     case worklist
+    case archives
     case viewer
 
     var id: String { rawValue }
@@ -11,6 +12,7 @@ private enum StudyBrowserMode: String, CaseIterable, Identifiable {
     var displayName: String {
         switch self {
         case .worklist: return "Worklist"
+        case .archives: return "Archives"
         case .viewer: return "Viewer"
         }
     }
@@ -18,6 +20,7 @@ private enum StudyBrowserMode: String, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .worklist: return "list.clipboard"
+        case .archives: return "externaldrive.connected.to.line.below"
         case .viewer: return "rectangle.3.group"
         }
     }
@@ -40,6 +43,7 @@ struct StudyBrowserView: View {
     @State private var statusFilter: WorklistStatusFilter = .all
     @State private var modalityFilter: String = "All"
     @State private var dateFilter: WorklistDateFilter = .all
+    @State private var archiveFilterID: String = PACSArchiveScope.allID
     @State private var studyStatuses: [String: WorklistStudyStatus] = [:]
     @State private var expandedStudyIDs: Set<String> = []
     @State private var isDropTargeted: Bool = false
@@ -61,6 +65,8 @@ struct StudyBrowserView: View {
                 switch browserMode {
                 case .worklist:
                     worklistContent
+                case .archives:
+                    archivesContent
                 case .viewer:
                     viewerContent
                 }
@@ -326,6 +332,8 @@ struct StudyBrowserView: View {
             switch browserMode {
             case .worklist:
                 worklistControls
+            case .archives:
+                archiveControls
             case .viewer:
                 viewerControls
             }
@@ -338,6 +346,8 @@ struct StudyBrowserView: View {
         switch browserMode {
         case .worklist:
             return "\(filteredWorklistStudies.count) studies · \(indexedTotalCount) series"
+        case .archives:
+            return "\(filteredArchiveScopes.count) folders · \(worklistStudies.count) studies"
         case .viewer:
             return "\(vm.loadedVolumes.count) volumes · \(vm.loadedSeries.count) scanned"
         }
@@ -382,6 +392,62 @@ struct StudyBrowserView: View {
             }
             .labelsHidden()
             .controlSize(.small)
+
+            if archiveFilterID != PACSArchiveScope.allID,
+               let scope = archiveScopes.first(where: { $0.id == archiveFilterID }) {
+                HStack(spacing: 6) {
+                    Image(systemName: "folder")
+                        .foregroundColor(TracerTheme.accent)
+                    Text(scope.title)
+                        .font(.system(size: 10, weight: .medium))
+                        .lineLimit(1)
+                    Spacer()
+                    Button {
+                        archiveFilterID = PACSArchiveScope.allID
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Clear archive filter")
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(TracerTheme.panelRaised)
+                )
+            }
+        }
+    }
+
+    private var archiveControls: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                Button {
+                    onIndexFolder()
+                } label: {
+                    Label("Index Archive", systemImage: "externaldrive.badge.plus")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+
+                Button {
+                    archiveFilterID = PACSArchiveScope.allID
+                    browserMode = .worklist
+                } label: {
+                    Label("All Studies", systemImage: "list.clipboard")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+
+            Text("Browse indexed roots, collections, and study folders")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -512,6 +578,46 @@ struct StudyBrowserView: View {
         .background(TracerTheme.sidebarBackground)
     }
 
+    private var archivesContent: some View {
+        List {
+            if !filteredArchiveScopes.isEmpty {
+                Section("Indexed Archives") {
+                    ForEach(filteredArchiveScopes) { scope in
+                        Button {
+                            archiveFilterID = scope.id
+                            browserMode = .worklist
+                        } label: {
+                            ArchiveScopeRow(scope: scope)
+                        }
+                        .buttonStyle(.plain)
+                        .contextMenu {
+                            Button {
+                                archiveFilterID = scope.id
+                                browserMode = .worklist
+                            } label: {
+                                Label("Show Studies", systemImage: "list.clipboard")
+                            }
+                            Button {
+                                searchText = scope.title
+                                browserMode = .worklist
+                            } label: {
+                                Label("Search This Name", systemImage: "magnifyingglass")
+                            }
+                        }
+                    }
+                }
+            } else {
+                EmptyBrowserRow(
+                    systemImage: "externaldrive.connected.to.line.below",
+                    title: "No indexed archives",
+                    subtitle: "Index an archive root to browse collections and study folders"
+                )
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background(TracerTheme.sidebarBackground)
+    }
+
     private var viewerContent: some View {
         List {
             if !filteredLoadedVolumes.isEmpty {
@@ -558,12 +664,31 @@ struct StudyBrowserView: View {
 
     private var filteredWorklistStudies: [PACSWorklistStudy] {
         worklistStudies.filter {
-            $0.matches(
+            if archiveFilterID != PACSArchiveScope.allID,
+               PACSArchiveScope.scopeID(for: $0) != archiveFilterID {
+                return false
+            }
+            return $0.matches(
                 searchText: searchText,
                 statusFilter: statusFilter,
                 modalityFilter: modalityFilter,
                 dateFilter: dateFilter
             )
+        }
+    }
+
+    private var archiveScopes: [PACSArchiveScope] {
+        PACSArchiveScope.grouped(from: worklistStudies)
+    }
+
+    private var filteredArchiveScopes: [PACSArchiveScope] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !query.isEmpty else { return archiveScopes }
+        return archiveScopes.filter { scope in
+            scope.title.lowercased().contains(query)
+            || scope.subtitle.lowercased().contains(query)
+            || scope.path.lowercased().contains(query)
+            || scope.modalitySummary.lowercased().contains(query)
         }
     }
 
@@ -873,6 +998,157 @@ private struct EmptyBrowserRow: View {
             Spacer()
         }
         .listRowBackground(Color.clear)
+    }
+}
+
+private struct PACSArchiveScope: Identifiable, Hashable {
+    static let allID = "__all_archives__"
+
+    let id: String
+    let path: String
+    let title: String
+    let subtitle: String
+    let studyCount: Int
+    let seriesCount: Int
+    let instanceCount: Int
+    let modalities: [String]
+
+    var modalitySummary: String {
+        modalities.joined(separator: "/")
+    }
+
+    static func grouped(from studies: [PACSWorklistStudy]) -> [PACSArchiveScope] {
+        struct Accumulator {
+            var path: String
+            var studyIDs = Set<String>()
+            var seriesCount = 0
+            var instanceCount = 0
+            var modalities = Set<String>()
+        }
+
+        var grouped: [String: Accumulator] = [:]
+        for study in studies {
+            let path = archivePath(for: study)
+            var acc = grouped[path] ?? Accumulator(path: path)
+            acc.studyIDs.insert(study.id)
+            acc.seriesCount += study.seriesCount
+            acc.instanceCount += study.instanceCount
+            acc.modalities.formUnion(study.modalities)
+            grouped[path] = acc
+        }
+
+        return grouped.values.map { acc in
+            let title = archiveTitle(for: acc.path)
+            let subtitle = archiveSubtitle(for: acc.path)
+            return PACSArchiveScope(
+                id: acc.path,
+                path: acc.path,
+                title: title,
+                subtitle: subtitle,
+                studyCount: acc.studyIDs.count,
+                seriesCount: acc.seriesCount,
+                instanceCount: acc.instanceCount,
+                modalities: Array(acc.modalities).sorted()
+            )
+        }
+        .sorted { lhs, rhs in
+            if lhs.studyCount != rhs.studyCount { return lhs.studyCount > rhs.studyCount }
+            return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+        }
+    }
+
+    static func scopeID(for study: PACSWorklistStudy) -> String {
+        archivePath(for: study)
+    }
+
+    private static func archivePath(for study: PACSWorklistStudy) -> String {
+        let firstSeries = study.series.first
+        let firstPath = study.series.lazy.compactMap { series in
+            series.filePaths.first ?? (series.sourcePath.isEmpty ? nil : series.sourcePath)
+        }.first ?? study.sourcePath
+        return meaningfulArchivePath(filePath: firstPath,
+                                     sourcePath: firstSeries?.sourcePath ?? study.sourcePath)
+    }
+
+    private static func meaningfulArchivePath(filePath: String, sourcePath: String) -> String {
+        let components = pathComponents(filePath)
+
+        if let manifest = components.firstIndex(where: { $0.hasPrefix("manifest-") }),
+           manifest + 1 < components.count {
+            return "/" + components[0...manifest + 1].joined(separator: "/")
+        }
+
+        if let fdg = components.firstIndex(of: "FDG-PET-CT-Lesions"),
+           fdg + 1 < components.count {
+            return "/" + components[0...fdg + 1].joined(separator: "/")
+        }
+
+        let sourceComponents = pathComponents(sourcePath)
+        if !sourceComponents.isEmpty,
+           components.starts(with: sourceComponents),
+           components.count > sourceComponents.count {
+            let relStart = sourceComponents.count
+            let relEnd = min(components.count - 1, relStart + 1)
+            return "/" + components[0...relEnd].joined(separator: "/")
+        }
+
+        let parent = (filePath as NSString).deletingLastPathComponent
+        return parent.isEmpty ? sourcePath : parent
+    }
+
+    private static func archiveTitle(for path: String) -> String {
+        let last = (path as NSString).lastPathComponent
+        return last.isEmpty ? "Indexed Archive" : last
+    }
+
+    private static func archiveSubtitle(for path: String) -> String {
+        let parent = (path as NSString).deletingLastPathComponent
+        return parent.isEmpty ? path : parent
+    }
+
+    private static func pathComponents(_ path: String) -> [String] {
+        path.split(separator: "/").map(String.init)
+    }
+}
+
+private struct ArchiveScopeRow: View {
+    let scope: PACSArchiveScope
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "folder")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(TracerTheme.accent)
+                .frame(width: 20)
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(scope.title)
+                        .font(.system(size: 12, weight: .semibold))
+                        .lineLimit(1)
+                    Spacer()
+                    if !scope.modalitySummary.isEmpty {
+                        Text(scope.modalitySummary)
+                            .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                Text(scope.subtitle)
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+
+                HStack(spacing: 8) {
+                    Text("\(scope.studyCount) studies")
+                    Text("\(scope.seriesCount) series")
+                    Text("\(scope.instanceCount) images")
+                }
+                .font(.system(size: 9))
+                .foregroundColor(.secondary)
+            }
+        }
+        .padding(.vertical, 3)
     }
 }
 

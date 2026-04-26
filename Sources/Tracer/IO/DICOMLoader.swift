@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import simd
 
@@ -302,18 +303,41 @@ public enum DICOMLoader {
             }
         }
 
-        let undefinedLength = length == 0xFFFFFFFF
-        if undefinedLength {
-            length = 0
-        }
-
         let dataStart = pos
-        let dataEnd = min(pos + length, data.count)
-        let valueBytes = peekOnly ? Data() : data.subdata(in: dataStart..<dataEnd)
+        let undefinedLength = length == 0xFFFFFFFF
+        let dataEnd: Int
+        if undefinedLength {
+            dataEnd = peekOnly ? dataStart : undefinedLengthElementEnd(data: data, start: dataStart)
+            length = 0
+        } else {
+            dataEnd = min(pos + length, data.count)
+        }
+        let valueBytes = (peekOnly || undefinedLength) ? Data() : data.subdata(in: dataStart..<dataEnd)
 
         return (ElementValue(bytes: valueBytes, dataOffset: dataStart, length: length,
                              undefinedLength: undefinedLength),
                 dataEnd)
+    }
+
+    private static func undefinedLengthElementEnd(data: Data, start: Int) -> Int {
+        var cursor = start
+        while cursor + 8 <= data.count {
+            let group = data.readUInt16LE(at: cursor)
+            let element = data.readUInt16LE(at: cursor + 2)
+            let itemLength = data.readUInt32LE(at: cursor + 4)
+
+            if group == 0xFFFE && element == 0xE0DD {
+                return cursor + 8
+            }
+
+            if group == 0xFFFE,
+               itemLength != 0xFFFFFFFF {
+                cursor = min(data.count, cursor + 8 + Int(itemLength))
+            } else {
+                cursor += 2
+            }
+        }
+        return data.count
     }
 
     private static func assignTag(dcm: DICOMFile, group: UInt16, element: UInt16,
@@ -451,9 +475,21 @@ public enum DICOMLoader {
     }
 
     private static func prefixData(from url: URL, maxBytes: Int) throws -> Data {
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
-        return try handle.read(upToCount: max(132, maxBytes)) ?? Data()
+        let byteCount = max(132, maxBytes)
+        let fd = open(url.path, O_RDONLY)
+        guard fd >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        defer { close(fd) }
+
+        var buffer = [UInt8](repeating: 0, count: byteCount)
+        let readCount = buffer.withUnsafeMutableBytes { rawBuffer in
+            Darwin.read(fd, rawBuffer.baseAddress, byteCount)
+        }
+        guard readCount >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        return Data(buffer.prefix(readCount))
     }
 
     // MARK: - Scan a directory for DICOM files

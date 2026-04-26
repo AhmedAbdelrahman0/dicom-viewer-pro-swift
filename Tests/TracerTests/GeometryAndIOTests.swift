@@ -398,6 +398,29 @@ final class GeometryAndIOTests: XCTestCase {
         }
     }
 
+    func testDICOMIndexHeaderSkipsUndefinedLengthSequenceBeforeSeriesUID() throws {
+        var data = Data(count: 128)
+        data.append("DICM".data(using: .ascii)!)
+        data.appendDICOMElement(group: 0x0002, element: 0x0010, vr: "UI", string: "1.2.840.10008.1.2.1")
+        data.appendDICOMElement(group: 0x0010, element: 0x0010, vr: "PN", string: "Sequence^Patient")
+        data.appendDICOMUndefinedLengthSequence(group: 0x0012, element: 0x0064)
+        data.appendDICOMElement(group: 0x0020, element: 0x000D, vr: "UI", string: "study-seq")
+        data.appendDICOMElement(group: 0x0020, element: 0x000E, vr: "UI", string: "series-after-seq")
+        data.appendDICOMElement(group: 0x0008, element: 0x0060, vr: "CS", string: "PT")
+        data.appendDICOMElement(group: 0x0008, element: 0x0018, vr: "UI", string: "sop-after-seq")
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("undefined-seq-\(UUID().uuidString).dcm")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try data.write(to: url)
+
+        let dcm = try DICOMLoader.parseIndexHeader(at: url, maxBytes: 4096)
+
+        XCTAssertEqual(dcm.seriesInstanceUID, "series-after-seq")
+        XCTAssertEqual(dcm.studyInstanceUID, "study-seq")
+        XCTAssertEqual(dcm.modality, "PT")
+    }
+
     func testPACSIndexBuilderCreatesDICOMSearchableSnapshot() {
         let dcm = DICOMFile()
         dcm.filePath = "/tmp/series/image001.dcm"
@@ -547,6 +570,82 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertTrue(alpha.searchableText.contains("alpha"))
         XCTAssertTrue(alpha.searchableText.contains("acc-a"))
         XCTAssertTrue(alpha.filePaths.first?.hasSuffix(".dcm") == true)
+    }
+
+    func testPACSDirectoryIndexerFastIndexesSingleSeriesFolders() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pacs-fast-index-\(UUID().uuidString)", isDirectory: true)
+        let seriesDir = root.appendingPathComponent("Study/Series", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: seriesDir, withIntermediateDirectories: true)
+
+        for i in 0..<12 {
+            try makeMinimalDICOM(
+                patientName: "Fast^Patient",
+                patientID: "MRN-F",
+                accessionNumber: "ACC-F",
+                studyUID: "study-fast",
+                studyDate: "20260426",
+                studyTime: "101500",
+                seriesUID: "series-fast",
+                seriesDescription: "PET AC",
+                modality: "PT",
+                sopUID: "sop-fast-\(i)"
+            ).write(to: seriesDir.appendingPathComponent("image-\(i).dcm"))
+        }
+
+        let result = PACSDirectoryIndexer.scan(
+            url: root,
+            headerByteLimit: 4096,
+            progressStride: 100,
+            seriesDirectoryFastPath: true,
+            fastPathMinimumDICOMFilesPerDirectory: 8,
+            fastPathSampleCount: 4
+        )
+
+        XCTAssertEqual(result.scannedFiles, 12)
+        XCTAssertEqual(result.dicomInstances, 12)
+        XCTAssertEqual(result.records.count, 1)
+        let record = try XCTUnwrap(result.records.first)
+        XCTAssertEqual(record.seriesUID, "series-fast")
+        XCTAssertEqual(record.instanceCount, 12)
+        XCTAssertEqual(record.filePaths.count, 12)
+        XCTAssertEqual(record.patientID, "MRN-F")
+    }
+
+    func testPACSDirectoryIndexerBuildsPathDerivedArchiveWorklist() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pacs-path-derived-\(UUID().uuidString)", isDirectory: true)
+        let seriesDir = root
+            .appendingPathComponent("manifest-test/TCGA-LUSC/TCGA-60-2696/05-02-2002-NA-PETCT Body/4.000000-PET AC-69195",
+                                    isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: seriesDir, withIntermediateDirectories: true)
+
+        for i in 0..<8 {
+            try Data().write(to: seriesDir.appendingPathComponent("1-\(String(format: "%03d", i)).dcm"))
+        }
+
+        let result = PACSDirectoryIndexer.scan(
+            url: root,
+            progressStride: 10,
+            seriesDirectoryFastPath: true,
+            fastPathMinimumDICOMFilesPerDirectory: 8,
+            pathDerivedFastPathFileThreshold: 1
+        )
+
+        XCTAssertFalse(result.cancelled)
+        XCTAssertEqual(result.scannedFiles, 8)
+        XCTAssertEqual(result.dicomInstances, 8)
+        XCTAssertEqual(result.records.count, 1)
+        let record = try XCTUnwrap(result.records.first)
+        XCTAssertEqual(record.modality, "PT")
+        XCTAssertEqual(record.patientID, "TCGA-60-2696")
+        XCTAssertEqual(record.patientName, "TCGA-60-2696")
+        XCTAssertEqual(record.studyDescription, "05-02-2002-NA-PETCT Body")
+        XCTAssertEqual(record.studyDate, "20020502")
+        XCTAssertEqual(record.seriesDescription, "PET AC")
+        XCTAssertEqual(record.filePaths.count, 8)
     }
 
     @MainActor
@@ -1953,6 +2052,48 @@ final class GeometryAndIOTests: XCTestCase {
         })
         XCTAssertEqual(matchedFixtureStudy.preferredAnatomicalSeriesForPETCT?.seriesDescription, "CTres")
         XCTAssertEqual(matchedFixtureStudy.preferredPETSeriesForPETCT?.seriesDescription, "SUV")
+    }
+
+    func testNCIAPETArchiveIndexingScaleSmoke() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard env["TRACER_RUN_NCIA_DATASET_TESTS"] == "1" else {
+            throw XCTSkip("Set TRACER_RUN_NCIA_DATASET_TESTS=1 to run the local NCIA PET archive scale smoke.")
+        }
+
+        let rootPath = env["TRACER_NCIA_DATASET_ROOT"]
+            ?? "/Users/ahmedabdelrahman/Desktop/Datasets/PET all 10 16 ncia"
+        let root = URL(fileURLWithPath: rootPath, isDirectory: true)
+        guard FileManager.default.fileExists(atPath: root.path) else {
+            throw XCTSkip("NCIA PET archive not found at \(root.path)")
+        }
+
+        let start = Date()
+        let progressUpdates = LockedCounter()
+        let result = PACSDirectoryIndexer.scan(
+            url: root,
+            progressStride: 50_000,
+            seriesDirectoryFastPath: true,
+            progress: { update in
+                if update.phase == .scanning, update.scannedFiles > 0 {
+                    progressUpdates.increment()
+                    let line = "NCIA progress: \(update.scannedFiles) files, \(update.indexedSeries) series\n"
+                    FileHandle.standardError.write(Data(line.utf8))
+                }
+            }
+        )
+        let elapsed = Date().timeIntervalSince(start)
+        print("NCIA scale index: \(result.records.count) series, \(result.scannedFiles) files, \(result.dicomInstances) DICOM, \(String(format: "%.2f", elapsed))s")
+
+        XCTAssertFalse(result.cancelled)
+        XCTAssertGreaterThanOrEqual(result.scannedFiles, 1_000_000)
+        XCTAssertGreaterThanOrEqual(result.dicomInstances, 1_000_000)
+        XCTAssertGreaterThan(result.records.count, 500)
+        XCTAssertGreaterThan(progressUpdates.value, 0)
+
+        let studies = PACSWorklistStudy.grouped(from: result.records)
+        XCTAssertGreaterThan(studies.count, 250)
+        XCTAssertTrue(studies.contains { $0.series.contains { Modality.normalize($0.modality) == .PT } })
+        XCTAssertTrue(studies.contains { $0.series.contains { Modality.normalize($0.modality) == .CT } })
     }
 
     func testVolumeResamplerUsesWorldGeometry() {
@@ -5423,6 +5564,10 @@ private final class LockedCounter: @unchecked Sendable {
     func set(_ v: Int) {
         lock.withLock { _value = v }
     }
+
+    func increment() {
+        lock.withLock { _value += 1 }
+    }
 }
 
 private func makeMinimalDICOM(patientName: String,
@@ -5519,8 +5664,30 @@ private extension Data {
         appendUInt16LE(UInt16(length))
     }
 
+    mutating func appendDICOMUndefinedLengthSequence(group: UInt16,
+                                                     element: UInt16) {
+        appendUInt16LE(group)
+        appendUInt16LE(element)
+        append("SQ".data(using: .ascii)!)
+        appendUInt16LE(0)
+        appendUInt32LE(0xFFFFFFFF)
+        appendUInt16LE(0xFFFE)
+        appendUInt16LE(0xE000)
+        appendUInt32LE(0)
+        appendUInt16LE(0xFFFE)
+        appendUInt16LE(0xE0DD)
+        appendUInt32LE(0)
+    }
+
     mutating func appendUInt16LE(_ value: UInt16) {
         append(UInt8(value & 0xFF))
         append(UInt8((value >> 8) & 0xFF))
+    }
+
+    mutating func appendUInt32LE(_ value: UInt32) {
+        append(UInt8(value & 0xFF))
+        append(UInt8((value >> 8) & 0xFF))
+        append(UInt8((value >> 16) & 0xFF))
+        append(UInt8((value >> 24) & 0xFF))
     }
 }

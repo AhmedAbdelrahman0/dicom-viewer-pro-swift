@@ -1173,6 +1173,7 @@ public final class ViewerViewModel: ObservableObject {
 
         let scanResult = await Task.detached(priority: .userInitiated) {
             PACSDirectoryIndexer.scan(url: url,
+                                      progressStride: 5_000,
                                       isCancelled: isCancelled,
                                       progress: progressHandler)
         }.value
