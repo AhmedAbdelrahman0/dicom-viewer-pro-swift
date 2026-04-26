@@ -99,6 +99,11 @@ public struct ModelManagerPanel: View {
                 } label: {
                     Label("Import from disk…", systemImage: "square.and.arrow.down")
                 }
+                Button {
+                    vm.adoptSegmentatorLesionTracer()
+                } label: {
+                    Label("Adopt LesionTracer", systemImage: "link.badge.plus")
+                }
                 #endif
                 Spacer()
             }
@@ -168,6 +173,7 @@ public struct ModelManagerPanel: View {
             HStack {
                 if model.kind != .remoteArtifact,
                    model.sourceURL != nil,
+                   !model.existsLocally,
                    downloader.status(for: model.id) != .completed(sizeBytes: model.sizeBytes) {
                     Button {
                         Task { await vm.download(model) }
@@ -191,10 +197,12 @@ public struct ModelManagerPanel: View {
                     } label: {
                         Label("Remove from registry", systemImage: "minus.circle")
                     }
-                    Button(role: .destructive) {
-                        vm.remove(model, deleteFiles: true)
-                    } label: {
-                        Label("Remove + delete files", systemImage: "trash")
+                    if !isLinkedExternalModel(model) {
+                        Button(role: .destructive) {
+                            vm.remove(model, deleteFiles: true)
+                        } label: {
+                            Label("Remove + delete files", systemImage: "trash")
+                        }
                     }
                 } label: {
                     Image(systemName: "ellipsis")
@@ -301,6 +309,12 @@ public struct ModelManagerPanel: View {
         case .pythonScript:   return "terminal"
         case .remoteArtifact: return "network"
         }
+    }
+
+    private func isLinkedExternalModel(_ model: TracerModel) -> Bool {
+        model.kind == .nnunetDataset
+            && model.sourceURL?.isFileURL == true
+            && model.sourceURL?.path == model.localPath
     }
 }
 

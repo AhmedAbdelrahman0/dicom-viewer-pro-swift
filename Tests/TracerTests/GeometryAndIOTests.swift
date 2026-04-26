@@ -19,6 +19,32 @@ final class GeometryAndIOTests: XCTestCase {
         XCTFail("Timed out waiting for volume operation", file: file, line: line)
     }
 
+    private func makeFakeNNUnetModelFolder(root: URL,
+                                           datasetID: String = "Dataset222_AutoPETIII_2024") throws -> URL {
+        let modelFolder = root
+            .appendingPathComponent(datasetID, isDirectory: true)
+            .appendingPathComponent("autoPET3_Trainer__nnUNetResEncUNetLPlansMultiTalent__3d_fullres_bs3", isDirectory: true)
+        try FileManager.default.createDirectory(at: modelFolder, withIntermediateDirectories: true)
+
+        let datasetJSON = """
+        {
+          "channel_names": { "0": "CT", "1": "CT" },
+          "labels": { "background": 0, "tumor": 1 },
+          "file_ending": ".nii.gz"
+        }
+        """
+        try Data(datasetJSON.utf8).write(to: modelFolder.appendingPathComponent("dataset.json"))
+        try Data("{}".utf8).write(to: modelFolder.appendingPathComponent("plans.json"))
+
+        for fold in ["0", "1"] {
+            let foldDir = modelFolder.appendingPathComponent("fold_\(fold)", isDirectory: true)
+            try FileManager.default.createDirectory(at: foldDir, withIntermediateDirectories: true)
+            try Data("checkpoint".utf8).write(to: foldDir.appendingPathComponent("checkpoint_final.pth"))
+        }
+
+        return modelFolder
+    }
+
     func testVolumeWorldVoxelRoundTripUsesDirection() {
         let direction = simd_double3x3(
             SIMD3<Double>(0, 1, 0),
@@ -2528,6 +2554,106 @@ final class GeometryAndIOTests: XCTestCase {
         )
 
         XCTAssertEqual(located, fakeBinary.path)
+    }
+
+    func testNNUnetRunnerFindsModelFolderPredictSiblingFromOverride() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("nnunet-path-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let predict = dir.appendingPathComponent("nnUNetv2_predict")
+        let fromModelFolder = dir.appendingPathComponent("nnUNetv2_predict_from_modelfolder")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: predict)
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: fromModelFolder)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: predict.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fromModelFolder.path)
+
+        let located = NNUnetRunner.locatePredictBinary(
+            override: predict.path,
+            environment: ["PATH": "", "HOME": "/tmp/does-not-exist"],
+            binaryName: "nnUNetv2_predict_from_modelfolder"
+        )
+
+        XCTAssertEqual(located, fromModelFolder.path)
+    }
+
+    func testNNUnetModelInspectorRecognisesTrainedModelFolder() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("nnunet-model-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let modelFolder = try makeFakeNNUnetModelFolder(root: root)
+
+        let artifact = try NNUnetModelInspector.inspect(modelFolder)
+
+        XCTAssertEqual(artifact.datasetID, "Dataset222_AutoPETIII_2024")
+        XCTAssertEqual(artifact.trainerName, "autoPET3_Trainer")
+        XCTAssertEqual(artifact.configuration, "3d_fullres")
+        XCTAssertEqual(artifact.folds, ["0", "1"])
+        XCTAssertEqual(artifact.labelNames[1], "tumor")
+    }
+
+    @MainActor
+    func testModelManagerLinksExternalNNUnetFolderWithoutCopying() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("nnunet-model-\(UUID().uuidString)", isDirectory: true)
+        let storeRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracer-store-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: storeRoot)
+        }
+        let modelFolder = try makeFakeNNUnetModelFolder(root: root)
+        let store = TracerModelStore(rootURL: storeRoot)
+        let vm = ModelManagerViewModel(store: store)
+
+        let model = try XCTUnwrap(vm.registerExternalNNUnetFolder(
+            modelFolder,
+            bindTo: "LesionTracer-AutoPETIII"
+        ))
+        _ = vm.registerExternalNNUnetFolder(modelFolder)
+
+        XCTAssertEqual(model.localPath, modelFolder.path)
+        XCTAssertEqual(model.boundCatalogEntryIDs, ["LesionTracer-AutoPETIII"])
+        XCTAssertEqual(store.models.count, 1)
+        XCTAssertEqual(store.models.first?.localPath, modelFolder.path)
+        XCTAssertEqual(store.models.first?.boundCatalogEntryIDs, ["LesionTracer-AutoPETIII"])
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: store.directory(for: model.id).appendingPathComponent(modelFolder.lastPathComponent).path
+        ))
+    }
+
+    func testPETLesionPostprocessorRemovesLowSUVComponent() throws {
+        let pet = ImageVolume(
+            pixels: [1.0, 1.2, 0.0, 4.0, 5.0],
+            depth: 1, height: 1, width: 5,
+            spacing: (1, 1, 1),
+            modality: "PT"
+        )
+        let map = LabelMap(parentSeriesUID: pet.seriesUID, depth: 1, height: 1, width: 5)
+        map.classes = [LabelClass(labelID: 1, name: "tumor", category: .tumor, color: .red)]
+        map.voxels = [1, 1, 0, 1, 1]
+
+        let result = try PETLesionPostprocessor.filterComponentsBySUV(
+            labelMap: map,
+            petSUVVolume: pet,
+            minimumSUV: 2.5,
+            minimumVolumeML: 0
+        )
+
+        XCTAssertEqual(result.keptComponents, 1)
+        XCTAssertEqual(result.removedComponents, 1)
+        XCTAssertEqual(map.voxels, [0, 0, 0, 1, 1])
+    }
+
+    func testPETSegmentationProfilesMapToExpectedInferenceOptions() {
+        XCTAssertTrue(PETEngineViewModel.SegmentationProfile.fast.disableTTA)
+        XCTAssertFalse(PETEngineViewModel.SegmentationProfile.fast.useFullEnsemble)
+        XCTAssertFalse(PETEngineViewModel.SegmentationProfile.accurate.disableTTA)
+        XCTAssertFalse(PETEngineViewModel.SegmentationProfile.accurate.useFullEnsemble)
+        XCTAssertFalse(PETEngineViewModel.SegmentationProfile.maxSensitivity.disableTTA)
+        XCTAssertTrue(PETEngineViewModel.SegmentationProfile.maxSensitivity.useFullEnsemble)
+        XCTAssertTrue(PETEngineViewModel.SegmentationProfile.maxSensitivity.applySUVAttention)
     }
 
     // MARK: - Recent volumes store

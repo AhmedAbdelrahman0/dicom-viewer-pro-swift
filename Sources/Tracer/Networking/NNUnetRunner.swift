@@ -14,7 +14,9 @@ import Foundation
 ///      `<caseID>_0000.nii.gz` (nnU-Net's required "channel-0" convention;
 ///      single-modality models expect one file per case).
 ///   2. Invokes `nnUNetv2_predict -i <inDir> -o <outDir> -d <datasetID>`
-///      `-c <configuration> -f <foldsCSV> [-chk <checkpoint>] --disable_tta`.
+///      `-c <configuration> -f <foldsCSV> [-chk <checkpoint>] --disable_tta`,
+///      or `nnUNetv2_predict_from_modelfolder` when a concrete model folder
+///      is configured.
 ///   3. Reads the resulting `<caseID>.nii.gz` label file back into a `LabelMap`.
 ///   4. Optionally re-maps label IDs to human-readable class names using the
 ///      model's `dataset.json` labels.
@@ -36,6 +38,15 @@ public final class NNUnetRunner: @unchecked Sendable {
         public var resultsDir: URL?
         public var rawDir: URL?
         public var preprocessedDir: URL?
+
+        /// Direct trained-model folder override. Useful for exported models
+        /// and legacy bundles whose folder name contains the trainer/plans/
+        /// configuration, such as `autoPET3_Trainer__...__3d_fullres_bs3`.
+        public var modelFolder: URL?
+
+        /// Extra environment for the subprocess. Used sparingly, mainly to
+        /// prepend a bundled nnU-Net package to PYTHONPATH for custom trainers.
+        public var additionalEnvironment: [String: String] = [:]
 
         /// Inference configuration: `"3d_fullres"`, `"3d_lowres"`, `"2d"`, or
         /// `"3d_cascade_fullres"`.
@@ -60,6 +71,10 @@ public final class NNUnetRunner: @unchecked Sendable {
 
         public init(predictBinaryPath: String? = nil,
                     resultsDir: URL? = nil,
+                    rawDir: URL? = nil,
+                    preprocessedDir: URL? = nil,
+                    modelFolder: URL? = nil,
+                    additionalEnvironment: [String: String] = [:],
                     configuration: String = "3d_fullres",
                     folds: [String] = ["0"],
                     checkpoint: String? = nil,
@@ -68,6 +83,10 @@ public final class NNUnetRunner: @unchecked Sendable {
                     timeoutSeconds: TimeInterval? = nil) {
             self.predictBinaryPath = predictBinaryPath
             self.resultsDir = resultsDir
+            self.rawDir = rawDir
+            self.preprocessedDir = preprocessedDir
+            self.modelFolder = modelFolder
+            self.additionalEnvironment = additionalEnvironment
             self.configuration = configuration
             self.folds = folds
             self.checkpoint = checkpoint
@@ -89,7 +108,7 @@ public final class NNUnetRunner: @unchecked Sendable {
         public var errorDescription: String? {
             switch self {
             case .binaryNotFound:
-                return "nnUNetv2_predict was not found. Install it with `pip install nnunetv2` in a reachable Python environment."
+                return "nnU-Net CLI was not found. Install nnunetv2 in a reachable Python environment, including `nnUNetv2_predict` and `nnUNetv2_predict_from_modelfolder`."
             case .cancelled:
                 return "nnU-Net inference was cancelled."
             case .missingOutput(let path):
@@ -132,13 +151,23 @@ public final class NNUnetRunner: @unchecked Sendable {
     /// `nnUNetv2_predict`. Returns the absolute path when found.
     public static func locatePredictBinary(
         override: String? = nil,
-        environment: [String: String] = ProcessInfo.processInfo.environment
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        binaryName: String = "nnUNetv2_predict"
     ) -> String? {
         let fm = FileManager.default
         if let override = override?.trimmingCharacters(in: .whitespacesAndNewlines),
            !override.isEmpty {
             let expanded = (override as NSString).expandingTildeInPath
-            return fm.isExecutableFile(atPath: expanded) ? expanded : nil
+            let overrideURL = URL(fileURLWithPath: expanded)
+            if fm.isExecutableFile(atPath: expanded),
+               overrideURL.lastPathComponent == binaryName {
+                return expanded
+            }
+            let sibling = overrideURL.deletingLastPathComponent().appendingPathComponent(binaryName).path
+            if fm.isExecutableFile(atPath: sibling) {
+                return sibling
+            }
+            return binaryName == "nnUNetv2_predict" && fm.isExecutableFile(atPath: expanded) ? expanded : nil
         }
 
         var candidates: [String] = []
@@ -150,7 +179,6 @@ public final class NNUnetRunner: @unchecked Sendable {
             candidates.append(expanded)
         }
 
-        let binaryName = "nnUNetv2_predict"
         let pathDirs = (environment["PATH"] ?? "")
             .split(separator: ":")
             .map(String.init)
@@ -160,14 +188,14 @@ public final class NNUnetRunner: @unchecked Sendable {
 
         let home = environment["HOME"] ?? NSHomeDirectory()
         [
-            "/opt/homebrew/bin/nnUNetv2_predict",
-            "/usr/local/bin/nnUNetv2_predict",
-            "/usr/bin/nnUNetv2_predict",
-            "\(home)/miniforge3/envs/nnunet/bin/nnUNetv2_predict",
-            "\(home)/miniconda3/envs/nnunet/bin/nnUNetv2_predict",
-            "\(home)/mambaforge/envs/nnunet/bin/nnUNetv2_predict",
-            "\(home)/.conda/envs/nnunet/bin/nnUNetv2_predict",
-            "\(home)/.venv/bin/nnUNetv2_predict",
+            "/opt/homebrew/bin/\(binaryName)",
+            "/usr/local/bin/\(binaryName)",
+            "/usr/bin/\(binaryName)",
+            "\(home)/miniforge3/envs/nnunet/bin/\(binaryName)",
+            "\(home)/miniconda3/envs/nnunet/bin/\(binaryName)",
+            "\(home)/mambaforge/envs/nnunet/bin/\(binaryName)",
+            "\(home)/.conda/envs/nnunet/bin/\(binaryName)",
+            "\(home)/.venv/bin/\(binaryName)",
         ].forEach(appendCandidate)
 
         for path in candidates where fm.isExecutableFile(atPath: path) {
@@ -177,7 +205,10 @@ public final class NNUnetRunner: @unchecked Sendable {
     }
 
     public func isAvailable() -> Bool {
-        Self.locatePredictBinary(override: configuration.predictBinaryPath) != nil
+        Self.locatePredictBinary(
+            override: configuration.predictBinaryPath,
+            binaryName: requiredBinaryName
+        ) != nil
     }
 
     // MARK: - Cancellation
@@ -237,7 +268,8 @@ public final class NNUnetRunner: @unchecked Sendable {
         }
 
         guard let binary = Self.locatePredictBinary(
-            override: configuration.predictBinaryPath
+            override: configuration.predictBinaryPath,
+            binaryName: requiredBinaryName
         ) else {
             throw RunError.binaryNotFound
         }
@@ -260,13 +292,26 @@ public final class NNUnetRunner: @unchecked Sendable {
         }
 
         // Build the command.
-        var args: [String] = [
-            "-i", inDir.path,
-            "-o", outDir.path,
-            "-d", datasetID,
-            "-c", configuration.configuration,
-            "-f"
-        ] + configuration.folds
+        var args: [String]
+        if let modelFolder = configuration.modelFolder {
+            args = [
+                "-i", inDir.path,
+                "-o", outDir.path,
+                "-m", modelFolder.path
+            ]
+            if !configuration.folds.isEmpty {
+                args.append("-f")
+                args.append(contentsOf: configuration.folds)
+            }
+        } else {
+            args = [
+                "-i", inDir.path,
+                "-o", outDir.path,
+                "-d", datasetID,
+                "-c", configuration.configuration,
+                "-f"
+            ] + configuration.folds
+        }
 
         if let chk = configuration.checkpoint, !chk.isEmpty {
             args.append(contentsOf: ["-chk", chk])
@@ -298,16 +343,20 @@ public final class NNUnetRunner: @unchecked Sendable {
         labelMap.name = "nnU-Net · \(datasetID)"
 
         // If a `dataset.json` sits next to the model, pull its label names.
-        if let resultsDir = configuration.resultsDir {
-            let datasetJSON = resultsDir
+        let datasetJSONs: [URL] = [
+            configuration.modelFolder?.appendingPathComponent("dataset.json"),
+            configuration.resultsDir?
                 .appendingPathComponent(datasetID)
                 .appendingPathComponent("dataset.json")
+        ].compactMap { $0 }
+        for datasetJSON in datasetJSONs {
             if let names = try? parseDatasetLabelNames(at: datasetJSON) {
                 for (idx, cls) in labelMap.classes.enumerated() {
                     if let name = names[Int(cls.labelID)] {
                         labelMap.classes[idx].name = name
                     }
                 }
+                break
             }
         }
 
@@ -317,6 +366,12 @@ public final class NNUnetRunner: @unchecked Sendable {
     }
 
     // MARK: - Subprocess plumbing
+
+    private var requiredBinaryName: String {
+        configuration.modelFolder == nil
+            ? "nnUNetv2_predict"
+            : "nnUNetv2_predict_from_modelfolder"
+    }
 
     static func gridMismatchDescription(_ channel: ImageVolume,
                                         reference: ImageVolume,
@@ -362,6 +417,16 @@ public final class NNUnetRunner: @unchecked Sendable {
 
         // Forward nnU-Net_results if configured.
         var env = ProcessInfo.processInfo.environment
+        for (key, value) in configuration.additionalEnvironment {
+            if key == "PYTHONPATH",
+               let existing = env["PYTHONPATH"],
+               !existing.isEmpty,
+               !value.contains(existing) {
+                env[key] = "\(value):\(existing)"
+            } else {
+                env[key] = value
+            }
+        }
         if let r = configuration.resultsDir?.path { env["nnUNet_results"] = r }
         if let r = configuration.rawDir?.path { env["nnUNet_raw"] = r }
         if let r = configuration.preprocessedDir?.path { env["nnUNet_preprocessed"] = r }

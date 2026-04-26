@@ -78,8 +78,9 @@ public final class ModelManagerViewModel: ObservableObject {
 
     #if canImport(AppKit)
     /// Pick an existing file/folder on disk and copy it into the store
-    /// under a fresh model id. Used for CoreML packages / GGUFs / tree JSONs
-    /// the user already downloaded out-of-band.
+    /// under a fresh model id. Large nnU-Net folders are registered in
+    /// place instead, because copying multi-GB checkpoint directories would
+    /// waste disk and can look like a frozen app.
     public func importFromDisk() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
@@ -93,6 +94,11 @@ public final class ModelManagerViewModel: ObservableObject {
         let displayName = newDisplayName.isEmpty
             ? url.deletingPathExtension().lastPathComponent
             : newDisplayName
+
+        if inferredKind == .nnunetDataset || (try? NNUnetModelInspector.inspect(url)) != nil {
+            registerExternalNNUnetFolder(url, displayNameOverride: displayName)
+            return
+        }
 
         var model = TracerModel(
             displayName: displayName,
@@ -125,6 +131,62 @@ public final class ModelManagerViewModel: ObservableObject {
 
     public func cancelDownload(_ model: TracerModel) {
         downloader.cancel(modelID: model.id)
+    }
+
+    @discardableResult
+    public func registerExternalNNUnetFolder(_ url: URL,
+                                             bindTo catalogEntryID: String? = nil,
+                                             displayNameOverride: String? = nil) -> TracerModel? {
+        do {
+            let artifact = try NNUnetModelInspector.inspect(url)
+            let modelID = Self.externalNNUnetModelID(for: artifact)
+            var bindings = store.model(id: modelID)?.boundCatalogEntryIDs ?? []
+            if let catalogEntryID, !bindings.contains(catalogEntryID) {
+                bindings.append(catalogEntryID)
+            }
+            let displayName = displayNameOverride?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                ? displayNameOverride!.trimmingCharacters(in: .whitespacesAndNewlines)
+                : artifact.displayName
+            let foldList = artifact.folds.joined(separator: ", ")
+            let noteLines = [
+                newNotes.trimmingCharacters(in: .whitespacesAndNewlines),
+                "External nnU-Net folder: \(artifact.modelFolder.path)",
+                "Dataset: \(artifact.datasetID); trainer: \(artifact.trainerName); plans: \(artifact.plansName); folds: \(foldList)",
+                artifact.bundledPythonRoot.map { "Bundled nnU-Net package: \($0.path)" } ?? ""
+            ].filter { !$0.isEmpty }
+
+            let model = TracerModel(
+                id: modelID,
+                displayName: displayName,
+                kind: .nnunetDataset,
+                sourceURL: artifact.modelFolder,
+                localPath: artifact.modelFolder.path,
+                sizeBytes: artifact.sizeBytes,
+                license: newLicense.isEmpty ? "External / user-provided" : newLicense,
+                notes: noteLines.joined(separator: "\n"),
+                boundCatalogEntryIDs: bindings
+            )
+            let saved = store.add(model)
+            statusMessage = "Linked \(displayName) without copying \(Self.formatSize(artifact.sizeBytes))."
+            clearForm()
+            return saved
+        } catch {
+            statusMessage = "Could not link nnU-Net folder: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    @discardableResult
+    public func adoptSegmentatorLesionTracer() -> TracerModel? {
+        guard let artifact = NNUnetModelInspector.knownSegmentatorLesionTracerArtifact() else {
+            statusMessage = "Could not find the PET Segmentator LesionTracer model folder."
+            return nil
+        }
+        return registerExternalNNUnetFolder(
+            artifact.modelFolder,
+            bindTo: "LesionTracer-AutoPETIII",
+            displayNameOverride: "LesionTracer AutoPET III (PET Segmentator)"
+        )
     }
 
     public func remove(_ model: TracerModel, deleteFiles: Bool) {
@@ -204,9 +266,33 @@ public final class ModelManagerViewModel: ObservableObject {
         if ext == "zip" || lower.contains("monai") {
             return .monaiBundle
         }
-        if lower.hasPrefix("dataset") {
+        if lower.hasPrefix("dataset")
+            || lower == "lesiontracer_model"
+            || lower.contains("__nnunet")
+            || lower.contains("_trainer__") {
             return .nnunetDataset
         }
         return .coreML
+    }
+
+    private static func externalNNUnetModelID(for artifact: NNUnetModelInspector.Artifact) -> String {
+        let base = [
+            "external",
+            artifact.datasetID,
+            artifact.trainerName,
+            artifact.configuration
+        ].joined(separator: "-")
+        return sanitizeIdentifier(base)
+    }
+
+    private static func sanitizeIdentifier(_ raw: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        let scalars = raw.unicodeScalars.map { scalar -> Character in
+            allowed.contains(scalar) ? Character(scalar) : "-"
+        }
+        let collapsed = String(scalars)
+            .split(separator: "-", omittingEmptySubsequences: true)
+            .joined(separator: "-")
+        return collapsed.isEmpty ? UUID().uuidString : collapsed
     }
 }
