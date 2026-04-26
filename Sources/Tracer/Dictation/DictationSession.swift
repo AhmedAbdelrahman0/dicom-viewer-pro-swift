@@ -36,6 +36,18 @@ public final class DictationSession: ObservableObject {
     public let capture: AudioCapture
     private(set) var engine: DictationEngine
 
+    /// Optional report binding. When set, finalised dictation sentences
+    /// are routed to `report.appendSentence(_:to:activeSection)` and the
+    /// macro engine is consulted for trigger detection. The session still
+    /// publishes `finalTranscript` so existing callers / tests don't have
+    /// to know about the report layer.
+    public weak var reportStore: RadiologyReportStore?
+    public var macros: MacroEngine = MacroEngine()
+    /// Section incoming sentences land in. Defaults to `.findings`; the
+    /// command parser updates this when the user dictates ".section
+    /// impression" / "section impression".
+    @Published public var activeSection: ReportSection.Kind = .findings
+
     private var captureTask: Task<Void, Never>?
     private var eventTask: Task<Void, Never>?
 
@@ -159,7 +171,7 @@ public final class DictationSession: ObservableObject {
         switch event {
         case .partial(let text, _):
             partialTranscript = text
-        case .final(let text, _):
+        case .final(let text, let confidence):
             // Engines vary on whether they re-emit the whole utterance
             // or just the delta. Apple Speech sends the cumulative
             // utterance — we replace the partial then append it as a
@@ -171,11 +183,88 @@ public final class DictationSession: ObservableObject {
                 finalTranscript.append(" ")
             }
             finalTranscript.append(text)
+            routeFinal(text: text, confidence: confidence)
         case .idle:
             partialTranscript = ""
             inputLevel = 0
         case .error(let message):
             statusMessage = message
+        }
+    }
+
+    /// Send a finalised utterance into the report buffer if one is bound.
+    /// Three early-exit branches:
+    ///   1. No report bound → just keep `finalTranscript` (legacy mode).
+    ///   2. Looks like a section command ("section impression") → switch
+    ///      the active section, don't write anything yet.
+    ///   3. Starts with a macro trigger → expand and append.
+    /// Otherwise the text becomes a single dictated sentence in the
+    /// active section.
+    private func routeFinal(text: String, confidence: Double?) {
+        guard let store = reportStore else { return }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        if let target = Self.parseSectionCommand(trimmed) {
+            activeSection = target
+            statusMessage = "Section: \(target.rawValue)"
+            return
+        }
+
+        if let (macro, remainder) = macros.detectTrigger(in: trimmed) {
+            let macroRef = macro
+            store.applyMutation { current in
+                self.macros.apply(macroRef, to: current)
+            }
+            if !remainder.isEmpty {
+                let extra = ReportSentence(
+                    text: remainder,
+                    provenance: .dictated,
+                    confidence: confidence
+                )
+                store.appendSentence(extra, to: activeSection)
+            }
+            statusMessage = "Macro: \(macro.displayName)"
+            return
+        }
+
+        let sentence = ReportSentence(
+            text: trimmed,
+            provenance: .dictated,
+            confidence: confidence
+        )
+        store.appendSentence(sentence, to: activeSection)
+    }
+
+    /// Recognise voice section-switch commands. Returns nil when the text
+    /// is normal dictation. Forms accepted (case-insensitive):
+    ///   "section impression"
+    ///   "switch to impression"
+    ///   "go to findings"
+    /// Section names match `ReportSection.Kind` raw values plus a few
+    /// common aliases ("history" → clinicalHistory).
+    /// `nonisolated` — pure string parsing, no actor state.
+    public nonisolated static func parseSectionCommand(_ raw: String) -> ReportSection.Kind? {
+        let cleaned = raw.lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: ".!?"))
+        let prefixes = ["section ", "switch to ", "go to "]
+        var body: String? = nil
+        for p in prefixes where cleaned.hasPrefix(p) {
+            body = String(cleaned.dropFirst(p.count))
+            break
+        }
+        guard let target = body?.trimmingCharacters(in: .whitespaces),
+              !target.isEmpty else { return nil }
+        switch target {
+        case "history", "clinical history": return .clinicalHistory
+        case "technique":                   return .technique
+        case "comparison":                  return .comparison
+        case "findings":                    return .findings
+        case "impression":                  return .impression
+        case "recommendations", "recommendation":
+                                            return .recommendations
+        default: return nil
         }
     }
 
