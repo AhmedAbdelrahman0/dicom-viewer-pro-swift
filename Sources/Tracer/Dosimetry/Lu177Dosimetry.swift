@@ -42,6 +42,18 @@ public enum Lu177TailModel: String, CaseIterable, Sendable {
     }
 }
 
+public enum Lu177DoseCalculationMethod: String, CaseIterable, Sendable {
+    case localDeposition
+    case monteCarloBetaTransport
+
+    public var displayName: String {
+        switch self {
+        case .localDeposition: return "Local deposition"
+        case .monteCarloBetaTransport: return "Monte Carlo beta transport"
+        }
+    }
+}
+
 public struct Lu177SPECTCalibration: Equatable, Sendable {
     public let bqPerMLPerCount: Double
     public let backgroundCounts: Double
@@ -143,27 +155,98 @@ public struct CTDensityCalibration: Equatable, Sendable {
     }
 }
 
+public struct Lu177MonteCarloOptions: Equatable, Sendable {
+    public let historiesPerSourceVoxel: Int
+    public let maxTotalHistories: Int
+    public let maximumBetaRangeMM: Double
+    public let meanBetaPathLengthMM: Double
+    public let stepLengthMM: Double
+    public let minimumSourceTIABqHoursPerML: Float
+    public let randomSeed: UInt64
+
+    public init(historiesPerSourceVoxel: Int = 64,
+                maxTotalHistories: Int = 500_000,
+                maximumBetaRangeMM: Double = 1.8,
+                meanBetaPathLengthMM: Double = 0.67,
+                stepLengthMM: Double = 0.25,
+                minimumSourceTIABqHoursPerML: Float = 0,
+                randomSeed: UInt64 = 0x177D051) throws {
+        guard historiesPerSourceVoxel > 0 else {
+            throw Lu177DosimetryError.invalidInput("Monte Carlo histories per source voxel must be positive.")
+        }
+        guard maxTotalHistories > 0 else {
+            throw Lu177DosimetryError.invalidInput("Monte Carlo history budget must be positive.")
+        }
+        guard maximumBetaRangeMM > 0, maximumBetaRangeMM.isFinite else {
+            throw Lu177DosimetryError.invalidInput("Monte Carlo beta range must be a positive finite length.")
+        }
+        guard meanBetaPathLengthMM > 0,
+              meanBetaPathLengthMM <= maximumBetaRangeMM,
+              meanBetaPathLengthMM.isFinite else {
+            throw Lu177DosimetryError.invalidInput("Monte Carlo mean beta path length must be positive, finite, and no larger than the maximum range.")
+        }
+        guard stepLengthMM > 0,
+              stepLengthMM <= maximumBetaRangeMM,
+              stepLengthMM.isFinite else {
+            throw Lu177DosimetryError.invalidInput("Monte Carlo step length must be positive, finite, and no larger than the maximum range.")
+        }
+        guard minimumSourceTIABqHoursPerML >= 0,
+              minimumSourceTIABqHoursPerML.isFinite else {
+            throw Lu177DosimetryError.invalidInput("Monte Carlo source threshold must be non-negative and finite.")
+        }
+
+        self.historiesPerSourceVoxel = historiesPerSourceVoxel
+        self.maxTotalHistories = maxTotalHistories
+        self.maximumBetaRangeMM = maximumBetaRangeMM
+        self.meanBetaPathLengthMM = meanBetaPathLengthMM
+        self.stepLengthMM = stepLengthMM
+        self.minimumSourceTIABqHoursPerML = minimumSourceTIABqHoursPerML
+        self.randomSeed = randomSeed
+    }
+
+    public static var standard: Lu177MonteCarloOptions {
+        try! Lu177MonteCarloOptions()
+    }
+}
+
 public struct Lu177DoseModel: Equatable, Sendable {
     public let name: String
+    public let calculationMethod: Lu177DoseCalculationMethod
     public let meanEnergyMeVPerDecay: Double
     public let nonLocalContributionFraction: Double
+    public let monteCarloOptions: Lu177MonteCarloOptions?
 
     public init(name: String = "Lu-177 local deposition",
+                calculationMethod: Lu177DoseCalculationMethod = .localDeposition,
                 meanEnergyMeVPerDecay: Double = 0.1479,
-                nonLocalContributionFraction: Double = 0) throws {
+                nonLocalContributionFraction: Double = 0,
+                monteCarloOptions: Lu177MonteCarloOptions? = nil) throws {
         guard meanEnergyMeVPerDecay > 0, meanEnergyMeVPerDecay.isFinite else {
             throw Lu177DosimetryError.invalidInput("Mean emitted energy must be a positive finite MeV/decay value.")
         }
         guard nonLocalContributionFraction >= 0, nonLocalContributionFraction.isFinite else {
             throw Lu177DosimetryError.invalidInput("Non-local dose contribution fraction must be non-negative and finite.")
         }
+        if calculationMethod == .monteCarloBetaTransport, monteCarloOptions == nil {
+            throw Lu177DosimetryError.invalidInput("Monte Carlo beta transport requires Monte Carlo options.")
+        }
         self.name = name
+        self.calculationMethod = calculationMethod
         self.meanEnergyMeVPerDecay = meanEnergyMeVPerDecay
         self.nonLocalContributionFraction = nonLocalContributionFraction
+        self.monteCarloOptions = monteCarloOptions
     }
 
     public static var lu177LocalDeposition: Lu177DoseModel {
         try! Lu177DoseModel()
+    }
+
+    public static var lu177MonteCarloBetaTransport: Lu177DoseModel {
+        try! Lu177DoseModel(
+            name: "Lu-177 Monte Carlo beta transport",
+            calculationMethod: .monteCarloBetaTransport,
+            monteCarloOptions: .standard
+        )
     }
 
     public var joulesPerDecay: Double {
@@ -219,6 +302,7 @@ public struct Lu177DosimetryReport: Equatable, Sendable {
     public let timePointHours: [Double]
     public let tailModel: Lu177TailModel
     public let doseModelName: String
+    public let doseCalculationMethod: Lu177DoseCalculationMethod
     public let minDoseGy: Double
     public let meanDoseGy: Double
     public let maxDoseGy: Double
@@ -264,7 +348,8 @@ public enum Lu177DosimetryEngine {
         let dosePixels = absorbedDosePixels(
             timeIntegratedActivityBqHoursPerML: tiaPixels,
             densityGPerML: densityPixels,
-            doseModel: options.doseModel
+            doseModel: options.doseModel,
+            referenceVolume: reference
         )
 
         let doseVolume = ImageVolume(
@@ -328,6 +413,7 @@ public enum Lu177DosimetryEngine {
             timePointHours: times,
             tailModel: options.tailModel,
             doseModelName: options.doseModel.name,
+            doseCalculationMethod: options.doseModel.calculationMethod,
             minDoseGy: Double(dosePixels.min() ?? 0),
             meanDoseGy: mean(dosePixels),
             maxDoseGy: Double(dosePixels.max() ?? 0),
@@ -396,14 +482,177 @@ public enum Lu177DosimetryEngine {
 
     public static func absorbedDosePixels(timeIntegratedActivityBqHoursPerML: [Float],
                                           densityGPerML: [Float],
-                                          doseModel: Lu177DoseModel = .lu177LocalDeposition) -> [Float] {
+                                          doseModel: Lu177DoseModel = .lu177LocalDeposition,
+                                          referenceVolume: ImageVolume? = nil) -> [Float] {
         guard timeIntegratedActivityBqHoursPerML.count == densityGPerML.count else { return [] }
+        if doseModel.calculationMethod == .monteCarloBetaTransport,
+           let referenceVolume,
+           let monteCarloOptions = doseModel.monteCarloOptions {
+            return monteCarloAbsorbedDosePixels(
+                timeIntegratedActivityBqHoursPerML: timeIntegratedActivityBqHoursPerML,
+                densityGPerML: densityGPerML,
+                referenceVolume: referenceVolume,
+                doseModel: doseModel,
+                options: monteCarloOptions
+            )
+        }
         return timeIntegratedActivityBqHoursPerML.indices.map { index in
             let tia = max(0, Double(timeIntegratedActivityBqHoursPerML[index]))
             let density = max(0.001, Double(densityGPerML[index]))
             let dose = tia * 3_600 * doseModel.joulesPerDecay * 1_000 / density
             return Float(dose.isFinite ? dose : 0)
         }
+    }
+
+    private static func monteCarloAbsorbedDosePixels(timeIntegratedActivityBqHoursPerML: [Float],
+                                                     densityGPerML: [Float],
+                                                     referenceVolume: ImageVolume,
+                                                     doseModel: Lu177DoseModel,
+                                                     options: Lu177MonteCarloOptions) -> [Float] {
+        guard timeIntegratedActivityBqHoursPerML.count == referenceVolume.pixels.count,
+              densityGPerML.count == referenceVolume.pixels.count else {
+            return []
+        }
+
+        let activeSources = timeIntegratedActivityBqHoursPerML.indices.filter {
+            timeIntegratedActivityBqHoursPerML[$0] > options.minimumSourceTIABqHoursPerML
+        }
+        guard !activeSources.isEmpty else {
+            return [Float](repeating: 0, count: referenceVolume.pixels.count)
+        }
+
+        let historiesPerSource = max(
+            1,
+            min(options.historiesPerSourceVoxel, options.maxTotalHistories / activeSources.count)
+        )
+        let voxelVolumeML = referenceVolume.spacing.x * referenceVolume.spacing.y * referenceVolume.spacing.z / 1_000
+        let voxelMassKG = densityGPerML.map {
+            max(0.001, Double($0)) * voxelVolumeML / 1_000
+        }
+        var depositedEnergyJ = [Double](repeating: 0, count: referenceVolume.pixels.count)
+        var generator = SeededRandom(seed: options.randomSeed)
+
+        for sourceIndex in activeSources {
+            let sourceTIA = max(0, Double(timeIntegratedActivityBqHoursPerML[sourceIndex]))
+            let sourceDecays = sourceTIA * voxelVolumeML * 3_600
+            let sourceEnergyJ = sourceDecays * doseModel.joulesPerDecay
+            guard sourceEnergyJ > 0, sourceEnergyJ.isFinite else { continue }
+
+            let energyPerHistory = sourceEnergyJ / Double(historiesPerSource)
+            let sourceVoxel = voxelCoordinate(index: sourceIndex, reference: referenceVolume)
+
+            for _ in 0..<historiesPerSource {
+                let direction = randomUnitVector(generator: &generator)
+                let rangeWaterMM = sampleBetaRangeMM(options: options, generator: &generator)
+                let targets = transportTargets(
+                    source: sourceVoxel,
+                    direction: direction,
+                    rangeWaterMM: rangeWaterMM,
+                    densityGPerML: densityGPerML,
+                    reference: referenceVolume,
+                    stepLengthMM: options.stepLengthMM
+                )
+                guard !targets.isEmpty else {
+                    depositedEnergyJ[sourceIndex] += energyPerHistory
+                    continue
+                }
+                let energyPerTarget = energyPerHistory / Double(targets.count)
+                for target in targets {
+                    depositedEnergyJ[target] += energyPerTarget
+                }
+            }
+        }
+
+        return depositedEnergyJ.indices.map { index in
+            let dose = depositedEnergyJ[index] / voxelMassKG[index]
+            return Float(dose.isFinite ? max(0, dose) : 0)
+        }
+    }
+
+    private static func transportTargets(source: (z: Int, y: Int, x: Int),
+                                         direction: SIMD3<Double>,
+                                         rangeWaterMM: Double,
+                                         densityGPerML: [Float],
+                                         reference: ImageVolume,
+                                         stepLengthMM: Double) -> [Int] {
+        let sourceIndex = voxelIndex(
+            z: source.z,
+            y: source.y,
+            x: source.x,
+            width: reference.width,
+            height: reference.height
+        )
+        guard rangeWaterMM > 0, rangeWaterMM.isFinite else { return [sourceIndex] }
+
+        var targets = [sourceIndex]
+        targets.reserveCapacity(max(1, Int(ceil(rangeWaterMM / stepLengthMM)) + 1))
+        let sourcePositionMM = SIMD3<Double>(
+            Double(source.x) * reference.spacing.x,
+            Double(source.y) * reference.spacing.y,
+            Double(source.z) * reference.spacing.z
+        )
+        var waterEquivalentMM = 0.0
+        var distanceMM = 0.0
+
+        while waterEquivalentMM < rangeWaterMM {
+            distanceMM += stepLengthMM
+            let position = sourcePositionMM + direction * distanceMM
+            guard let target = voxelIndex(
+                physicalPositionMM: position,
+                reference: reference
+            ) else {
+                break
+            }
+            targets.append(target)
+            waterEquivalentMM += stepLengthMM * max(0.001, Double(densityGPerML[target]))
+        }
+
+        return targets
+    }
+
+    private static func sampleBetaRangeMM(options: Lu177MonteCarloOptions,
+                                          generator: inout SeededRandom) -> Double {
+        let exponent = max(0.001, options.maximumBetaRangeMM / options.meanBetaPathLengthMM - 1)
+        let u = max(generator.nextUnitDouble(), Double.leastNonzeroMagnitude)
+        return options.maximumBetaRangeMM * pow(u, exponent)
+    }
+
+    private static func randomUnitVector(generator: inout SeededRandom) -> SIMD3<Double> {
+        let z = 2 * generator.nextUnitDouble() - 1
+        let phi = 2 * Double.pi * generator.nextUnitDouble()
+        let radius = sqrt(max(0, 1 - z * z))
+        return SIMD3<Double>(
+            radius * cos(phi),
+            radius * sin(phi),
+            z
+        )
+    }
+
+    private static func voxelCoordinate(index: Int,
+                                        reference: ImageVolume) -> (z: Int, y: Int, x: Int) {
+        let plane = reference.height * reference.width
+        let z = index / plane
+        let remainder = index - z * plane
+        let y = remainder / reference.width
+        let x = remainder - y * reference.width
+        return (z, y, x)
+    }
+
+    private static func voxelIndex(physicalPositionMM: SIMD3<Double>,
+                                   reference: ImageVolume) -> Int? {
+        let x = Int(round(physicalPositionMM.x / reference.spacing.x))
+        let y = Int(round(physicalPositionMM.y / reference.spacing.y))
+        let z = Int(round(physicalPositionMM.z / reference.spacing.z))
+        guard x >= 0, x < reference.width,
+              y >= 0, y < reference.height,
+              z >= 0, z < reference.depth else {
+            return nil
+        }
+        return voxelIndex(z: z, y: y, x: x, width: reference.width, height: reference.height)
+    }
+
+    private static func voxelIndex(z: Int, y: Int, x: Int, width: Int, height: Int) -> Int {
+        z * height * width + y * width + x
     }
 
     private static func validateAndSort(_ timePoints: [Lu177DosimetryTimePoint]) throws -> [Lu177DosimetryTimePoint] {
@@ -533,12 +782,24 @@ public enum Lu177DosimetryEngine {
     private static func warningsForWorkflow(timePoints: [Lu177DosimetryTimePoint],
                                             hasCT: Bool,
                                             options: Lu177DosimetryOptions) -> [String] {
-        var warnings = [
-            "Lu-177 absorbed dose map uses a local-deposition model, not voxel S-values or Monte Carlo transport.",
-            "Clinical use requires site-specific SPECT calibration, recovery correction, registration QA, and medical physicist review."
-        ]
+        var warnings: [String]
+        switch options.doseModel.calculationMethod {
+        case .localDeposition:
+            warnings = [
+                "Lu-177 absorbed dose map uses a local-deposition model, not voxel S-values or Monte Carlo transport.",
+                "Clinical use requires site-specific SPECT calibration, recovery correction, registration QA, and medical physicist review."
+            ]
+        case .monteCarloBetaTransport:
+            warnings = [
+                "Lu-177 absorbed dose map uses native stochastic beta transport; it is not a substitute for a commissioned Geant4/GATE or other clinically validated Monte Carlo engine.",
+                "Clinical use requires site-specific SPECT calibration, recovery correction, registration QA, transport validation, and medical physicist review."
+            ]
+        }
         if !hasCT {
             warnings.append("No CT density map was supplied; all voxels were treated as water-density tissue.")
+        }
+        if let monteCarlo = options.doseModel.monteCarloOptions {
+            warnings.append("Monte Carlo settings: \(monteCarlo.historiesPerSourceVoxel) histories/source voxel, \(monteCarlo.maxTotalHistories) history budget, seed \(monteCarlo.randomSeed).")
         }
         if timePoints.count == 1 {
             warnings.append("Only one SPECT time point was supplied; time integration uses the configured tail model without measured clearance.")
@@ -556,5 +817,19 @@ public enum Lu177DosimetryEngine {
 
     private static func close(_ lhs: Double, _ rhs: Double, _ tolerance: Double) -> Bool {
         abs(lhs - rhs) <= tolerance
+    }
+
+    private struct SeededRandom {
+        private var state: UInt64
+
+        init(seed: UInt64) {
+            self.state = seed == 0 ? 0x177D051 : seed
+        }
+
+        mutating func nextUnitDouble() -> Double {
+            state = state &* 6364136223846793005 &+ 1442695040888963407
+            let value = state >> 11
+            return Double(value) / Double(1 << 53)
+        }
     }
 }

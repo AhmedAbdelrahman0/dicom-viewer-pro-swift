@@ -58,6 +58,108 @@ final class Lu177DosimetryTests: XCTestCase {
         )
     }
 
+    func testMonteCarloDoseTransportSpreadsDoseBeyondSourceVoxel() throws {
+        var tia = [Float](repeating: 0, count: 5 * 5 * 5)
+        let centerIndex = 2 * 5 * 5 + 2 * 5 + 2
+        tia[centerIndex] = 10_000
+        let density = [Float](repeating: 1, count: tia.count)
+        let reference = makeVolume(
+            pixels: [Float](repeating: 0, count: tia.count),
+            modality: "NM",
+            depth: 5,
+            height: 5,
+            width: 5,
+            spacing: (1, 1, 1)
+        )
+        let localModel = try Lu177DoseModel(meanEnergyMeVPerDecay: 1)
+        let monteCarloOptions = try Lu177MonteCarloOptions(
+            historiesPerSourceVoxel: 4_000,
+            maxTotalHistories: 4_000,
+            maximumBetaRangeMM: 2.8,
+            meanBetaPathLengthMM: 1.4,
+            stepLengthMM: 0.5,
+            randomSeed: 42
+        )
+        let monteCarloModel = try Lu177DoseModel(
+            name: "Test Monte Carlo",
+            calculationMethod: .monteCarloBetaTransport,
+            meanEnergyMeVPerDecay: 1,
+            monteCarloOptions: monteCarloOptions
+        )
+
+        let local = Lu177DosimetryEngine.absorbedDosePixels(
+            timeIntegratedActivityBqHoursPerML: tia,
+            densityGPerML: density,
+            doseModel: localModel,
+            referenceVolume: reference
+        )
+        let monteCarlo = Lu177DosimetryEngine.absorbedDosePixels(
+            timeIntegratedActivityBqHoursPerML: tia,
+            densityGPerML: density,
+            doseModel: monteCarloModel,
+            referenceVolume: reference
+        )
+
+        let neighborIndices = [
+            centerIndex - 1,
+            centerIndex + 1,
+            centerIndex - 5,
+            centerIndex + 5,
+            centerIndex - 25,
+            centerIndex + 25
+        ]
+        let neighborDose = neighborIndices.reduce(Float(0)) { $0 + monteCarlo[$1] }
+        XCTAssertEqual(local.filter { $0 > 0 }.count, 1)
+        XCTAssertGreaterThan(neighborDose, 0)
+        XCTAssertLessThan(monteCarlo[centerIndex], local[centerIndex])
+    }
+
+    func testMonteCarloWorkflowLabelsReportAndWarnings() throws {
+        var pixels = [Float](repeating: 0, count: 3 * 3 * 3)
+        pixels[13] = 100
+        let spect0 = makeVolume(pixels: pixels, modality: "NM", depth: 3, height: 3, width: 3, spacing: (1, 1, 1))
+        let spect1 = makeVolume(pixels: pixels, modality: "NM", depth: 3, height: 3, width: 3, spacing: (1, 1, 1))
+        let points = [
+            try Lu177DosimetryTimePoint(activityVolume: spect0, hoursPostAdministration: 0),
+            try Lu177DosimetryTimePoint(activityVolume: spect1, hoursPostAdministration: 1)
+        ]
+        let monteCarloModel = try Lu177DoseModel(
+            name: "Lu-177 native MC",
+            calculationMethod: .monteCarloBetaTransport,
+            monteCarloOptions: try Lu177MonteCarloOptions(
+                historiesPerSourceVoxel: 128,
+                maxTotalHistories: 128,
+                maximumBetaRangeMM: 1.5,
+                meanBetaPathLengthMM: 0.75,
+                stepLengthMM: 0.5,
+                randomSeed: 7
+            )
+        )
+        let options = try Lu177DosimetryOptions(
+            tailModel: .noTail,
+            doseModel: monteCarloModel
+        )
+
+        let result = try Lu177DosimetryEngine.createAbsorbedDoseMap(
+            timePoints: points,
+            options: options
+        )
+
+        XCTAssertEqual(result.report.doseCalculationMethod, .monteCarloBetaTransport)
+        XCTAssertEqual(result.report.doseModelName, "Lu-177 native MC")
+        XCTAssertTrue(result.report.warnings.contains { $0.contains("native stochastic beta transport") })
+        XCTAssertTrue(result.report.warnings.contains { $0.contains("histories/source voxel") })
+    }
+
+    func testMonteCarloDoseModelRequiresMonteCarloOptions() {
+        XCTAssertThrowsError(try Lu177DoseModel(calculationMethod: .monteCarloBetaTransport)) { error in
+            XCTAssertEqual(
+                error as? Lu177DosimetryError,
+                .invalidInput("Monte Carlo beta transport requires Monte Carlo options.")
+            )
+        }
+    }
+
     func testCountCalibrationConvertsSpectCountsToActivityConcentration() throws {
         let calibration = try Lu177SPECTCalibration(
             bqPerMLPerCount: 2,
