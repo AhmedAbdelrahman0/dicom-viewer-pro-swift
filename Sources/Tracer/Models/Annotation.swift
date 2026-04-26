@@ -1,12 +1,12 @@
 import Foundation
 import CoreGraphics
 
-public enum AnnotationType: String, CaseIterable {
+public enum AnnotationType: String, CaseIterable, Codable, Sendable {
     case distance, angle, area, ellipse, text
 }
 
-public struct Annotation: Identifiable {
-    public let id = UUID()
+public struct Annotation: Identifiable, Codable, Equatable, Sendable {
+    public let id: UUID
     public var type: AnnotationType
     public var points: [CGPoint]   // in slice pixel coordinates
     public var axis: Int
@@ -15,10 +15,12 @@ public struct Annotation: Identifiable {
     public var unit: String = "mm"
     public var label: String = ""
 
-    public init(type: AnnotationType,
+    public init(id: UUID = UUID(),
+                type: AnnotationType,
                 points: [CGPoint] = [],
                 axis: Int = 2,
                 sliceIndex: Int = 0) {
+        self.id = id
         self.type = type
         self.points = points
         self.axis = axis

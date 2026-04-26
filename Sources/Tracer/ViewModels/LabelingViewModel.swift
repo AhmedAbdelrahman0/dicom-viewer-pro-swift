@@ -163,6 +163,22 @@ public final class LabelingViewModel: ObservableObject {
         hasUnsavedChanges = true
     }
 
+    public func replaceLabelMapsForStudySession(_ maps: [LabelMap]) {
+        labelMaps = maps
+        activeLabelMap = maps.first
+        if let firstClass = maps.first?.classes.first {
+            activeClassID = firstClass.labelID
+        } else {
+            activeClassID = 1
+        }
+        labelingTool = .none
+        clearHistory()
+        hasUnsavedChanges = false
+        for map in maps {
+            map.objectWillChange.send()
+        }
+    }
+
     public func beginVoxelEdit(named name: String) {
         guard activeEditBaseline == nil, let map = activeLabelMap else { return }
         activeEditBaseline = (map.id, name, map.voxels)
@@ -339,6 +355,53 @@ public final class LabelingViewModel: ObservableObject {
                             radius: brushRadius, classID: activeClassID,
                             mode: erase ? .erase : .paint)
         if ownsEdit { commitVoxelEdit() } else { hasUnsavedChanges = true }
+        map.objectWillChange.send()
+    }
+
+    public func fillFreehandContour(axis: Int,
+                                    sliceIndex: Int,
+                                    points: [CGPoint],
+                                    erase: Bool = false,
+                                    recordUndo: Bool = true) {
+        guard points.count >= 3, let map = activeLabelMap else { return }
+        let bounds = sliceDimensions(axis: axis, labelMap: map)
+        let polygon = simplifiedPolygon(points, width: bounds.width, height: bounds.height)
+        guard polygon.count >= 3 else { return }
+        let ownsEdit = recordUndo && activeEditBaseline == nil
+        if ownsEdit { beginVoxelEdit(named: erase ? "Erase freehand ROI" : "Freehand ROI") }
+        let minX = max(0, Int(floor(polygon.map(\.x).min() ?? 0)))
+        let maxX = min(bounds.width - 1, Int(ceil(polygon.map(\.x).max() ?? 0)))
+        let minY = max(0, Int(floor(polygon.map(\.y).min() ?? 0)))
+        let maxY = min(bounds.height - 1, Int(ceil(polygon.map(\.y).max() ?? 0)))
+        guard minX <= maxX, minY <= maxY else {
+            if ownsEdit { cancelVoxelEdit() }
+            return
+        }
+        let fillValue: UInt16 = erase ? 0 : activeClassID
+        for y in minY...maxY {
+            for x in minX...maxX where pointInsidePolygon(x: Double(x) + 0.5,
+                                                          y: Double(y) + 0.5,
+                                                          polygon: polygon) {
+                setSlicePixel(map: map, axis: axis, sliceIndex: sliceIndex,
+                              pixelX: x, pixelY: y, value: fillValue)
+            }
+        }
+        for index in polygon.indices {
+            let a = polygon[index]
+            let b = polygon[(index + 1) % polygon.count]
+            BrushTool.paintLine(label: map,
+                                axis: axis,
+                                sliceIndex: sliceIndex,
+                                fromX: Int(a.x.rounded()),
+                                fromY: Int(a.y.rounded()),
+                                toX: Int(b.x.rounded()),
+                                toY: Int(b.y.rounded()),
+                                radius: max(1, brushRadius / 2),
+                                classID: activeClassID,
+                                mode: erase ? .erase : .paint)
+        }
+        if ownsEdit { commitVoxelEdit() } else { hasUnsavedChanges = true }
+        map.markRenderContentChanged()
         map.objectWillChange.send()
     }
 
@@ -540,6 +603,74 @@ public final class LabelingViewModel: ObservableObject {
         case 1: return (z: pixelY, y: sliceIndex, x: pixelX)
         default: return (z: sliceIndex, y: pixelY, x: pixelX)
         }
+    }
+
+    private func sliceDimensions(axis: Int, labelMap: LabelMap) -> (width: Int, height: Int) {
+        switch axis {
+        case 0: return (labelMap.height, labelMap.depth)
+        case 1: return (labelMap.width, labelMap.depth)
+        default: return (labelMap.width, labelMap.height)
+        }
+    }
+
+    private func simplifiedPolygon(_ points: [CGPoint], width: Int, height: Int) -> [CGPoint] {
+        var polygon: [CGPoint] = []
+        polygon.reserveCapacity(points.count)
+        var previous: CGPoint?
+        for point in points {
+            let x = min(max(point.x, 0), CGFloat(max(0, width - 1)))
+            let y = min(max(point.y, 0), CGFloat(max(0, height - 1)))
+            let clamped = CGPoint(x: x, y: y)
+            if let previous,
+               hypot(previous.x - clamped.x, previous.y - clamped.y) < 0.75 {
+                continue
+            }
+            polygon.append(clamped)
+            previous = clamped
+        }
+        if let first = polygon.first,
+           let last = polygon.last,
+           hypot(first.x - last.x, first.y - last.y) < 0.75 {
+            polygon.removeLast()
+        }
+        return polygon
+    }
+
+    private func pointInsidePolygon(x: Double, y: Double, polygon: [CGPoint]) -> Bool {
+        var inside = false
+        var j = polygon.count - 1
+        for i in polygon.indices {
+            let xi = Double(polygon[i].x)
+            let yi = Double(polygon[i].y)
+            let xj = Double(polygon[j].x)
+            let yj = Double(polygon[j].y)
+            let denominator = yj - yi
+            guard abs(denominator) > 1e-12 else {
+                j = i
+                continue
+            }
+            let intersects = ((yi > y) != (yj > y)) &&
+                (x < (xj - xi) * (y - yi) / denominator + xi)
+            if intersects { inside.toggle() }
+            j = i
+        }
+        return inside
+    }
+
+    private func setSlicePixel(map: LabelMap,
+                               axis: Int,
+                               sliceIndex: Int,
+                               pixelX: Int,
+                               pixelY: Int,
+                               value: UInt16) {
+        let voxel = voxelCoordForClick(axis: axis,
+                                       sliceIndex: sliceIndex,
+                                       pixelX: pixelX,
+                                       pixelY: pixelY)
+        guard voxel.z >= 0, voxel.z < map.depth,
+              voxel.y >= 0, voxel.y < map.height,
+              voxel.x >= 0, voxel.x < map.width else { return }
+        map.voxels[map.index(z: voxel.z, y: voxel.y, x: voxel.x)] = value
     }
 
     // MARK: - Quick Lesion (sphere seed) tool
@@ -861,7 +992,7 @@ public struct LabelImportResult {
 }
 
 public enum LabelingTool: String, CaseIterable, Identifiable, Sendable {
-    case none, brush, eraser, threshold, suvGradient, regionGrow, landmark, lesionSphere
+    case none, brush, eraser, freehand, threshold, suvGradient, regionGrow, landmark, lesionSphere
 
     public var id: String { rawValue }
     public var displayName: String {
@@ -869,6 +1000,7 @@ public enum LabelingTool: String, CaseIterable, Identifiable, Sendable {
         case .none:         return "—"
         case .brush:        return "Brush"
         case .eraser:       return "Eraser"
+        case .freehand:     return "Freehand"
         case .threshold:    return "Threshold"
         case .suvGradient:  return "SUV Gradient"
         case .regionGrow:   return "Region Grow"
@@ -881,6 +1013,7 @@ public enum LabelingTool: String, CaseIterable, Identifiable, Sendable {
         case .none:         return "hand.point.up"
         case .brush:        return "paintbrush.pointed"
         case .eraser:       return "eraser"
+        case .freehand:     return "lasso"
         case .threshold:    return "thermometer.medium"
         case .suvGradient:  return "waveform.path.ecg"
         case .regionGrow:   return "drop"
@@ -902,6 +1035,11 @@ public enum LabelingTool: String, CaseIterable, Identifiable, Sendable {
         case .eraser:
             return "Eraser\n"
                  + "Click and drag to erase voxels back to background (label 0)."
+        case .freehand:
+            return "Freehand ROI\n"
+                 + "Drag a closed contour around anatomy or lesion uptake.\n"
+                 + "Release to fill the polygon on the current slice with\n"
+                 + "the active label class."
         case .threshold:
             return "Threshold / SUV Segmentation\n"
                  + "• Click 'Apply' to segment the whole volume by fixed intensity\n"

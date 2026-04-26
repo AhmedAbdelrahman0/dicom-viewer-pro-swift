@@ -174,6 +174,9 @@ private struct WLTab: View {
             }
             .buttonStyle(.borderedProminent)
 
+            Divider()
+            StudySessionPanel()
+
             Spacer()
         }
     }
@@ -1429,6 +1432,107 @@ private struct FusionTab: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .disabled(vm.isVolumeOperationRunning)
+            }
+
+            Divider()
+            StudySessionPanel()
+        }
+    }
+}
+
+private struct StudySessionPanel: View {
+    @EnvironmentObject var vm: ViewerViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Study Sessions")
+                    .font(.system(size: 11, weight: .semibold))
+                Spacer()
+                if let active = vm.activeStudySession {
+                    Text(active.name)
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+            }
+
+            HStack(spacing: 6) {
+                Button {
+                    vm.saveCurrentStudySession()
+                } label: {
+                    Label("Save", systemImage: "tray.and.arrow.down")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(vm.currentVolume == nil)
+
+                Button {
+                    vm.newStudyMeasurementSession()
+                } label: {
+                    Label("New", systemImage: "plus.rectangle.on.rectangle")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(vm.currentVolume == nil)
+            }
+
+            if vm.studySessions.isEmpty {
+                Text("Save a session to reopen measurements, ROIs, volume reports, and label metadata with this study.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else {
+                VStack(spacing: 6) {
+                    ForEach(vm.studySessions) { session in
+                        HStack(spacing: 8) {
+                            Toggle("", isOn: Binding(
+                                get: { session.visible },
+                                set: { vm.setStudySessionVisibility(id: session.id, visible: $0) }
+                            ))
+                            .labelsHidden()
+                            .toggleStyle(.checkbox)
+                            .help(session.visible ? "Hide this session overlay" : "Show this session overlay")
+
+                            Button {
+                                vm.openStudySession(id: session.id)
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: vm.activeStudySessionID == session.id ? "checkmark.circle.fill" : "circle")
+                                        .foregroundColor(vm.activeStudySessionID == session.id ? TracerTheme.accent : .secondary)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(session.name)
+                                            .font(.system(size: 11, weight: .medium))
+                                            .lineLimit(1)
+                                        Text(session.summary)
+                                            .font(.system(size: 10))
+                                            .foregroundColor(.secondary)
+                                            .lineLimit(1)
+                                    }
+                                    Spacer(minLength: 0)
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+
+                            Menu {
+                                Button(role: .destructive) {
+                                    vm.deleteStudySession(id: session.id)
+                                } label: {
+                                    Label("Delete Session", systemImage: "trash")
+                                }
+                            } label: {
+                                Image(systemName: "ellipsis.circle")
+                            }
+                            .menuStyle(.borderlessButton)
+                            .frame(width: 24)
+                        }
+                        .padding(6)
+                        .background(vm.activeStudySessionID == session.id ? TracerTheme.accent.opacity(0.10) : Color.clear)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                }
             }
         }
     }

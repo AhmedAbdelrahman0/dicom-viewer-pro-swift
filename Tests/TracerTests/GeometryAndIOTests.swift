@@ -3224,6 +3224,209 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(vm.labeling.labelingTool, .none)
     }
 
+    @MainActor
+    func testViewerLabelingToolSelectionCreatesWritableLabelMap() {
+        let vm = ViewerViewModel()
+        let ct = makeTestVolume(modality: "CT", description: "CT", width: 6, height: 6, depth: 2)
+        vm.displayVolume(ct)
+
+        vm.setActiveLabelingTool(.freehand)
+
+        XCTAssertEqual(vm.activeTool, .wl)
+        XCTAssertEqual(vm.labeling.labelingTool, .freehand)
+        XCTAssertNotNil(vm.labeling.activeLabelMap)
+        XCTAssertEqual(vm.labeling.activeLabelMap?.parentSeriesUID, ct.seriesUID)
+        XCTAssertNotNil(vm.labeling.activeLabelMap?.classInfo(id: vm.labeling.activeClassID))
+    }
+
+    @MainActor
+    func testFreehandContourFillsActiveSliceAndSupportsUndo() throws {
+        let volume = makeTestVolume(modality: "CT", description: "CT", width: 8, height: 8, depth: 2)
+        let vm = ViewerViewModel()
+        vm.displayVolume(volume)
+        vm.ensureActiveLabelMap(for: volume)
+
+        vm.labeling.fillFreehandContour(
+            axis: 2,
+            sliceIndex: 1,
+            points: [
+                CGPoint(x: 2, y: 2),
+                CGPoint(x: 5, y: 2),
+                CGPoint(x: 5, y: 5),
+                CGPoint(x: 2, y: 5)
+            ]
+        )
+
+        let map = try XCTUnwrap(vm.labeling.activeLabelMap)
+        XCTAssertGreaterThan(map.voxels.filter { $0 == vm.labeling.activeClassID }.count, 0)
+        XCTAssertEqual(map.value(z: 0, y: 3, x: 3), 0)
+        XCTAssertEqual(map.value(z: 1, y: 3, x: 3), vm.labeling.activeClassID)
+        XCTAssertTrue(vm.labeling.undoDepth > 0)
+
+        vm.labeling.undo()
+        XCTAssertEqual(map.voxels.filter { $0 == vm.labeling.activeClassID }.count, 0)
+    }
+
+    func testStudySessionStoreRoundTripsMeasurementsVolumesAndLabels() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracer-study-session-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = StudySessionStore(rootURL: root)
+        let volume = makeTestVolume(modality: "PT", description: "PET", width: 4, height: 4, depth: 2)
+        let map = LabelMap(parentSeriesUID: volume.seriesUID,
+                           depth: volume.depth,
+                           height: volume.height,
+                           width: volume.width,
+                           name: "Lesions",
+                           classes: [LabelClass(labelID: 1, name: "Tumor", category: .lesion, color: .orange)])
+        map.setValue(1, z: 1, y: 1, x: 1)
+        var annotation = Annotation(type: .distance,
+                                    points: [CGPoint(x: 0, y: 0), CGPoint(x: 3, y: 0)],
+                                    axis: 2,
+                                    sliceIndex: 1)
+        annotation.value = 3
+        annotation.unit = "mm"
+        let report = VolumeMeasurementReport(
+            source: .petSUV,
+            method: .activeLabel,
+            className: "Tumor",
+            voxelCount: 1,
+            volumeMM3: 1,
+            mean: 5,
+            min: 5,
+            max: 5,
+            std: 0,
+            suvMax: 5,
+            suvMean: 5,
+            suvPeak: 5,
+            tlg: 0.005,
+            thresholdSummary: "Active label"
+        )
+        let session = StudyMeasurementSession(
+            name: "Reader A",
+            annotations: [annotation],
+            volumeReports: [report],
+            labelMaps: [StudySessionLabelMap(map)],
+            metadata: ["intent": "staging"]
+        )
+        let key = StudySessionStore.studyKey(for: [volume])
+        let bundle = StudySessionStore.makeBundleMetadata(
+            studyKey: key,
+            volumes: [volume],
+            sessions: [session],
+            activeSessionID: session.id
+        )
+
+        try store.saveBundle(bundle)
+        let loaded = try XCTUnwrap(store.loadBundle(studyKey: key))
+
+        XCTAssertEqual(loaded.sessions.count, 1)
+        XCTAssertEqual(loaded.sessions[0].annotations.first?.value, 3)
+        XCTAssertEqual(loaded.sessions[0].volumeReports.first?.suvMax, 5)
+        XCTAssertEqual(loaded.sessions[0].metadata["intent"], "staging")
+        let restoredMap = try XCTUnwrap(loaded.sessions[0].labelMaps.first?.makeLabelMap())
+        XCTAssertEqual(restoredMap.value(z: 1, y: 1, x: 1), 1)
+        XCTAssertEqual(restoredMap.classInfo(id: 1)?.name, "Tumor")
+    }
+
+    func testPACSArchiveRootStorePersistsAndDeduplicatesIndexedRoots() throws {
+        let suiteName = "TracerTests.ArchiveRoots.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracer-archive-root-\(UUID().uuidString)", isDirectory: true)
+        let patientA = root.appendingPathComponent("PatientA", isDirectory: true)
+        let patientB = root.appendingPathComponent("PatientB", isDirectory: true)
+        try FileManager.default.createDirectory(at: patientA, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: patientB, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let store = PACSArchiveRootStore(defaults: defaults, key: "roots")
+        let indexedAt = Date(timeIntervalSince1970: 10_000)
+        let ct = makeIndexedSnapshot(path: patientA.appendingPathComponent("ct.nii.gz").path,
+                                     modality: "CT",
+                                     seriesDescription: "CT",
+                                     studyDescription: "Study A")
+        let pet = makeIndexedSnapshot(path: patientB.appendingPathComponent("pet.nii.gz").path,
+                                      modality: "PT",
+                                      seriesDescription: "PET",
+                                      studyDescription: "Study B")
+
+        store.rememberIndexedDirectory(url: root, records: [ct, pet], indexedAt: indexedAt)
+        var loaded = store.load()
+        XCTAssertEqual(loaded.count, 1)
+        XCTAssertEqual(loaded[0].seriesCount, 2)
+        XCTAssertEqual(loaded[0].studyCount, 2)
+        XCTAssertEqual(loaded[0].lastIndexedAt, indexedAt)
+        XCTAssertTrue(loaded[0].contains(path: pet.filePaths[0]))
+        XCTAssertFalse(loaded[0].contains(path: "/tmp/not-this-archive/pet.nii.gz"))
+
+        store.rememberIndexedDirectory(url: root, records: [ct], indexedAt: indexedAt.addingTimeInterval(60))
+        loaded = store.load()
+        XCTAssertEqual(loaded.count, 1)
+        XCTAssertEqual(loaded[0].seriesCount, 1)
+        XCTAssertEqual(loaded[0].studyCount, 1)
+    }
+
+    @MainActor
+    func testViewerReloadsSavedArchiveRootsAcrossInstances() throws {
+        let suiteName = "TracerTests.ViewerArchiveRoots.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracer-viewer-archive-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let archiveStore = PACSArchiveRootStore(defaults: defaults, key: "roots")
+        let vm = ViewerViewModel(studySessionStore: StudySessionStore(rootURL: root.appendingPathComponent("sessions", isDirectory: true)),
+                                 archiveRootStore: archiveStore)
+        vm.rememberArchiveDirectory(url: root)
+        XCTAssertEqual(vm.savedArchiveRoots.count, 1)
+
+        let reloaded = ViewerViewModel(studySessionStore: StudySessionStore(rootURL: root.appendingPathComponent("other-sessions", isDirectory: true)),
+                                       archiveRootStore: archiveStore)
+        XCTAssertEqual(reloaded.savedArchiveRoots.first?.path, PACSArchiveRoot.canonicalPath(for: root))
+    }
+
+    @MainActor
+    func testViewerStudySessionsOpenSeparatelyAndControlVisibility() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracer-vm-session-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let vm = ViewerViewModel(studySessionStore: StudySessionStore(rootURL: root))
+        let volume = makeTestVolume(modality: "CT", description: "CT", width: 6, height: 6, depth: 2)
+        vm.displayVolume(volume)
+
+        vm.addAnnotation(Annotation(type: .distance,
+                                    points: [CGPoint(x: 0, y: 0), CGPoint(x: 1, y: 0)],
+                                    axis: 2,
+                                    sliceIndex: 1))
+        vm.saveCurrentStudySession(named: "Baseline")
+        let baselineID = try XCTUnwrap(vm.activeStudySessionID)
+
+        vm.newStudyMeasurementSession()
+        vm.addAnnotation(Annotation(type: .distance,
+                                    points: [CGPoint(x: 0, y: 0), CGPoint(x: 2, y: 0)],
+                                    axis: 2,
+                                    sliceIndex: 1))
+        vm.saveCurrentStudySession(named: "Follow-up")
+        let followupID = try XCTUnwrap(vm.activeStudySessionID)
+
+        XCTAssertEqual(vm.studySessions.count, 2)
+        XCTAssertEqual(vm.visibleAnnotations.count, 2)
+
+        vm.setStudySessionVisibility(id: followupID, visible: false)
+        XCTAssertEqual(vm.visibleAnnotations.count, 1)
+
+        vm.openStudySession(id: baselineID)
+        XCTAssertEqual(vm.activeStudySession?.name, "Baseline")
+        XCTAssertEqual(vm.annotations.count, 1)
+        XCTAssertEqual(vm.annotations.first?.points.last?.x, 1)
+    }
+
     func testDynamicStudyBuilderUsesMatchingNuclearFrames() throws {
         let frameA = ImageVolume(
             pixels: [1, 2, 3, 4],

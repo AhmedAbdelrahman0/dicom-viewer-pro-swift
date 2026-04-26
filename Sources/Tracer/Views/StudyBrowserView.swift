@@ -42,7 +42,8 @@ struct StudyBrowserView: View {
     @State private var searchText: String = ""
     @State private var indexedSeries: [PACSIndexedSeriesSnapshot] = []
     @State private var indexedTotalCount: Int = 0
-    @State private var indexFetchLimit: Int = 25_000
+    @State private var indexFetchLimit: Int = 1_000
+    @State private var worklistDisplayLimit: Int = 300
     @State private var statusFilter: WorklistStatusFilter = .all
     @State private var modalityFilter: String = "All"
     @State private var dateFilter: WorklistDateFilter = .all
@@ -54,7 +55,8 @@ struct StudyBrowserView: View {
     @State private var fileBrowserEntries: [LocalFileBrowserEntry] = []
     @State private var fileBrowserError: String?
 
-    private let indexPageSize = 25_000
+    private let indexPageSize = 1_000
+    private let worklistDisplayPageSize = 300
     private let statusDefaultsKey = "Tracer.WorklistStudyStatuses"
 
     var body: some View {
@@ -84,13 +86,20 @@ struct StudyBrowserView: View {
         .background(TracerTheme.worklistGradient)
         .task {
             loadStatusOverrides()
+            vm.reloadSavedArchiveRoots()
             reloadIndexResults()
         }
         .onChange(of: searchText) { _, _ in
             indexFetchLimit = indexPageSize
+            worklistDisplayLimit = worklistDisplayPageSize
             reloadIndexResults()
         }
+        .onChange(of: statusFilter) { _, _ in worklistDisplayLimit = worklistDisplayPageSize }
+        .onChange(of: modalityFilter) { _, _ in worklistDisplayLimit = worklistDisplayPageSize }
+        .onChange(of: dateFilter) { _, _ in worklistDisplayLimit = worklistDisplayPageSize }
+        .onChange(of: archiveFilterID) { _, _ in worklistDisplayLimit = worklistDisplayPageSize }
         .onChange(of: vm.indexRevision) { _, _ in
+            vm.reloadSavedArchiveRoots()
             reloadIndexResults()
         }
         // Accept DICOM files / directories / NIfTI files dropped from Finder.
@@ -353,7 +362,7 @@ struct StudyBrowserView: View {
         case .worklist:
             return "\(filteredWorklistStudies.count) studies · \(indexedTotalCount) series"
         case .archives:
-            return "\(filteredArchiveScopes.count) folders · \(worklistStudies.count) studies"
+            return "\(vm.savedArchiveRoots.count) roots · \(worklistStudies.count) studies"
         case .viewer:
             return "\(vm.loadedVolumes.count) volumes · \(vm.loadedSeries.count) scanned"
         }
@@ -411,7 +420,30 @@ struct StudyBrowserView: View {
             .controlSize(.small)
 
             if archiveFilterID != PACSArchiveScope.allID,
-               let scope = archiveScopes.first(where: { $0.id == archiveFilterID }) {
+               let root = selectedSavedArchiveRoot {
+                HStack(spacing: 6) {
+                    Image(systemName: "externaldrive.connected.to.line.below")
+                        .foregroundColor(TracerTheme.accentBright)
+                    Text(root.displayName)
+                        .font(.system(size: 10, weight: .medium))
+                        .lineLimit(1)
+                    Spacer()
+                    Button {
+                        archiveFilterID = PACSArchiveScope.allID
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Clear archive filter")
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(TracerTheme.panelRaised)
+                )
+            } else if archiveFilterID != PACSArchiveScope.allID,
+                      let scope = archiveScopes.first(where: { $0.id == archiveFilterID }) {
                 HStack(spacing: 6) {
                     Image(systemName: "folder")
                         .foregroundColor(TracerTheme.accent)
@@ -539,7 +571,7 @@ struct StudyBrowserView: View {
         List {
             if !filteredWorklistStudies.isEmpty {
                 Section("Studies") {
-                    ForEach(filteredWorklistStudies) { study in
+                    ForEach(displayedWorklistStudies) { study in
                         DisclosureGroup(isExpanded: expansionBinding(for: study.id)) {
                             WorklistStudyActions(
                                 study: study,
@@ -579,6 +611,18 @@ struct StudyBrowserView: View {
                         }
                     }
 
+                    if filteredWorklistStudies.count > displayedWorklistStudies.count {
+                        Button {
+                            worklistDisplayLimit += worklistDisplayPageSize
+                        } label: {
+                            Label("Show more studies (\(displayedWorklistStudies.count)/\(filteredWorklistStudies.count))",
+                                  systemImage: "chevron.down.circle")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+
                     if indexedTotalCount > indexedSeries.count {
                         Button {
                             indexFetchLimit += indexPageSize
@@ -606,6 +650,43 @@ struct StudyBrowserView: View {
 
     private var archivesContent: some View {
         List {
+            if !filteredSavedArchiveRoots.isEmpty {
+                Section("Saved Archives") {
+                    ForEach(filteredSavedArchiveRoots) { root in
+                        Button {
+                            showSavedArchiveRoot(root)
+                        } label: {
+                            SavedArchiveRootRow(root: root)
+                        }
+                        .buttonStyle(.plain)
+                        .contextMenu {
+                            Button {
+                                showSavedArchiveRoot(root)
+                            } label: {
+                                Label("Show Indexed Studies", systemImage: "list.clipboard")
+                            }
+                            Button {
+                                browseSavedArchiveRoot(root)
+                            } label: {
+                                Label("Browse Directory", systemImage: "folder")
+                            }
+                            .disabled(!root.exists)
+                            Button {
+                                indexSavedArchiveRoot(root)
+                            } label: {
+                                Label("Refresh Index", systemImage: "arrow.clockwise")
+                            }
+                            .disabled(!root.exists || vm.isIndexing)
+                            Button(role: .destructive) {
+                                forgetSavedArchiveRoot(root)
+                            } label: {
+                                Label("Forget Directory", systemImage: "minus.circle")
+                            }
+                        }
+                    }
+                }
+            }
+
             if !availableLocalArchiveShortcuts.isEmpty {
                 Section("Local Datasets") {
                     ForEach(availableLocalArchiveShortcuts) { shortcut in
@@ -646,7 +727,7 @@ struct StudyBrowserView: View {
                         }
                     }
                 }
-            } else {
+            } else if filteredSavedArchiveRoots.isEmpty && availableLocalArchiveShortcuts.isEmpty {
                 EmptyBrowserRow(
                     systemImage: "externaldrive.connected.to.line.below",
                     title: "No indexed archives",
@@ -733,9 +814,12 @@ struct StudyBrowserView: View {
 
     private var filteredWorklistStudies: [PACSWorklistStudy] {
         worklistStudies.filter {
-            if archiveFilterID != PACSArchiveScope.allID,
-               PACSArchiveScope.scopeID(for: $0) != archiveFilterID {
-                return false
+            if archiveFilterID != PACSArchiveScope.allID {
+                if let root = selectedSavedArchiveRoot {
+                    guard study($0, belongsTo: root) else { return false }
+                } else if PACSArchiveScope.scopeID(for: $0) != archiveFilterID {
+                    return false
+                }
             }
             return $0.matches(
                 searchText: searchText,
@@ -746,12 +830,29 @@ struct StudyBrowserView: View {
         }
     }
 
+    private var displayedWorklistStudies: [PACSWorklistStudy] {
+        Array(filteredWorklistStudies.prefix(worklistDisplayLimit))
+    }
+
     private var archiveScopes: [PACSArchiveScope] {
         PACSArchiveScope.grouped(from: worklistStudies)
     }
 
     private var availableLocalArchiveShortcuts: [LocalArchiveShortcut] {
         LocalArchiveShortcut.known.filter(\.exists)
+    }
+
+    private var selectedSavedArchiveRoot: PACSArchiveRoot? {
+        vm.savedArchiveRoots.first { $0.scopeID == archiveFilterID }
+    }
+
+    private var filteredSavedArchiveRoots: [PACSArchiveRoot] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !query.isEmpty else { return vm.savedArchiveRoots }
+        return vm.savedArchiveRoots.filter { root in
+            root.displayName.lowercased().contains(query)
+            || root.path.lowercased().contains(query)
+        }
     }
 
     private var filteredArchiveScopes: [PACSArchiveScope] {
@@ -795,6 +896,15 @@ struct StudyBrowserView: View {
             $0.name.localizedCaseInsensitiveContains(query)
             || $0.kindLabel.localizedCaseInsensitiveContains(query)
             || $0.url.path.localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    private func study(_ study: PACSWorklistStudy, belongsTo root: PACSArchiveRoot) -> Bool {
+        study.series.contains { series in
+            if root.contains(path: series.sourcePath) {
+                return true
+            }
+            return series.filePaths.contains { root.contains(path: $0) }
         }
     }
 
@@ -884,6 +994,39 @@ struct StudyBrowserView: View {
         }
     }
 
+    private func showSavedArchiveRoot(_ root: PACSArchiveRoot) {
+        archiveFilterID = root.scopeID
+        worklistDisplayLimit = worklistDisplayPageSize
+        browserMode = .worklist
+    }
+
+    private func browseSavedArchiveRoot(_ root: PACSArchiveRoot) {
+        guard root.exists else {
+            vm.statusMessage = "Saved directory is no longer available: \(root.path)"
+            return
+        }
+        vm.rememberArchiveDirectory(url: root.url)
+        setFileBrowserDirectory(root.url)
+        browserMode = .viewer
+    }
+
+    private func indexSavedArchiveRoot(_ root: PACSArchiveRoot) {
+        guard root.exists, !vm.isIndexing else { return }
+        browserMode = .archives
+        vm.statusMessage = "Refreshing index for \(root.displayName)..."
+        Task { @MainActor in
+            await vm.indexDirectory(url: root.url, modelContext: modelContext)
+            reloadIndexResults()
+        }
+    }
+
+    private func forgetSavedArchiveRoot(_ root: PACSArchiveRoot) {
+        vm.forgetArchiveDirectory(id: root.id)
+        if archiveFilterID == root.scopeID {
+            archiveFilterID = PACSArchiveScope.allID
+        }
+    }
+
     private func openFileBrowserRootPanel() {
         #if os(macOS)
         let panel = NSOpenPanel()
@@ -893,6 +1036,7 @@ struct StudyBrowserView: View {
         panel.prompt = "Browse"
         panel.message = "Choose a study archive, patient folder, or DICOM directory to browse inside Tracer."
         if panel.runModal() == .OK, let url = panel.url {
+            vm.rememberArchiveDirectory(url: url)
             setFileBrowserDirectory(url)
             browserMode = .viewer
         }
@@ -1557,6 +1701,59 @@ private struct LocalArchiveShortcutRow: View {
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundColor(.secondary)
                     .lineLimit(1)
+            }
+
+            Spacer(minLength: 6)
+
+            Image(systemName: "chevron.right")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(.secondary)
+        }
+        .padding(.vertical, 3)
+    }
+}
+
+private struct SavedArchiveRootRow: View {
+    let root: PACSArchiveRoot
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: root.exists ? "externaldrive.connected.to.line.below" : "externaldrive.badge.xmark")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(root.exists ? TracerTheme.accentBright : .secondary)
+                .frame(width: 20)
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(root.displayName)
+                        .font(.system(size: 12, weight: .semibold))
+                        .lineLimit(1)
+                    Spacer()
+                    if root.studyCount > 0 || root.seriesCount > 0 {
+                        Text("\(root.studyCount) studies")
+                            .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                Text(root.path)
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+
+                HStack(spacing: 8) {
+                    Text(root.exists ? "Available" : "Missing")
+                    if root.seriesCount > 0 {
+                        Text("\(root.seriesCount) series")
+                    }
+                    if let lastIndexedAt = root.lastIndexedAt {
+                        Text("Indexed \(lastIndexedAt.formatted(date: .abbreviated, time: .shortened))")
+                    } else {
+                        Text("Opened \(root.lastOpenedAt.formatted(date: .abbreviated, time: .shortened))")
+                    }
+                }
+                .font(.system(size: 9))
+                .foregroundColor(.secondary)
             }
 
             Spacer(minLength: 6)

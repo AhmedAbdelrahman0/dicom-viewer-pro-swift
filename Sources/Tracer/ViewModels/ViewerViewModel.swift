@@ -247,6 +247,9 @@ public final class ViewerViewModel: ObservableObject {
     @Published public var lastSUVROIMeasurement: SUVROIMeasurement?
     @Published public var intensityROIMeasurements: [IntensityROIMeasurement] = []
     @Published public var lastIntensityROIMeasurement: IntensityROIMeasurement?
+    @Published public private(set) var studySessions: [StudyMeasurementSession] = []
+    @Published public private(set) var activeStudySessionID: UUID?
+    @Published public private(set) var activeStudySessionKey: String?
     @Published public var dynamicStudy: DynamicImageStudy?
     @Published public var selectedDynamicFrameIndex: Int = 0
     @Published public var dynamicPlaybackFPS: Double = 2.0
@@ -333,10 +336,55 @@ public final class ViewerViewModel: ObservableObject {
     /// volumes the user has opened. Persisted across launches. Displayed as
     /// a horizontal chip row at the top of the Study Browser.
     @Published public private(set) var recentVolumes: [RecentVolume] = []
+    @Published public private(set) var savedArchiveRoots: [PACSArchiveRoot] = []
     private let recentVolumesStore = RecentVolumesStore()
+    private let studySessionStore: StudySessionStore
+    private let archiveRootStore: PACSArchiveRootStore
 
-    public init() {
+    public init(studySessionStore: StudySessionStore = StudySessionStore(),
+                archiveRootStore: PACSArchiveRootStore = PACSArchiveRootStore()) {
+        self.studySessionStore = studySessionStore
+        self.archiveRootStore = archiveRootStore
         self.recentVolumes = recentVolumesStore.load()
+        self.savedArchiveRoots = archiveRootStore.load()
+    }
+
+    public var activeStudySession: StudyMeasurementSession? {
+        guard let activeStudySessionID else { return nil }
+        return studySessions.first { $0.id == activeStudySessionID }
+    }
+
+    public var visibleAnnotations: [Annotation] {
+        guard !studySessions.isEmpty else { return annotations }
+        return studySessions.filter(\.visible).flatMap { session in
+            session.id == activeStudySessionID ? annotations : session.annotations
+        }
+    }
+
+    public var visibleSUVROIMeasurements: [SUVROIMeasurement] {
+        guard !studySessions.isEmpty else { return suvROIMeasurements }
+        return studySessions.filter(\.visible).flatMap { session in
+            session.id == activeStudySessionID ? suvROIMeasurements : session.suvROIs
+        }
+    }
+
+    public var visibleIntensityROIMeasurements: [IntensityROIMeasurement] {
+        guard !studySessions.isEmpty else { return intensityROIMeasurements }
+        return studySessions.filter(\.visible).flatMap { session in
+            session.id == activeStudySessionID ? intensityROIMeasurements : session.intensityROIs
+        }
+    }
+
+    public var visibleVolumeMeasurementReports: [VolumeMeasurementReport] {
+        guard !studySessions.isEmpty else {
+            return lastVolumeMeasurementReport.map { [$0] } ?? []
+        }
+        return studySessions.filter(\.visible).flatMap { session in
+            if session.id == activeStudySessionID {
+                return lastVolumeMeasurementReport.map { [$0] } ?? []
+            }
+            return session.volumeReports
+        }
     }
 
     public var loadedCTVolumes: [ImageVolume] {
@@ -382,6 +430,28 @@ public final class ViewerViewModel: ObservableObject {
             statusMessage = "\(tool.displayName) armed"
         default:
             statusMessage = "\(tool.displayName) tool active"
+        }
+    }
+
+    public func setActiveLabelingTool(_ tool: LabelingTool) {
+        if tool != .none {
+            ensureActiveLabelMapForCurrentContext()
+            activeTool = .wl
+        }
+        labeling.labelingTool = tool
+        switch tool {
+        case .none:
+            statusMessage = "Viewer tools active"
+        case .freehand:
+            statusMessage = "Freehand ROI armed: drag a closed contour and release to fill"
+        case .brush, .eraser:
+            statusMessage = "\(tool.displayName) armed: drag on a slice"
+        case .threshold, .suvGradient, .regionGrow:
+            statusMessage = "\(tool.displayName) armed: click a seed voxel"
+        case .landmark:
+            statusMessage = "Landmark capture armed"
+        case .lesionSphere:
+            statusMessage = "Quick lesion sphere armed: click a lesion"
         }
     }
 
@@ -863,6 +933,7 @@ public final class ViewerViewModel: ObservableObject {
             guard let self, !self.annotations.contains(where: { $0.id == id }) else { return }
             self.annotations.append(annotation)
         }
+        autosaveActiveStudySession()
     }
 
     @discardableResult
@@ -900,6 +971,7 @@ public final class ViewerViewModel: ObservableObject {
             self.lastSUVROIMeasurement = measurement
         }
         statusMessage = "SUV sphere ROI: \(measurement.compactSummary)"
+        autosaveActiveStudySession()
         return measurement
     }
 
@@ -920,6 +992,7 @@ public final class ViewerViewModel: ObservableObject {
             self?.lastSUVROIMeasurement = nil
         }
         statusMessage = "Cleared \(before.count) SUV ROI measurements"
+        autosaveActiveStudySession()
     }
 
     @discardableResult
@@ -954,6 +1027,7 @@ public final class ViewerViewModel: ObservableObject {
         let modality = Modality.normalize(volume.modality)
         let label = modality == .CT ? "HU sphere ROI" : "\(modality.displayName) sphere ROI"
         statusMessage = "\(label): \(measurement.compactSummary)"
+        autosaveActiveStudySession()
         return measurement
     }
 
@@ -974,6 +1048,283 @@ public final class ViewerViewModel: ObservableObject {
             self?.lastIntensityROIMeasurement = nil
         }
         statusMessage = "Cleared \(before.count) intensity ROI measurements"
+        autosaveActiveStudySession()
+    }
+
+    public func clearAllMeasurements() {
+        let beforeAnnotations = annotations
+        let beforeSUV = suvROIMeasurements
+        let beforeLastSUV = lastSUVROIMeasurement
+        let beforeIntensity = intensityROIMeasurements
+        let beforeLastIntensity = lastIntensityROIMeasurement
+        guard !beforeAnnotations.isEmpty || !beforeSUV.isEmpty || !beforeIntensity.isEmpty else {
+            statusMessage = "No measurements to clear"
+            return
+        }
+
+        annotations.removeAll()
+        suvROIMeasurements.removeAll()
+        lastSUVROIMeasurement = nil
+        intensityROIMeasurements.removeAll()
+        lastIntensityROIMeasurement = nil
+        recordHistoryIfNeeded(name: "Clear measurements", changed: true) { [weak self] in
+            guard let self else { return }
+            self.annotations = beforeAnnotations
+            self.suvROIMeasurements = beforeSUV
+            self.lastSUVROIMeasurement = beforeLastSUV
+            self.intensityROIMeasurements = beforeIntensity
+            self.lastIntensityROIMeasurement = beforeLastIntensity
+        } redo: { [weak self] in
+            guard let self else { return }
+            self.annotations.removeAll()
+            self.suvROIMeasurements.removeAll()
+            self.lastSUVROIMeasurement = nil
+            self.intensityROIMeasurements.removeAll()
+            self.lastIntensityROIMeasurement = nil
+        }
+        statusMessage = "Cleared measurements"
+        autosaveActiveStudySession()
+    }
+
+    public func saveCurrentStudySession(named name: String? = nil) {
+        saveOrUpdateCurrentStudySession(named: name, announce: true, includeLabelMaps: true)
+    }
+
+    private func saveOrUpdateCurrentStudySession(named name: String? = nil,
+                                                 announce: Bool,
+                                                 includeLabelMaps: Bool) {
+        guard let currentVolume else {
+            if announce { statusMessage = "Open a study before saving a measurement session" }
+            return
+        }
+        let volumes = studyVolumes(anchoredAt: currentVolume)
+        let key = StudySessionStore.studyKey(for: volumes)
+        if activeStudySessionKey != key {
+            activeStudySessionKey = key
+            studySessions = []
+            activeStudySessionID = nil
+        }
+
+        let existing = activeStudySession
+        let trimmedName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sessionName = (trimmedName?.isEmpty == false ? trimmedName : nil)
+            ?? existing?.name
+            ?? "Session \(studySessions.count + 1)"
+        let session = makeCurrentStudySession(
+            id: existing?.id ?? activeStudySessionID ?? UUID(),
+            name: sessionName,
+            createdAt: existing?.createdAt ?? Date(),
+            visible: existing?.visible ?? true,
+            includeLabelMaps: includeLabelMaps
+        )
+        upsertStudySession(session)
+        activeStudySessionID = session.id
+        persistStudySessions()
+        if announce { statusMessage = "Saved study session: \(session.name)" }
+    }
+
+    public func newStudyMeasurementSession() {
+        if hasGeneratedStudySessionContent {
+            saveOrUpdateCurrentStudySession(announce: false, includeLabelMaps: true)
+        }
+        let session = StudyMeasurementSession(name: "Session \(studySessions.count + 1)")
+        studySessions.append(session)
+        activeStudySessionID = session.id
+        clearCurrentStudySessionState()
+        persistStudySessions()
+        statusMessage = "Started \(session.name)"
+    }
+
+    public func openStudySession(id: UUID) {
+        guard let session = studySessions.first(where: { $0.id == id }) else {
+            statusMessage = "Study session is no longer available"
+            return
+        }
+        if hasGeneratedStudySessionContent {
+            saveOrUpdateCurrentStudySession(announce: false, includeLabelMaps: true)
+        }
+        applyStudySession(session)
+        activeStudySessionID = session.id
+        persistStudySessions()
+        statusMessage = "Opened study session: \(session.name)"
+    }
+
+    public func setStudySessionVisibility(id: UUID, visible: Bool) {
+        guard let index = studySessions.firstIndex(where: { $0.id == id }) else { return }
+        studySessions[index].visible = visible
+        studySessions[index].modifiedAt = Date()
+        if id == activeStudySessionID {
+            for map in labeling.labelMaps {
+                map.visible = visible
+            }
+        }
+        persistStudySessions()
+        statusMessage = visible ? "Showing \(studySessions[index].name)" : "Hiding \(studySessions[index].name)"
+    }
+
+    public func deleteStudySession(id: UUID) {
+        guard let index = studySessions.firstIndex(where: { $0.id == id }) else { return }
+        let removed = studySessions.remove(at: index)
+        if activeStudySessionID == id {
+            activeStudySessionID = studySessions.first?.id
+            if let next = studySessions.first {
+                applyStudySession(next)
+            } else {
+                clearCurrentStudySessionState()
+            }
+        }
+        persistStudySessions()
+        statusMessage = "Deleted study session: \(removed.name)"
+    }
+
+    private var hasGeneratedStudySessionContent: Bool {
+        !annotations.isEmpty ||
+        !suvROIMeasurements.isEmpty ||
+        !intensityROIMeasurements.isEmpty ||
+        lastVolumeMeasurementReport != nil ||
+        !labeling.labelMaps.isEmpty
+    }
+
+    private func autosaveActiveStudySession() {
+        guard activeStudySessionID != nil || hasGeneratedStudySessionContent else { return }
+        saveOrUpdateCurrentStudySession(announce: false, includeLabelMaps: false)
+    }
+
+    private func makeCurrentStudySession(id: UUID,
+                                         name: String,
+                                         createdAt: Date,
+                                         visible: Bool,
+                                         includeLabelMaps: Bool = true) -> StudyMeasurementSession {
+        var reports = activeStudySession?.volumeReports ?? []
+        if let report = lastVolumeMeasurementReport,
+           !reports.contains(where: { $0.id == report.id }) {
+            reports.append(report)
+        }
+        let labelMaps = includeLabelMaps
+            ? labeling.labelMaps.map(StudySessionLabelMap.init)
+            : (activeStudySession?.labelMaps ?? [])
+        return StudyMeasurementSession(
+            id: id,
+            name: name,
+            createdAt: createdAt,
+            modifiedAt: Date(),
+            visible: visible,
+            annotations: annotations,
+            suvROIs: suvROIMeasurements,
+            intensityROIs: intensityROIMeasurements,
+            volumeReports: reports,
+            labelMaps: labelMaps,
+            metadata: currentGeneratedMetadata()
+        )
+    }
+
+    private func upsertStudySession(_ session: StudyMeasurementSession) {
+        if let index = studySessions.firstIndex(where: { $0.id == session.id }) {
+            studySessions[index] = session
+        } else {
+            studySessions.append(session)
+        }
+    }
+
+    private func applyStudySession(_ session: StudyMeasurementSession) {
+        annotations = session.annotations
+        suvROIMeasurements = session.suvROIs
+        lastSUVROIMeasurement = session.suvROIs.last
+        intensityROIMeasurements = session.intensityROIs
+        lastIntensityROIMeasurement = session.intensityROIs.last
+        lastVolumeMeasurementReport = session.volumeReports.last
+        let maps = session.labelMaps.compactMap { try? $0.makeLabelMap() }
+        labeling.replaceLabelMapsForStudySession(maps)
+    }
+
+    private func clearCurrentStudySessionState() {
+        annotations.removeAll()
+        suvROIMeasurements.removeAll()
+        lastSUVROIMeasurement = nil
+        intensityROIMeasurements.removeAll()
+        lastIntensityROIMeasurement = nil
+        lastVolumeMeasurementReport = nil
+        labeling.replaceLabelMapsForStudySession([])
+    }
+
+    private func persistStudySessions() {
+        guard let currentVolume else { return }
+        let volumes = studyVolumes(anchoredAt: currentVolume)
+        let key = activeStudySessionKey ?? StudySessionStore.studyKey(for: volumes)
+        activeStudySessionKey = key
+        let bundle = StudySessionStore.makeBundleMetadata(
+            studyKey: key,
+            volumes: volumes,
+            sessions: studySessions,
+            activeSessionID: activeStudySessionID
+        )
+        do {
+            try studySessionStore.saveBundle(bundle)
+        } catch {
+            statusMessage = "Study session save failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func loadStudySessionsIfNeeded(anchor volume: ImageVolume, force: Bool = false) {
+        let volumes = studyVolumes(anchoredAt: volume)
+        let key = StudySessionStore.studyKey(for: volumes)
+        guard force || activeStudySessionKey != key else { return }
+        if hasGeneratedStudySessionContent {
+            persistStudySessions()
+        }
+        activeStudySessionKey = key
+        do {
+            if let bundle = try studySessionStore.loadBundle(studyKey: key) {
+                studySessions = bundle.sessions
+                activeStudySessionID = bundle.activeSessionID ?? bundle.sessions.first?.id
+                if let activeStudySessionID,
+                   let session = bundle.sessions.first(where: { $0.id == activeStudySessionID }) {
+                    applyStudySession(session)
+                    statusMessage = "Restored \(bundle.sessions.count) study session(s); active: \(session.name)"
+                } else {
+                    clearCurrentStudySessionState()
+                    statusMessage = "Restored \(bundle.sessions.count) study session(s)"
+                }
+            } else {
+                studySessions = []
+                activeStudySessionID = nil
+                clearCurrentStudySessionState()
+            }
+        } catch {
+            studySessions = []
+            activeStudySessionID = nil
+            statusMessage = "Study session load failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func studyVolumes(anchoredAt anchor: ImageVolume) -> [ImageVolume] {
+        let studyUID = anchor.studyUID.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !studyUID.isEmpty && studyUID != "NIFTI_STUDY" {
+            let matching = loadedVolumes.filter { $0.studyUID == anchor.studyUID }
+            return matching.isEmpty ? [anchor] : matching
+        }
+        if let anchorFolder = anchor.sourceFiles.first.map({ ($0 as NSString).deletingLastPathComponent }) {
+            let matching = loadedVolumes.filter { volume in
+                volume.sourceFiles.first.map { ($0 as NSString).deletingLastPathComponent } == anchorFolder
+            }
+            if !matching.isEmpty { return matching }
+        }
+        return [anchor]
+    }
+
+    private func currentGeneratedMetadata() -> [String: String] {
+        var metadata: [String: String] = [:]
+        if let currentVolume {
+            metadata["currentSeriesUID"] = currentVolume.seriesUID
+            metadata["currentModality"] = currentVolume.modality
+            metadata["currentSeriesDescription"] = currentVolume.seriesDescription
+        }
+        metadata["suvMode"] = suvSettings.mode.rawValue
+        metadata["suvScale"] = suvSettings.scaleDescription
+        metadata["suvSphereRadiusMM"] = String(format: "%.3f", suvSphereRadiusMM)
+        metadata["hangingGrid"] = "\(hangingGrid.columns)x\(hangingGrid.rows)"
+        metadata["savedAt"] = ISO8601DateFormatter().string(from: Date())
+        return metadata
     }
 
     public var dynamicCandidateVolumes: [ImageVolume] {
@@ -1105,17 +1456,48 @@ public final class ViewerViewModel: ObservableObject {
                                                       className: String = "Lesion",
                                                       category: LabelCategory = .lesion,
                                                       color: Color = .orange) {
-        if labeling.activeLabelMap == nil {
-            let source = fusion?.baseVolume ?? currentVolume ?? activePETQuantificationVolume
-            if let source {
-                let map = labeling.createLabelMap(for: source, name: defaultName)
-                map.addClass(LabelClass(labelID: 1, name: className, category: category, color: color))
-                labeling.activeClassID = 1
-                map.objectWillChange.send()
+        let source = fusion?.baseVolume ?? currentVolume ?? activePETQuantificationVolume
+        guard let source else { return }
+        ensureActiveLabelMap(for: source,
+                             defaultName: defaultName,
+                             className: className,
+                             category: category,
+                             color: color)
+    }
+
+    public func ensureActiveLabelMap(for volume: ImageVolume,
+                                     defaultName: String = "Measurement Labels",
+                                     className: String = "Lesion",
+                                     category: LabelCategory = .lesion,
+                                     color: Color = .orange) {
+        let activeMatchesVolume = labeling.activeLabelMap.map {
+            $0.parentSeriesUID == volume.seriesUID &&
+            $0.depth == volume.depth &&
+            $0.height == volume.height &&
+            $0.width == volume.width
+        } ?? false
+
+        if !activeMatchesVolume {
+            if let existing = labeling.labelMaps.first(where: {
+                $0.parentSeriesUID == volume.seriesUID &&
+                $0.depth == volume.depth &&
+                $0.height == volume.height &&
+                $0.width == volume.width
+            }) {
+                labeling.activeLabelMap = existing
+            } else {
+                labeling.activeLabelMap = labeling.createLabelMap(for: volume, name: defaultName)
             }
-        } else if let map = labeling.activeLabelMap,
-                  map.classInfo(id: labeling.activeClassID) == nil {
-            map.addClass(LabelClass(labelID: labeling.activeClassID, name: className, category: category, color: color))
+        }
+
+        guard let map = labeling.activeLabelMap else { return }
+        if map.classInfo(id: labeling.activeClassID) == nil {
+            let requestedID = labeling.activeClassID == 0 ? UInt16(1) : labeling.activeClassID
+            map.addClass(LabelClass(labelID: requestedID,
+                                    name: className,
+                                    category: category,
+                                    color: color))
+            labeling.activeClassID = requestedID
             map.objectWillChange.send()
         }
     }
@@ -1257,6 +1639,7 @@ public final class ViewerViewModel: ObservableObject {
 
             let result = addLoadedVolumeIfNeeded(volume)
             displayVolume(result.volume)
+            loadStudySessionsIfNeeded(anchor: result.volume)
             statusMessage = result.inserted
                 ? "Loaded: \(volume.seriesDescription) | \(Modality.normalize(volume.modality).displayName) | \(volume.width)×\(volume.height)×\(volume.depth)"
                 : "Already loaded: \(result.volume.seriesDescription)"
@@ -1271,6 +1654,7 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     public func loadDICOMDirectory(url: URL) async {
+        rememberArchiveDirectory(url: url)
         isLoading = true
         statusMessage = "Scanning \(url.lastPathComponent)..."
         defer { isLoading = false }
@@ -1355,6 +1739,7 @@ public final class ViewerViewModel: ObservableObject {
 
             let result = addLoadedVolumeIfNeeded(volume)
             displayVolume(result.volume)
+            loadStudySessionsIfNeeded(anchor: result.volume)
             statusMessage = result.inserted
                 ? "Loaded: \(volume.seriesDescription) | \(Modality.normalize(volume.modality).displayName) | \(volume.width)×\(volume.height)×\(volume.depth)"
                 : "Already loaded: \(series.displayName)"
@@ -1435,6 +1820,7 @@ public final class ViewerViewModel: ObservableObject {
                 await Task.yield()
             }
             indexRevision += 1
+            savedArchiveRoots = archiveRootStore.rememberIndexedDirectory(url: url, records: records)
             statusMessage = "Indexed \(records.count) series from \(scanResult.scannedFiles) files | inserted \(inserted), updated \(updated), skipped \(scanResult.skippedFiles)"
         } catch {
             statusMessage = "Index error: \(error.localizedDescription)"
@@ -1873,6 +2259,21 @@ public final class ViewerViewModel: ObservableObject {
             let parent = (firstPath as NSString).deletingLastPathComponent
             await loadDICOMDirectory(url: URL(fileURLWithPath: parent))
         }
+    }
+
+    // MARK: - Saved archive roots
+
+    public func reloadSavedArchiveRoots() {
+        savedArchiveRoots = archiveRootStore.load()
+    }
+
+    public func rememberArchiveDirectory(url: URL) {
+        savedArchiveRoots = archiveRootStore.rememberDirectory(url: url)
+    }
+
+    public func forgetArchiveDirectory(id: String) {
+        savedArchiveRoots = archiveRootStore.remove(id: id)
+        statusMessage = "Forgot saved archive directory"
     }
 
     private func loadedVolume(matching volume: ImageVolume) -> ImageVolume? {
@@ -2746,6 +3147,7 @@ public final class ViewerViewModel: ObservableObject {
             self.statusMessage = self.measurementStatus(report)
             self.volumeOperationStatus = nil
             self.volumeOperationTask = nil
+            self.autosaveActiveStudySession()
         }
     }
 
@@ -2943,6 +3345,7 @@ public final class ViewerViewModel: ObservableObject {
             valueTransform: transform
         )
         lastVolumeMeasurementReport = report
+        autosaveActiveStudySession()
         return report
     }
 

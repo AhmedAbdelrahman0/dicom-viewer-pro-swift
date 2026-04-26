@@ -18,6 +18,12 @@ struct LabelingPanel: View {
     @State private var ctLowerHU: Double = HUThresholdPreset.presets[1].lower
     @State private var ctUpperHU: Double = HUThresholdPreset.presets[1].upper
 
+    private var activeClassName: String {
+        vm.labeling.activeLabelMap?
+            .classInfo(id: vm.labeling.activeClassID)?
+            .name ?? "Label \(vm.labeling.activeClassID)"
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
@@ -193,7 +199,7 @@ struct LabelingPanel: View {
                                 tooltip: t.helpText,
                                 isActive: vm.labeling.labelingTool == t
                             ) {
-                                vm.labeling.labelingTool = t
+                                vm.setActiveLabelingTool(t)
                             }
                             .frame(maxWidth: .infinity)
                         }
@@ -215,6 +221,16 @@ struct LabelingPanel: View {
                                 .frame(width: 30)
                         }
                         Toggle("3D Brush (sphere)", isOn: $vm.labeling.brush3D)
+
+                    case .freehand:
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Drag a closed contour on a slice, then release to fill it.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text("Active class: \(activeClassName)")
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                        }
 
                     case .threshold:
                         VStack(alignment: .leading) {

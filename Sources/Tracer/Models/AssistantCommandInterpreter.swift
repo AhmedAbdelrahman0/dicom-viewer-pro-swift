@@ -322,6 +322,9 @@ public struct AssistantCommandInterpreter {
         if text.containsAnyWord(["erase", "eraser", "erased", "erasing"]) {
             actions.append(.setLabelingTool(.eraser))
         }
+        if text.containsAny(["freehand", "lasso", "draw contour", "manual contour"]) {
+            actions.append(.setLabelingTool(.freehand))
+        }
         if text.contains("threshold") {
             actions.append(.setLabelingTool(.threshold))
         }

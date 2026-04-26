@@ -64,8 +64,20 @@ public struct DicomViewerApp: App {
 }
 
 extension Notification.Name {
-    static let openDICOMDirectory = Notification.Name("openDICOMDirectory")
-    static let openNIfTIFile = Notification.Name("openNIfTIFile")
-    static let showAboutWindow = Notification.Name("Tracer.showAboutWindow")
-    static let showOnboarding = Notification.Name("Tracer.showOnboarding")
+    public static let openDICOMDirectory = Notification.Name("openDICOMDirectory")
+    public static let openNIfTIFile = Notification.Name("openNIfTIFile")
+    public static let showAboutWindow = Notification.Name("Tracer.showAboutWindow")
+    public static let showOnboarding = Notification.Name("Tracer.showOnboarding")
+    public static let selectViewerTool = Notification.Name("Tracer.selectViewerTool")
+    public static let selectLabelingTool = Notification.Name("Tracer.selectLabelingTool")
+    public static let createLabelMap = Notification.Name("Tracer.createLabelMap")
+    public static let clearMeasurements = Notification.Name("Tracer.clearMeasurements")
+    public static let saveStudySession = Notification.Name("Tracer.saveStudySession")
+    public static let newStudySession = Notification.Name("Tracer.newStudySession")
+    public static let undoLastEdit = Notification.Name("Tracer.undoLastEdit")
+    public static let redoLastEdit = Notification.Name("Tracer.redoLastEdit")
+    public static let resetEditableChanges = Notification.Name("Tracer.resetEditableChanges")
+    public static let toggleLinkedZoomPan = Notification.Name("Tracer.toggleLinkedZoomPan")
+    public static let toggleFocusMode = Notification.Name("Tracer.toggleFocusMode")
+    public static let showEngineInspector = Notification.Name("Tracer.showEngineInspector")
 }

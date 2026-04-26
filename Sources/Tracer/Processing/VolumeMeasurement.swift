@@ -1,13 +1,13 @@
 import Foundation
 import simd
 
-public enum VolumeMeasurementSource: String, Sendable {
+public enum VolumeMeasurementSource: String, Codable, Sendable {
     case petSUV = "PET SUV"
     case ctHU = "CT HU"
     case intensity = "Intensity"
 }
 
-public enum VolumeMeasurementMethod: String, CaseIterable, Identifiable, Sendable {
+public enum VolumeMeasurementMethod: String, CaseIterable, Identifiable, Codable, Sendable {
     case activeLabel = "Active label"
     case fixedThreshold = "Fixed threshold"
     case percentOfMax = "% of max"
@@ -44,8 +44,8 @@ public struct HUThresholdPreset: Identifiable, Equatable, Sendable {
     ]
 }
 
-public struct VolumeMeasurementReport: Identifiable, Equatable, Sendable {
-    public let id = UUID()
+public struct VolumeMeasurementReport: Identifiable, Equatable, Codable, Sendable {
+    public let id: UUID
     public let source: VolumeMeasurementSource
     public let method: VolumeMeasurementMethod
     public let className: String
@@ -62,6 +62,38 @@ public struct VolumeMeasurementReport: Identifiable, Equatable, Sendable {
     public let thresholdSummary: String
 
     public var volumeML: Double { volumeMM3 / 1000.0 }
+
+    public init(id: UUID = UUID(),
+                source: VolumeMeasurementSource,
+                method: VolumeMeasurementMethod,
+                className: String,
+                voxelCount: Int,
+                volumeMM3: Double,
+                mean: Double,
+                min: Double,
+                max: Double,
+                std: Double,
+                suvMax: Double?,
+                suvMean: Double?,
+                suvPeak: Double?,
+                tlg: Double?,
+                thresholdSummary: String) {
+        self.id = id
+        self.source = source
+        self.method = method
+        self.className = className
+        self.voxelCount = voxelCount
+        self.volumeMM3 = volumeMM3
+        self.mean = mean
+        self.min = min
+        self.max = max
+        self.std = std
+        self.suvMax = suvMax
+        self.suvMean = suvMean
+        self.suvPeak = suvPeak
+        self.tlg = tlg
+        self.thresholdSummary = thresholdSummary
+    }
 
     public static func empty(
         source: VolumeMeasurementSource,
@@ -130,7 +162,7 @@ public struct VolumeMeasurementReport: Identifiable, Equatable, Sendable {
     }
 }
 
-public struct VoxelCoordinate: Equatable, Sendable {
+public struct VoxelCoordinate: Equatable, Codable, Sendable {
     public let z: Int
     public let y: Int
     public let x: Int
@@ -142,7 +174,7 @@ public struct VoxelCoordinate: Equatable, Sendable {
     }
 }
 
-public struct SUVROIMeasurement: Identifiable, Equatable, Sendable {
+public struct SUVROIMeasurement: Identifiable, Equatable, Codable, Sendable {
     public let id: UUID
     public let sourceVolumeIdentity: String
     public let sourceDescription: String
@@ -205,7 +237,7 @@ public struct SUVROIMeasurement: Identifiable, Equatable, Sendable {
     }
 }
 
-public struct IntensityROIMeasurement: Identifiable, Equatable, Sendable {
+public struct IntensityROIMeasurement: Identifiable, Equatable, Codable, Sendable {
     public let id: UUID
     public let sourceVolumeIdentity: String
     public let sourceDescription: String

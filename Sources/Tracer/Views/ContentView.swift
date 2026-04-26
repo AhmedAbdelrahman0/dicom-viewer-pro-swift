@@ -228,6 +228,9 @@ public struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .showOnboarding)) { _ in
             showOnboarding = true
         }
+        .modifier(TracerMenuCommandHandler(vm: vm,
+                                           toggleFocusMode: toggleFocusMode,
+                                           showEngineInspector: showEngineInspector(named:)))
         .onReceive(NotificationCenter.default.publisher(for: .recentVolumesDidChange)) { _ in
             vm.reloadRecentVolumes()
         }
@@ -737,10 +740,7 @@ public struct ContentView: View {
                       systemImage: "percent")
             }
             Button {
-                vm.ensureActiveLabelMapForCurrentContext()
-                vm.labeling.labelingTool = .suvGradient
-                vm.activeTool = .wl
-                vm.statusMessage = "SUV Gradient armed: click the PET lesion seed"
+                vm.setActiveLabelingTool(.suvGradient)
             } label: {
                 Label("PET Gradient Seed Tool", systemImage: "waveform.path.ecg")
             }
@@ -1013,6 +1013,25 @@ public struct ContentView: View {
     }
 
     private enum EngineInspector { case monai, nnunet, pet, classification, modelManager, cohort, lesionDetector, petAC, nuclearTools, dictation }
+
+    private func showEngineInspector(named raw: String) {
+        switch raw {
+        case "monai": showInspector(.monai)
+        case "nnunet": showInspector(.nnunet)
+        case "pet": showInspector(.pet)
+        case "classification": showInspector(.classification)
+        case "modelManager": showInspector(.modelManager)
+        case "cohort":
+            refreshCohortStudies()
+            showInspector(.cohort)
+        case "lesionDetector": showInspector(.lesionDetector)
+        case "petAC": showInspector(.petAC)
+        case "nuclearTools": showInspector(.nuclearTools)
+        case "dictation": showInspector(.dictation)
+        default:
+            vm.statusMessage = "Unknown panel: \(raw)"
+        }
+    }
 
     /// Pull the full worklist (every indexed study in the SwiftData store)
     /// into the cohort panel. Called when the user opens the panel so the
@@ -1300,6 +1319,85 @@ private struct KeyboardShortcutIfAvailable: ViewModifier {
         } else {
             content
         }
+    }
+}
+
+private struct TracerMenuCommandHandler: ViewModifier {
+    @ObservedObject var vm: ViewerViewModel
+    let toggleFocusMode: () -> Void
+    let showEngineInspector: (String) -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .modifier(TracerToolMenuCommandHandler(vm: vm))
+            .modifier(TracerEditMenuCommandHandler(vm: vm, toggleFocusMode: toggleFocusMode))
+            .modifier(TracerEngineMenuCommandHandler(showEngineInspector: showEngineInspector))
+    }
+}
+
+private struct TracerToolMenuCommandHandler: ViewModifier {
+    @ObservedObject var vm: ViewerViewModel
+
+    func body(content: Content) -> some View {
+        content
+            .onReceive(NotificationCenter.default.publisher(for: .selectViewerTool)) { note in
+                guard let raw = note.userInfo?["tool"] as? String,
+                      let tool = ViewerTool(rawValue: raw) else { return }
+                vm.setActiveViewerTool(tool)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .selectLabelingTool)) { note in
+                guard let raw = note.userInfo?["tool"] as? String,
+                      let tool = LabelingTool(rawValue: raw) else { return }
+                vm.setActiveLabelingTool(tool)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .createLabelMap)) { _ in
+                vm.ensureActiveLabelMapForCurrentContext()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .clearMeasurements)) { _ in
+                vm.clearAllMeasurements()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .saveStudySession)) { _ in
+                vm.saveCurrentStudySession()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .newStudySession)) { _ in
+                vm.newStudyMeasurementSession()
+            }
+    }
+}
+
+private struct TracerEditMenuCommandHandler: ViewModifier {
+    @ObservedObject var vm: ViewerViewModel
+    let toggleFocusMode: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .onReceive(NotificationCenter.default.publisher(for: .undoLastEdit)) { _ in
+                vm.undoLastEdit()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .redoLastEdit)) { _ in
+                vm.redoLastEdit()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .resetEditableChanges)) { _ in
+                vm.resetEditableChanges()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .toggleLinkedZoomPan)) { _ in
+                vm.setLinkZoomPanAcrossPanes(!vm.linkZoomPanAcrossPanes)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .toggleFocusMode)) { _ in
+                toggleFocusMode()
+            }
+    }
+}
+
+private struct TracerEngineMenuCommandHandler: ViewModifier {
+    let showEngineInspector: (String) -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .onReceive(NotificationCenter.default.publisher(for: .showEngineInspector)) { note in
+                guard let raw = note.userInfo?["panel"] as? String else { return }
+                showEngineInspector(raw)
+            }
     }
 }
 

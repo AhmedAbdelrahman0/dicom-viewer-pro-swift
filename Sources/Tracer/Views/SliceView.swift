@@ -24,6 +24,7 @@ public struct SliceView: View {
     @State private var labelUndoDepthBeforeInteraction: Int?
     @State private var measurementPoints: [CGPoint] = []
     @State private var activeMeasurement: Annotation?
+    @State private var freehandPoints: [CGPoint] = []
     @State private var dragStart: CGPoint?
     @State private var lastPaintPoint: (Int, Int)?
     #if os(macOS)
@@ -137,9 +138,11 @@ public struct SliceView: View {
                 }
                 .clipped()
                 .contentShape(Rectangle())
-                .gesture(magnificationGesture())
-                .gesture(dragGesture(geo: geo))
+                .highPriorityGesture(dragGesture(geo: geo))
+                .simultaneousGesture(magnificationGesture())
                 .onTapGesture(count: 2) { resetView() }
+                .onChange(of: vm.activeTool) { _, _ in measurementPoints.removeAll() }
+                .onChange(of: vm.labeling.labelingTool) { _, _ in freehandPoints.removeAll() }
                 .onContinuousHover { phase in
                     switch phase {
                     case .active(let location):
@@ -741,20 +744,36 @@ public struct SliceView: View {
                     let start = gestureStartZoom ?? 1.0
                     let factor = 1.0 + Double(-translation.height) * 0.005
                     setZoom(CGFloat(max(0.25, min(10.0, Double(start) * factor))))
-                case .distance, .angle, .area, .suvSphere:
+                case .distance:
+                    if let v = vm.volumeForDisplayMode(displayMode),
+                       let start = dragStart,
+                       let startPixel = mapToImagePixel(point: start, volume: v, geo: geo),
+                       let endPixel = mapToImagePixel(point: value.location, volume: v, geo: geo),
+                       !isTap(value) {
+                        measurementPoints = [CGPoint(x: startPixel.0, y: startPixel.1),
+                                             CGPoint(x: endPixel.0, y: endPixel.1)]
+                    }
+                case .angle, .area, .suvSphere:
                     break
                 }
             }
             .onEnded { value in
                 if vm.labeling.labelingTool != .none {
+                    if vm.labeling.labelingTool == .freehand,
+                       let volume = vm.volumeForDisplayMode(displayMode) {
+                        finishFreehandContour(volume: volume)
+                    }
                     vm.labeling.commitVoxelEdit()
                     vm.recordLabelEditIfChanged(named: "Label edit", beforeUndoDepth: labelUndoDepthBeforeInteraction)
                 }
                 if vm.labeling.labelingTool == .none,
                    isMeasurementTool(vm.activeTool),
-                   isTap(value),
                    let volume = vm.volumeForDisplayMode(displayMode) {
-                    handleMeasurementTap(at: value.location, volume: volume, geo: geo)
+                    if vm.activeTool == .distance, !isTap(value) {
+                        handleDistanceDrag(from: value.startLocation, to: value.location, volume: volume, geo: geo)
+                    } else if isTap(value) {
+                        handleMeasurementTap(at: value.location, volume: volume, geo: geo)
+                    }
                 }
                 dragStart = nil
                 dragStartPan = nil
@@ -772,7 +791,30 @@ public struct SliceView: View {
                 windowLevelBeforeInteraction = nil
                 labelUndoDepthBeforeInteraction = nil
                 lastPaintPoint = nil
+                freehandPoints.removeAll()
             }
+    }
+
+    private func needsWritableLabelMap(_ tool: LabelingTool) -> Bool {
+        switch tool {
+        case .brush, .eraser, .freehand, .threshold, .suvGradient, .regionGrow: return true
+        case .none, .landmark, .lesionSphere: return false
+        }
+    }
+
+    private func finishFreehandContour(volume: ImageVolume) {
+        guard freehandPoints.count >= 3 else {
+            if !freehandPoints.isEmpty {
+                vm.statusMessage = "Freehand ROI needs a closed contour with at least 3 points"
+            }
+            return
+        }
+        vm.ensureActiveLabelMap(for: volume)
+        vm.labeling.fillFreehandContour(axis: axis,
+                                        sliceIndex: vm.displayedSliceIndex(axis: axis, mode: displayMode),
+                                        points: freehandPoints,
+                                        recordUndo: false)
+        vm.statusMessage = "Freehand ROI filled on \(title)"
     }
 
     private func handleLabelingDrag(value: DragGesture.Value, volume: ImageVolume,
@@ -784,6 +826,10 @@ public struct SliceView: View {
 
         let pixel = mapToImagePixel(point: value.location, volume: volume, geo: geo)
         guard let p = pixel else { return }
+        let sliceIndex = vm.displayedSliceIndex(axis: axis, mode: displayMode)
+        if needsWritableLabelMap(vm.labeling.labelingTool) {
+            vm.ensureActiveLabelMap(for: volume)
+        }
 
         switch vm.labeling.labelingTool {
         case .brush, .eraser:
@@ -795,14 +841,25 @@ public struct SliceView: View {
             if let last = lastPaintPoint {
                 vm.labeling.paintStroke(
                     axis: axis,
-                    sliceIndex: vm.sliceIndices[axis],
+                    sliceIndex: sliceIndex,
                     from: last, to: p, erase: erase,
                     recordUndo: false
                 )
             } else {
-                vm.labeling.paint(axis: axis, sliceIndex: vm.sliceIndices[axis],
+                vm.labeling.paint(axis: axis, sliceIndex: sliceIndex,
                                   pixelX: p.0, pixelY: p.1, erase: erase,
                                   recordUndo: false)
+            }
+            lastPaintPoint = p
+
+        case .freehand:
+            if freehandPoints.isEmpty {
+                labelUndoDepthBeforeInteraction = vm.labeling.undoDepth
+                vm.labeling.beginVoxelEdit(named: "Freehand ROI")
+            }
+            let point = CGPoint(x: p.0, y: p.1)
+            if freehandPoints.last.map({ hypot($0.x - point.x, $0.y - point.y) >= 1 }) ?? true {
+                freehandPoints.append(point)
             }
             lastPaintPoint = p
 
@@ -810,7 +867,7 @@ public struct SliceView: View {
             // Single click -> region grow from seed
             if lastPaintPoint == nil {
                 let (z, y, x) = vm.labeling.voxelCoordForClick(
-                    axis: axis, sliceIndex: vm.sliceIndices[axis],
+                    axis: axis, sliceIndex: sliceIndex,
                     pixelX: p.0, pixelY: p.1
                 )
                 vm.startRegionGrowActiveLabelAroundSeed(
@@ -825,7 +882,7 @@ public struct SliceView: View {
             // Single click -> percent-of-max around seed
             if lastPaintPoint == nil {
                 let (z, y, x) = vm.labeling.voxelCoordForClick(
-                    axis: axis, sliceIndex: vm.sliceIndices[axis],
+                    axis: axis, sliceIndex: sliceIndex,
                     pixelX: p.0, pixelY: p.1
                 )
                 vm.startPercentOfMaxActiveLabelAroundSeed(
@@ -839,7 +896,7 @@ public struct SliceView: View {
         case .suvGradient:
             if lastPaintPoint == nil {
                 let (z, y, x) = vm.labeling.voxelCoordForClick(
-                    axis: axis, sliceIndex: vm.sliceIndices[axis],
+                    axis: axis, sliceIndex: sliceIndex,
                     pixelX: p.0, pixelY: p.1
                 )
                 vm.startGradientActiveLabelAroundSeed(
@@ -854,7 +911,7 @@ public struct SliceView: View {
         case .landmark:
             if lastPaintPoint == nil {
                 let (z, y, x) = vm.labeling.voxelCoordForClick(
-                    axis: axis, sliceIndex: vm.sliceIndices[axis],
+                    axis: axis, sliceIndex: sliceIndex,
                     pixelX: p.0, pixelY: p.1
                 )
                 let world = vm.labeling.crosshair.worldPoint(
@@ -871,7 +928,7 @@ public struct SliceView: View {
             // dropping spheres — the user has to lift to seed another.
             if lastPaintPoint == nil {
                 let (z, y, x) = vm.labeling.voxelCoordForClick(
-                    axis: axis, sliceIndex: vm.sliceIndices[axis],
+                    axis: axis, sliceIndex: sliceIndex,
                     pixelX: p.0, pixelY: p.1
                 )
                 if let id = vm.labeling.placeLesionSphere(
@@ -960,7 +1017,7 @@ public struct SliceView: View {
 
         measurementPoints.append(CGPoint(x: pixel.0, y: pixel.1))
         let required = Annotation(type: type, axis: axis,
-                                  sliceIndex: vm.sliceIndices[axis]).minPointsRequired
+                                  sliceIndex: displayedSliceIndex).minPointsRequired
         guard measurementPoints.count >= required else {
             vm.statusMessage = "\(type.rawValue.capitalized): \(measurementPoints.count)/\(required) points"
             return
@@ -969,7 +1026,7 @@ public struct SliceView: View {
         var annotation = Annotation(type: type,
                                     points: measurementPoints,
                                     axis: axis,
-                                    sliceIndex: vm.sliceIndices[axis])
+                                    sliceIndex: displayedSliceIndex)
         annotation.value = measurementValue(type: type,
                                             points: measurementPoints,
                                             volume: volume)
@@ -977,6 +1034,36 @@ public struct SliceView: View {
         vm.addAnnotation(annotation)
         vm.statusMessage = "Added \(annotation.displayText)"
         measurementPoints.removeAll()
+    }
+
+    private func handleDistanceDrag(from start: CGPoint,
+                                    to end: CGPoint,
+                                    volume: ImageVolume,
+                                    geo: GeometryProxy) {
+        guard let startPixel = mapToImagePixel(point: start, volume: volume, geo: geo),
+              let endPixel = mapToImagePixel(point: end, volume: volume, geo: geo) else {
+            measurementPoints.removeAll()
+            return
+        }
+        let points = [CGPoint(x: startPixel.0, y: startPixel.1),
+                      CGPoint(x: endPixel.0, y: endPixel.1)]
+        guard hypot(points[0].x - points[1].x, points[0].y - points[1].y) >= 1 else {
+            measurementPoints.removeAll()
+            return
+        }
+        var annotation = Annotation(type: .distance,
+                                    points: points,
+                                    axis: axis,
+                                    sliceIndex: displayedSliceIndex)
+        annotation.value = measurementValue(type: .distance, points: points, volume: volume)
+        annotation.unit = "mm"
+        vm.addAnnotation(annotation)
+        vm.statusMessage = "Added \(annotation.displayText)"
+        measurementPoints.removeAll()
+    }
+
+    private var displayedSliceIndex: Int {
+        vm.displayedSliceIndex(axis: axis, mode: displayMode)
     }
 
     private func annotationType(for tool: ViewerTool) -> AnnotationType? {
@@ -1034,17 +1121,25 @@ public struct SliceView: View {
     private func measurementCanvas(scale: CGFloat, imageSize: CGSize) -> some View {
         Canvas { context, size in
             // Draw existing measurements
-            for ann in vm.annotations where ann.axis == axis && ann.sliceIndex == vm.sliceIndices[axis] {
+            let currentSlice = displayedSliceIndex
+            for ann in vm.visibleAnnotations where ann.axis == axis && ann.sliceIndex == currentSlice {
                 drawAnnotation(ann, in: context, scale: scale, imageSize: imageSize)
             }
+            if !measurementPoints.isEmpty {
+                drawPendingMeasurement(in: context, scale: scale, imageSize: imageSize)
+            }
+            if !freehandPoints.isEmpty {
+                drawFreehandPreview(in: context, scale: scale, imageSize: imageSize)
+            }
         }
+        .allowsHitTesting(false)
     }
 
     private func suvROICanvas(scale: CGFloat, imageSize: CGSize) -> some View {
         Canvas { context, _ in
             guard let displayVolume = vm.volumeForDisplayMode(displayMode) else { return }
             if let pet = vm.activePETQuantificationVolume {
-                for roi in vm.suvROIMeasurements where roi.sourceVolumeIdentity == pet.sessionIdentity {
+                for roi in vm.visibleSUVROIMeasurements where roi.sourceVolumeIdentity == pet.sessionIdentity {
                     drawSUVROI(roi,
                                displayVolume: displayVolume,
                                in: context,
@@ -1052,7 +1147,7 @@ public struct SliceView: View {
                                imageSize: imageSize)
                 }
             }
-            for roi in vm.intensityROIMeasurements
+            for roi in vm.visibleIntensityROIMeasurements
                 where roi.sourceVolumeIdentity == displayVolume.sessionIdentity {
                 drawIntensityROI(roi,
                                  displayVolume: displayVolume,
@@ -1183,7 +1278,7 @@ public struct SliceView: View {
     }
 
     private func drawAnnotation(_ ann: Annotation, in context: GraphicsContext,
-                                 scale: CGFloat, imageSize: CGSize) {
+                                scale: CGFloat, imageSize: CGSize) {
         let points = ann.points
             .map { displayPoint(for: $0, imageSize: imageSize) }
             .map { CGPoint(x: $0.x * scale, y: $0.y * scale) }
@@ -1232,6 +1327,65 @@ public struct SliceView: View {
             let rect = CGRect(x: p.x - r, y: p.y - r, width: r * 2, height: r * 2)
             context.fill(Path(ellipseIn: rect), with: .color(.yellow))
         }
+    }
+
+    private func drawPendingMeasurement(in context: GraphicsContext,
+                                        scale: CGFloat,
+                                        imageSize: CGSize) {
+        let points = measurementPoints
+            .map { displayPoint(for: $0, imageSize: imageSize) }
+            .map { CGPoint(x: $0.x * scale, y: $0.y * scale) }
+        guard !points.isEmpty else { return }
+
+        var path = Path()
+        path.move(to: points[0])
+        for point in points.dropFirst() {
+            path.addLine(to: point)
+        }
+        if vm.activeTool == .area, points.count >= 3 {
+            path.closeSubpath()
+            context.fill(path, with: .color(.yellow.opacity(0.10)))
+        }
+        if points.count >= 2 {
+            context.stroke(path,
+                           with: .color(.yellow.opacity(0.82)),
+                           style: StrokeStyle(lineWidth: 1.3,
+                                              lineCap: .round,
+                                              lineJoin: .round,
+                                              dash: [4, 3]))
+        }
+
+        for (index, point) in points.enumerated() {
+            let r: CGFloat = index == points.count - 1 ? 4 : 3
+            let rect = CGRect(x: point.x - r, y: point.y - r, width: r * 2, height: r * 2)
+            context.fill(Path(ellipseIn: rect), with: .color(.yellow))
+            drawText("\(index + 1)", at: CGPoint(x: point.x + 3, y: point.y - 3), in: context)
+        }
+    }
+
+    private func drawFreehandPreview(in context: GraphicsContext,
+                                     scale: CGFloat,
+                                     imageSize: CGSize) {
+        let points = freehandPoints
+            .map { displayPoint(for: $0, imageSize: imageSize) }
+            .map { CGPoint(x: $0.x * scale, y: $0.y * scale) }
+        guard points.count >= 2 else { return }
+
+        var path = Path()
+        path.move(to: points[0])
+        for point in points.dropFirst() {
+            path.addLine(to: point)
+        }
+        if points.count >= 3 {
+            path.closeSubpath()
+            context.fill(path, with: .color(TracerTheme.label.opacity(0.10)))
+        }
+        context.stroke(path,
+                       with: .color(TracerTheme.label.opacity(0.92)),
+                       style: StrokeStyle(lineWidth: 1.6,
+                                          lineCap: .round,
+                                          lineJoin: .round,
+                                          dash: [6, 3]))
     }
 
     private func drawSUVROI(_ roi: SUVROIMeasurement,
