@@ -20,7 +20,8 @@ The default branch contains the core workstation:
 - DICOM and NIfTI loading with orientation-aware geometry
 - PACS-style worklist and study browser
 - multi-viewport MPR review with customizable hanging protocols
-- PET/CT fusion, PET MIP, CT windows, PET colormaps, SUV controls
+- PET/CT and PET/MR fusion, PET MIP, CT/MR windows, PET colormaps, SUV controls
+- MRI multi-series hanging protocols with linked cross-reference review
 - segmentation and labeling tools with undo/redo
 - PET and CT volumetry foundations
 - SUV ROI and PET lesion metrics
@@ -103,7 +104,30 @@ and volume rendering. The long-term target is full GPU acceleration for:
 - PET MIP rendering
 - 3D volume rendering
 - fused PET/CT rendering
+- fused PET/MR rendering
 - interactive contouring responsiveness during heavy background work
+
+### MRI and PET/MR Fusion
+
+Tracer can load and arrange multiple MR sequences in the same workstation
+layout, including T1, T2, FLAIR, DWI, ADC, and post-contrast series. PET/MR
+fusion supports geometry-only, rigid anatomical initialization, and rigid plus
+deformable refinement workflows.
+
+The deformable layer is designed as a research-grade, auditable bridge rather
+than a silent black box:
+
+- ANTs SyN backend with mutual-information defaults for cross-modality PET/MR
+- SynthMorph, VoxelMorph, and custom-wrapper adapters
+- selectable registration metric presets
+- registration QA card for PET/MR fusion
+- pre/post normalized mutual information, envelope overlap, and centroid
+  residual checks
+- optional wrapper sidecar for deformation-field QA such as Jacobian range,
+  folding percentage, inverse consistency, and landmark TRE
+
+Any PET/MR deformable result should be reviewed before labels, measurements,
+dose, or model-training exports depend on it.
 
 ---
 

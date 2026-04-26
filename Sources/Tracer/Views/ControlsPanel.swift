@@ -467,6 +467,10 @@ private struct FusionTab: View {
 
                 fusionLayerStack(pair)
 
+                if let quality = pair.registrationQuality {
+                    registrationQualityCard(quality)
+                }
+
                 Toggle("Show PET overlay", isOn: Binding(
                     get: { vm.fusion?.overlayVisible ?? false },
                     set: { vm.setFusionOverlayVisible($0) }
@@ -622,6 +626,109 @@ private struct FusionTab: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.75)
             Spacer(minLength: 0)
+        }
+    }
+
+    private func registrationQualityCard(_ quality: RegistrationQualityComparison) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Label("Registration QA", systemImage: qaIcon(quality.grade))
+                    .font(.system(size: 11, weight: .semibold))
+                Spacer()
+                Text(quality.grade.displayName)
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundColor(qaColor(quality.grade))
+            }
+
+            Text(quality.summary)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundColor(.secondary)
+                .lineLimit(2)
+                .minimumScaleFactor(0.75)
+
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 6) {
+                qaMetric("NMI Δ", value: signedMetric(quality.nmiDelta, digits: 3))
+                qaMetric("Overlap Δ", value: signedMetric(quality.diceDelta, digits: 2))
+                qaMetric("Centroid", value: mmMetric(quality.after.centroidResidualMM))
+                qaMetric("Samples", value: "\(quality.after.sampleCount)")
+            }
+
+            if let deformation = quality.deformation {
+                HStack(spacing: 6) {
+                    if let jacobianMin = deformation.jacobianMin {
+                        qaMetric("Jac min", value: String(format: "%.2f", jacobianMin))
+                    }
+                    if let folding = deformation.foldingPercent {
+                        qaMetric("Folding", value: String(format: "%.2f%%", folding))
+                    }
+                    if let inverse = deformation.inverseConsistencyRMSEMM {
+                        qaMetric("Inv", value: String(format: "%.1f mm", inverse))
+                    }
+                }
+            }
+
+            ForEach(Array(quality.warnings.prefix(3)), id: \.self) { warning in
+                Text(warning)
+                    .font(.system(size: 10))
+                    .foregroundColor(qaColor(quality.grade))
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.75)
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(qaColor(quality.grade).opacity(0.08))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(qaColor(quality.grade).opacity(0.35), lineWidth: 1)
+        )
+        .cornerRadius(6)
+        .help("Patient-specific registration QA. Review any warning before using fused PET/MR for labels, measurements, or dose.")
+    }
+
+    private func qaMetric(_ title: String, value: String) -> some View {
+        HStack {
+            Text(title)
+                .font(.system(size: 9))
+                .foregroundColor(.secondary)
+            Spacer(minLength: 4)
+            Text(value)
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundColor(.primary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .background(Color.black.opacity(0.16))
+        .cornerRadius(4)
+    }
+
+    private func signedMetric(_ value: Double?, digits: Int) -> String {
+        guard let value else { return "n/a" }
+        return String(format: "%+.\(digits)f", value)
+    }
+
+    private func mmMetric(_ value: Double?) -> String {
+        guard let value else { return "n/a" }
+        return String(format: "%.1f mm", value)
+    }
+
+    private func qaColor(_ grade: RegistrationQualityGrade) -> Color {
+        switch grade {
+        case .pass: return .green
+        case .caution: return .orange
+        case .fail: return .red
+        case .unknown: return .secondary
+        }
+    }
+
+    private func qaIcon(_ grade: RegistrationQualityGrade) -> String {
+        switch grade {
+        case .pass: return "checkmark.seal"
+        case .caution: return "exclamationmark.triangle"
+        case .fail: return "xmark.octagon"
+        case .unknown: return "questionmark.diamond"
         }
     }
 
@@ -972,6 +1079,13 @@ private struct FusionTab: View {
             .help(vm.petMRDeformableRegistration.backend.adapterHelp)
 
             if vm.petMRDeformableRegistration.backend.needsExternalRunner {
+                Picker("Metric", selection: deformableMetricBinding) {
+                    ForEach(PETMRRegistrationMetricPreset.allCases) { preset in
+                        Text(preset.displayName).tag(preset)
+                    }
+                }
+                .help(vm.petMRDeformableRegistration.metricPreset.helpText)
+
                 TextField("Executable / wrapper", text: deformableExecutableBinding)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 11, design: .monospaced))
@@ -1031,6 +1145,17 @@ private struct FusionTab: View {
             set: { value in
                 var next = vm.petMRDeformableRegistration
                 next.executablePath = value
+                vm.setPETMRDeformableRegistration(next)
+            }
+        )
+    }
+
+    private var deformableMetricBinding: Binding<PETMRRegistrationMetricPreset> {
+        Binding(
+            get: { vm.petMRDeformableRegistration.metricPreset },
+            set: { value in
+                var next = vm.petMRDeformableRegistration
+                next.metricPreset = value
                 vm.setPETMRDeformableRegistration(next)
             }
         )

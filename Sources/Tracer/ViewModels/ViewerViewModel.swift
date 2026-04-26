@@ -1527,10 +1527,17 @@ public final class ViewerViewModel: ObservableObject {
             mode: alreadyAligned ? .geometry : registrationModeForInitializer
         )
 
-        let resampled: ImageVolume?
+        var resampled: ImageVolume?
         var registrationNote = registration.note
+        var qualityBefore: RegistrationQualitySnapshot?
+        var deformationQuality: DeformationFieldQuality?
         if alreadyAligned {
             resampled = nil
+            qualityBefore = RegistrationQualityAssurance.evaluate(
+                fixed: mr,
+                movingOnFixedGrid: pet,
+                label: "Scanner geometry"
+            )
         } else if mode == .rigidThenDeformable,
                   petMRDeformableRegistration.isExternalConfigured {
             let prealigned = await Task.detached(priority: .userInitiated) {
@@ -1539,6 +1546,11 @@ public final class ViewerViewModel: ObservableObject {
                                          transform: registration.fixedToMoving,
                                          mode: .linear)
             }.value
+            qualityBefore = RegistrationQualityAssurance.evaluate(
+                fixed: mr,
+                movingOnFixedGrid: prealigned,
+                label: "Rigid prealignment"
+            )
             do {
                 statusMessage = "Running \(petMRDeformableRegistration.backend.displayName) PET/MR deformable registration..."
                 let deformable = try await PETMRDeformableRegistrationRunner.register(
@@ -1547,12 +1559,24 @@ public final class ViewerViewModel: ObservableObject {
                     configuration: petMRDeformableRegistration
                 )
                 resampled = deformable.warpedMoving
+                deformationQuality = deformable.deformationQuality
                 registrationNote = "\(registration.note). \(deformable.note)"
             } catch {
                 resampled = prealigned
                 registrationNote = "\(registration.note). External deformable registration failed; using rigid prealignment. \(error.localizedDescription)"
             }
         } else if mode == .rigidThenDeformable {
+            let prealigned = await Task.detached(priority: .userInitiated) {
+                VolumeResampler.resample(source: pet,
+                                         target: mr,
+                                         transform: registration.fixedToMoving,
+                                         mode: .linear)
+            }.value
+            qualityBefore = RegistrationQualityAssurance.evaluate(
+                fixed: mr,
+                movingOnFixedGrid: prealigned,
+                label: "Rigid prealignment"
+            )
             let deformable = PETMRRegistrationEngine.estimatePETToMR(
                 pet: pet,
                 mr: mr,
@@ -1572,13 +1596,32 @@ public final class ViewerViewModel: ObservableObject {
                                          transform: registration.fixedToMoving,
                                          mode: .linear)
             }.value
+            if let resampled {
+                qualityBefore = RegistrationQualityAssurance.evaluate(
+                    fixed: mr,
+                    movingOnFixedGrid: resampled,
+                    label: registrationModeForInitializer.displayName
+                )
+            }
         }
 
         let pair = configureFusion(base: mr, overlay: pet, resampledOverlay: resampled)
         pair.registrationNote = registrationNote
+        let qaMoving = resampled ?? pet
+        let qualityAfter = RegistrationQualityAssurance.evaluate(
+            fixed: mr,
+            movingOnFixedGrid: qaMoving,
+            label: "Fusion result"
+        )
+        pair.registrationQuality = RegistrationQualityAssurance.compare(
+            before: qualityBefore ?? qualityAfter,
+            after: qualityAfter,
+            deformation: deformationQuality
+        )
         pair.objectWillChange.send()
         applyHangingProtocol(grid: .threeByTwo, panes: HangingPaneConfiguration.defaultPETMR)
-        statusMessage = "PET/MR fused: \(registrationNote)"
+        let qaLabel = pair.registrationQuality?.grade.displayName ?? RegistrationQualityGrade.unknown.displayName
+        statusMessage = "PET/MR fused: \(registrationNote). QA \(qaLabel)"
     }
 
     private func openIndexedDICOMSeries(_ entry: PACSIndexedSeriesSnapshot) async {
@@ -1963,28 +2006,7 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     private func hasMatchingGrid(_ base: ImageVolume, _ overlay: ImageVolume) -> Bool {
-        guard base.width == overlay.width,
-              base.height == overlay.height,
-              base.depth == overlay.depth else {
-            return false
-        }
-
-        let tolerance = 1e-4
-        guard abs(base.spacing.x - overlay.spacing.x) < tolerance,
-              abs(base.spacing.y - overlay.spacing.y) < tolerance,
-              abs(base.spacing.z - overlay.spacing.z) < tolerance,
-              abs(base.origin.x - overlay.origin.x) < tolerance,
-              abs(base.origin.y - overlay.origin.y) < tolerance,
-              abs(base.origin.z - overlay.origin.z) < tolerance else {
-            return false
-        }
-
-        for column in 0..<3 {
-            for row in 0..<3 where abs(base.direction[column][row] - overlay.direction[column][row]) >= tolerance {
-                return false
-            }
-        }
-        return true
+        ImageVolumeGeometry.gridsMatch(base, overlay)
     }
 
     private func bestPETCTPair() -> (ct: ImageVolume, pet: ImageVolume)? {

@@ -42,6 +42,7 @@ public final class FusionPair: ObservableObject {
     @Published public var resampledOverlay: ImageVolume?
     @Published public var isGeometryResampled: Bool = false
     @Published public var registrationNote: String = "Assumes aligned geometry"
+    @Published public var registrationQuality: RegistrationQualityComparison?
 
     public init(base: ImageVolume, overlay: ImageVolume) {
         self.baseVolume = base

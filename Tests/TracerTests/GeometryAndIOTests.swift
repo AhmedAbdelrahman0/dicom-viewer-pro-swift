@@ -113,6 +113,7 @@ final class GeometryAndIOTests: XCTestCase {
         if [ -n "$transform" ]; then
           printf fake-transform > "$transform"
         fi
+        printf '%s\\n' '{"jacobianMin":0.82,"jacobianMax":1.24,"foldingPercent":0.0,"inverseConsistencyRMSEMM":2.5,"notes":["fake sidecar"]}' > "$(dirname "$output")/registration_qa.json"
         echo "fake deformable complete"
         """
         try Data(script.utf8).write(to: scriptURL)
@@ -212,6 +213,9 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(result.warpedMoving.height, fixed.height)
         XCTAssertEqual(result.warpedMoving.depth, fixed.depth)
         XCTAssertEqual(result.warpedMoving.intensityRange.min, 2, accuracy: 1e-6)
+        let deformationQuality = try XCTUnwrap(result.deformationQuality)
+        XCTAssertEqual(try XCTUnwrap(deformationQuality.jacobianMin), 0.82, accuracy: 1e-6)
+        XCTAssertEqual(try XCTUnwrap(deformationQuality.foldingPercent), 0.0, accuracy: 1e-6)
         XCTAssertTrue(result.stdout.contains("fake deformable complete"))
     }
 
@@ -242,6 +246,55 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertTrue(pair.isGeometryResampled)
         XCTAssertEqual(pair.displayedOverlay.width, mr.width)
         XCTAssertTrue(pair.registrationNote.contains("Custom script deformable registration"))
+        let quality = try XCTUnwrap(pair.registrationQuality)
+        XCTAssertEqual(try XCTUnwrap(quality.deformation?.jacobianMin), 0.82, accuracy: 1e-6)
+    }
+
+    func testRegistrationQAReportsPETMRImprovement() {
+        func blockVolume(modality: String, blockX: Range<Int>) -> ImageVolume {
+            let width = 16
+            let height = 16
+            let depth = 16
+            var pixels = [Float](repeating: 0, count: width * height * depth)
+            for z in 5..<11 {
+                for y in 5..<11 {
+                    for x in blockX {
+                        pixels[z * height * width + y * width + x] = 100
+                    }
+                }
+            }
+            return ImageVolume(
+                pixels: pixels,
+                depth: depth,
+                height: height,
+                width: width,
+                spacing: (10, 10, 10),
+                modality: modality,
+                seriesDescription: modality == "MR" ? "T1" : "FDG PET"
+            )
+        }
+
+        let mr = blockVolume(modality: "MR", blockX: 4..<8)
+        let petOffset = blockVolume(modality: "PT", blockX: 10..<14)
+        let petAligned = blockVolume(modality: "PT", blockX: 4..<8)
+
+        let before = RegistrationQualityAssurance.evaluate(
+            fixed: mr,
+            movingOnFixedGrid: petOffset,
+            label: "Before"
+        )
+        let after = RegistrationQualityAssurance.evaluate(
+            fixed: mr,
+            movingOnFixedGrid: petAligned,
+            label: "After"
+        )
+        let comparison = RegistrationQualityAssurance.compare(before: before, after: after)
+
+        XCTAssertGreaterThan(before.centroidResidualMM ?? 0, 50)
+        XCTAssertEqual(after.centroidResidualMM ?? -1, 0, accuracy: 1e-6)
+        XCTAssertGreaterThan(comparison.centroidImprovementMM ?? 0, 50)
+        XCTAssertEqual(comparison.grade, .pass)
+        XCTAssertGreaterThan(after.normalizedMutualInformation ?? 0, before.normalizedMutualInformation ?? 0)
     }
 
     func testVolumeWorldVoxelRoundTripUsesDirection() {

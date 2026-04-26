@@ -49,23 +49,53 @@ public enum PETMRDeformableBackend: String, CaseIterable, Identifiable, Codable,
     }
 }
 
+public enum PETMRRegistrationMetricPreset: String, CaseIterable, Identifiable, Codable, Sendable {
+    case multimodalMI
+    case sameContrastCC
+    case hybridMIAndCC
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .multimodalMI: return "Multimodal MI"
+        case .sameContrastCC: return "Same-contrast CC"
+        case .hybridMIAndCC: return "Hybrid MI + CC"
+        }
+    }
+
+    public var helpText: String {
+        switch self {
+        case .multimodalMI:
+            return "Mutual information for PET/MR, CT/MR, and other cross-modality registration."
+        case .sameContrastCC:
+            return "Local cross-correlation for same-modality or similar-contrast images."
+        case .hybridMIAndCC:
+            return "Uses mutual information plus cross-correlation when the modalities share enough anatomy."
+        }
+    }
+}
+
 public struct PETMRDeformableRegistrationConfiguration: Equatable, Sendable {
     public var backend: PETMRDeformableBackend
     public var executablePath: String
     public var modelPath: String
     public var extraArguments: String
     public var timeoutSeconds: Double
+    public var metricPreset: PETMRRegistrationMetricPreset
 
     public init(backend: PETMRDeformableBackend = .internalBodyEnvelope,
                 executablePath: String = "",
                 modelPath: String = "",
                 extraArguments: String = "",
-                timeoutSeconds: Double = 900) {
+                timeoutSeconds: Double = 900,
+                metricPreset: PETMRRegistrationMetricPreset = .multimodalMI) {
         self.backend = backend
         self.executablePath = executablePath
         self.modelPath = modelPath
         self.extraArguments = extraArguments
         self.timeoutSeconds = timeoutSeconds
+        self.metricPreset = metricPreset
     }
 
     public var isExternalConfigured: Bool {
@@ -100,6 +130,7 @@ public struct PETMRDeformableRegistrationResult: Sendable {
     public let stdout: String
     public let stderr: String
     public let durationSeconds: Double
+    public let deformationQuality: DeformationFieldQuality?
 }
 
 public enum PETMRDeformableRegistrationError: Error, LocalizedError {
@@ -151,6 +182,7 @@ public enum PETMRDeformableRegistrationRunner {
         let movingURL = workDir.appendingPathComponent("moving_pet_prealigned.nii")
         let warpedURL = workDir.appendingPathComponent("warped_pet.nii")
         let transformURL = workDir.appendingPathComponent("deformable_transform.nii")
+        let qaURL = workDir.appendingPathComponent("registration_qa.json")
 
         try NIfTIWriter.writeFloat32(fixed, to: fixedURL)
         try NIfTIWriter.writeFloat32(movingPrealigned, to: movingURL)
@@ -175,14 +207,25 @@ public enum PETMRDeformableRegistrationRunner {
         } catch {
             throw PETMRDeformableRegistrationError.outputLoadFailed(error.localizedDescription)
         }
+        let warpedOnFixedGrid: ImageVolume
+        let gridNote: String
+        if ImageVolumeGeometry.gridsMatch(fixed, warped) {
+            warpedOnFixedGrid = warped
+            gridNote = ""
+        } else {
+            warpedOnFixedGrid = VolumeResampler.resample(overlay: warped, toMatch: fixed, mode: .linear)
+            gridNote = "; output grid was resampled to fixed MR geometry"
+        }
+        let deformationQuality = RegistrationQualityAssurance.loadDeformationQualitySidecar(from: qaURL)
 
         return PETMRDeformableRegistrationResult(
-            warpedMoving: warped,
+            warpedMoving: warpedOnFixedGrid,
             backend: configuration.backend,
-            note: "\(configuration.backend.displayName) deformable registration finished in \(String(format: "%.1f", Date().timeIntervalSince(start)))s",
+            note: "\(configuration.backend.displayName) deformable registration finished in \(String(format: "%.1f", Date().timeIntervalSince(start)))s\(gridNote)",
             stdout: output.stdout,
             stderr: output.stderr,
-            durationSeconds: Date().timeIntervalSince(start)
+            durationSeconds: Date().timeIntervalSince(start),
+            deformationQuality: deformationQuality
         )
     }
 
@@ -208,6 +251,7 @@ public enum PETMRDeformableRegistrationRunner {
         switch configuration.backend {
         case .antsSyN:
             let prefix = workDir.appendingPathComponent("ants_").path
+            let synMetric = antsSyNMetricArguments(configuration.metricPreset, fixed: fixed, moving: moving)
             return CommandLine(
                 executable: exe,
                 arguments: [
@@ -227,7 +271,7 @@ public enum PETMRDeformableRegistrationRunner {
                     "--shrink-factors", "4x2x1",
                     "--smoothing-sigmas", "2x1x0vox",
                     "--transform", "SyN[0.08,3,0]",
-                    "--metric", "CC[\(fixed),\(moving),1,4]",
+                ] + synMetric + [
                     "--convergence", "[60x40x20,1e-6,10]",
                     "--shrink-factors", "4x2x1",
                     "--smoothing-sigmas", "2x1x0vox"
@@ -255,6 +299,22 @@ public enum PETMRDeformableRegistrationRunner {
 
         case .internalBodyEnvelope:
             return CommandLine(executable: "", arguments: [], environment: [:])
+        }
+    }
+
+    private static func antsSyNMetricArguments(_ preset: PETMRRegistrationMetricPreset,
+                                               fixed: String,
+                                               moving: String) -> [String] {
+        switch preset {
+        case .multimodalMI:
+            return ["--metric", "MI[\(fixed),\(moving),1,32,Regular,0.25]"]
+        case .sameContrastCC:
+            return ["--metric", "CC[\(fixed),\(moving),1,4]"]
+        case .hybridMIAndCC:
+            return [
+                "--metric", "MI[\(fixed),\(moving),0.7,32,Regular,0.25]",
+                "--metric", "CC[\(fixed),\(moving),0.3,4]"
+            ]
         }
     }
 
