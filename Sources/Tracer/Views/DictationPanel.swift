@@ -20,6 +20,10 @@ public struct DictationPanel: View {
     /// report workflow). Persisted across panel reopens via @AppStorage.
     @AppStorage("Tracer.Dictation.PanelTab") private var rawTab: String = Tab.transcript.rawValue
 
+    /// True while an AI feature is in flight; disables the buttons so the
+    /// user can't fire two drafts at once.
+    @State private var aiInFlight: Bool = false
+
     enum Tab: String, CaseIterable, Identifiable {
         case transcript
         case report
@@ -263,6 +267,8 @@ public struct DictationPanel: View {
                       : report.statusMessage)
             }
 
+            aiFeatureRow
+
             if report.report.signOff != nil {
                 Label("Signed — further edits will create an addendum",
                       systemImage: "lock.fill")
@@ -326,6 +332,78 @@ public struct DictationPanel: View {
         }
     }
 
+    /// AI feature buttons: Draft Impression (heuristic / LLM) and
+    /// Describe View (VLM). Both append to the report tagged
+    /// `aiDrafted` / `vlmSuggested`; the user accepts inline.
+    private var aiFeatureRow: some View {
+        HStack(spacing: 8) {
+            Button {
+                Task {
+                    aiInFlight = true
+                    await session.draftImpressionRequested()
+                    aiInFlight = false
+                }
+            } label: {
+                Label("Draft Impression", systemImage: "sparkles")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(aiInFlight || report.report.isFinalised)
+            .help("Generate a one-paragraph impression from the current Findings (\(session.impressionDrafter.displayName)).")
+
+            Button {
+                Task {
+                    aiInFlight = true
+                    await session.describeViewRequested()
+                    aiInFlight = false
+                }
+            } label: {
+                Label("Describe View", systemImage: "eye")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(aiInFlight || session.imageProvider == nil || report.report.isFinalised)
+            .help(session.imageProvider == nil
+                  ? "Pixel-to-text needs the active viewer image — wired in a later commit."
+                  : "Run the VLM (\(session.pixelToText.displayName)) on the current slice and append a finding-style sentence.")
+
+            Spacer()
+
+            if aiInFlight {
+                ProgressView().controlSize(.small)
+            }
+        }
+    }
+
+    /// Inline accept/reject controls shown next to AI-suggested sentences.
+    /// Only visible when the sentence is still pending (.aiDrafted /
+    /// .vlmSuggested).
+    private func suggestionControls(for sentence: ReportSentence) -> some View {
+        HStack(spacing: 4) {
+            Button {
+                report.applyMutation { current in
+                    AISuggestionAcceptor.acceptLastPending(in: current)
+                }
+            } label: {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 13))
+                    .foregroundColor(.green)
+            }
+            .buttonStyle(.borderless)
+            .help("Accept this AI suggestion (locks it in).")
+
+            Button {
+                report.removeSentence(id: sentence.id)
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 13))
+                    .foregroundColor(.red)
+            }
+            .buttonStyle(.borderless)
+            .help("Reject this AI suggestion.")
+        }
+    }
+
     private func sentenceRow(_ sentence: ReportSentence) -> some View {
         HStack(alignment: .top, spacing: 6) {
             provenanceBadge(sentence.provenance)
@@ -333,20 +411,22 @@ public struct DictationPanel: View {
                 .font(.system(size: 12))
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textSelection(.enabled)
-                .foregroundColor(sentence.provenance == .aiDrafted
-                                 || sentence.provenance == .vlmSuggested
+                .foregroundColor(AISuggestionAcceptor.isPendingSuggestion(sentence)
                                  ? .secondary : .primary)
-                .italic(sentence.provenance == .aiDrafted
-                        || sentence.provenance == .vlmSuggested)
-            Button {
-                report.removeSentence(id: sentence.id)
-            } label: {
-                Image(systemName: "minus.circle")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
+                .italic(AISuggestionAcceptor.isPendingSuggestion(sentence))
+            if AISuggestionAcceptor.isPendingSuggestion(sentence) {
+                suggestionControls(for: sentence)
+            } else {
+                Button {
+                    report.removeSentence(id: sentence.id)
+                } label: {
+                    Image(systemName: "minus.circle")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help("Remove sentence")
             }
-            .buttonStyle(.borderless)
-            .help("Remove sentence")
         }
     }
 

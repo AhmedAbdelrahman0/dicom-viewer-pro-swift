@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import CoreGraphics
 
 /// MainActor orchestrator for an active dictation session — wires the
 /// `AudioCapture` pipeline to a `DictationEngine` and republishes the
@@ -47,6 +48,18 @@ public final class DictationSession: ObservableObject {
     /// command parser updates this when the user dictates ".section
     /// impression" / "section impression".
     @Published public var activeSection: ReportSection.Kind = .findings
+
+    /// Drafter used for the "draft impression" voice command and the
+    /// panel's `Draft Impression` button. Heuristic by default; callers
+    /// swap in MedGemma / DGX-Whisper drafters via `setImpressionDrafter`.
+    public private(set) var impressionDrafter: ImpressionDrafter = HeuristicImpressionDrafter()
+    /// Suggester used for "describe view". Stub by default — wired into
+    /// MedGemma vision in a later commit. Optional `imageProvider`
+    /// closure injected by the panel: returns the current viewport
+    /// CGImage or nil if no slice is loaded.
+    public private(set) var pixelToText: PixelToTextSuggester = StubPixelToTextSuggester()
+    public var imageProvider: (@Sendable () -> (image: CGImage,
+                                                context: PixelToTextContext)?)? = nil
 
     private var captureTask: Task<Void, Never>?
     private var eventTask: Task<Void, Never>?
@@ -192,25 +205,58 @@ public final class DictationSession: ObservableObject {
         }
     }
 
-    /// Send a finalised utterance into the report buffer if one is bound.
-    /// Three early-exit branches:
+    /// Route a finalised utterance through the command interpreter and
+    /// then into the report buffer. Five branches:
     ///   1. No report bound → just keep `finalTranscript` (legacy mode).
-    ///   2. Looks like a section command ("section impression") → switch
-    ///      the active section, don't write anything yet.
+    ///   2. Recognised command (DictationCommandInterpreter) → execute
+    ///      the local side effect and skip writing.
     ///   3. Starts with a macro trigger → expand and append.
-    /// Otherwise the text becomes a single dictated sentence in the
-    /// active section.
+    ///   4. Pure-passthrough text → single dictated sentence in active
+    ///      section.
     private func routeFinal(text: String, confidence: Double?) {
         guard let store = reportStore else { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
-        if let target = Self.parseSectionCommand(trimmed) {
-            activeSection = target
-            statusMessage = "Section: \(target.rawValue)"
-            return
+        let command = DictationCommandInterpreter.interpret(trimmed)
+        switch command {
+        case .switchSection(let kind):
+            activeSection = kind
+            statusMessage = "Section: \(kind.rawValue)"
+        case .deleteLastSentence:
+            store.applyMutation { current in
+                AISuggestionAcceptor.deleteLastSentence(in: self.activeSection, of: current)
+            }
+            statusMessage = "Deleted last sentence in \(activeSection.rawValue)."
+        case .acceptLastSuggestion:
+            store.applyMutation { current in
+                AISuggestionAcceptor.acceptLastPending(in: current)
+            }
+            statusMessage = "Accepted last suggestion."
+        case .rejectLastSuggestion:
+            store.applyMutation { current in
+                AISuggestionAcceptor.rejectLastPending(in: current)
+            }
+            statusMessage = "Rejected last suggestion."
+        case .draftImpression:
+            Task { await self.draftImpressionRequested() }
+        case .describeView:
+            Task { await self.describeViewRequested() }
+        case .saveReport:
+            store.save()
+        case .signOff(let clinician):
+            store.signOff(by: clinician)
+            statusMessage = "Signed off as \(clinician)."
+        case .newReport:
+            store.resetToBlank()
+        case .passthrough(let raw):
+            handlePassthrough(raw, confidence: confidence, store: store)
         }
+    }
 
+    private func handlePassthrough(_ trimmed: String,
+                                   confidence: Double?,
+                                   store: RadiologyReportStore) {
         if let (macro, remainder) = macros.detectTrigger(in: trimmed) {
             let macroRef = macro
             store.applyMutation { current in
@@ -234,6 +280,69 @@ public final class DictationSession: ObservableObject {
             confidence: confidence
         )
         store.appendSentence(sentence, to: activeSection)
+    }
+
+    // MARK: - AI feature setters
+
+    public func setImpressionDrafter(_ drafter: ImpressionDrafter) {
+        impressionDrafter = drafter
+    }
+
+    public func setPixelToTextSuggester(_ suggester: PixelToTextSuggester) {
+        pixelToText = suggester
+    }
+
+    // MARK: - AI feature triggers
+
+    /// Run the drafter on the current report and append the result into
+    /// the Impression section. Surfaced both via "draft impression" voice
+    /// command and the panel's button.
+    public func draftImpressionRequested() async {
+        guard let store = reportStore else {
+            statusMessage = "No report — start dictating to draft an impression."
+            return
+        }
+        statusMessage = "Drafting impression…"
+        do {
+            guard let suggestion = try await impressionDrafter.draft(from: store.report) else {
+                statusMessage = "Drafter declined — not enough Findings yet."
+                return
+            }
+            store.appendSentence(suggestion, to: .impression)
+            statusMessage = "Drafted impression — review before accepting."
+        } catch let e as ImpressionDrafterError {
+            statusMessage = e.errorDescription ?? "Impression draft failed."
+        } catch {
+            statusMessage = "Impression draft failed: \(error.localizedDescription)"
+        }
+    }
+
+    /// Run the pixel-to-text suggester on the current viewport image and
+    /// append the result into the Findings section. Requires
+    /// `imageProvider` to be set; otherwise reports a friendly status.
+    public func describeViewRequested() async {
+        guard let store = reportStore else {
+            statusMessage = "No report — open a report first."
+            return
+        }
+        guard let provider = imageProvider, let snap = provider() else {
+            statusMessage = "No viewport image available — load a study first."
+            return
+        }
+        statusMessage = "Describing view…"
+        do {
+            guard let suggestion = try await pixelToText.suggest(image: snap.image,
+                                                                 context: snap.context) else {
+                statusMessage = "Suggester returned no description."
+                return
+            }
+            store.appendSentence(suggestion, to: .findings)
+            statusMessage = "Suggestion drafted — review before accepting."
+        } catch let e as PixelToTextSuggesterError {
+            statusMessage = e.errorDescription ?? "Pixel-to-text failed."
+        } catch {
+            statusMessage = "Pixel-to-text failed: \(error.localizedDescription)"
+        }
     }
 
     /// Recognise voice section-switch commands. Returns nil when the text
