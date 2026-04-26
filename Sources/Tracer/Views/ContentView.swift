@@ -1750,13 +1750,12 @@ private struct EmptyWorkstationView: View {
     }
 }
 
-// MARK: - Compact-aware engine presentation
+// MARK: - Engine presentation
 
 private extension View {
-    /// Routes an engine panel to `.inspector` on regular-width devices and
-    /// to `.sheet` on compact widths (iPad portrait / narrow splits). One
-    /// call site per engine keeps ContentView's body small while still
-    /// giving each engine its own presentation flag.
+    /// Presents engine panels as sheets. A stack of hidden macOS inspectors
+    /// can trigger AppKit key-view traversal during launch before the
+    /// workstation is interactive.
     @ViewBuilder
     func engineInspector<Body: View>(
         isCompact: Bool,
@@ -1764,21 +1763,12 @@ private extension View {
         inspectorWidth: (min: CGFloat, ideal: CGFloat, max: CGFloat),
         @ViewBuilder content: @escaping () -> Body
     ) -> some View {
-        if isCompact {
-            self.sheet(isPresented: isPresented) {
-                content()
-                    .frame(minWidth: inspectorWidth.min,
-                           minHeight: 560)
-            }
-        } else {
-            self.inspector(isPresented: isPresented) {
-                content()
-                    .inspectorColumnWidth(
-                        min: inspectorWidth.min,
-                        ideal: inspectorWidth.ideal,
-                        max: inspectorWidth.max
-                    )
-            }
+        self.sheet(isPresented: isPresented) {
+            content()
+                .frame(minWidth: inspectorWidth.min,
+                       idealWidth: inspectorWidth.ideal,
+                       maxWidth: inspectorWidth.max,
+                       minHeight: 560)
         }
     }
 }
