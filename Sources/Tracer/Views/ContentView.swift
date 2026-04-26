@@ -23,6 +23,11 @@ public struct ContentView: View {
     @StateObject private var reconstruction = NuclearReconstructionViewModel()
     @StateObject private var syntheticCT = SyntheticCTViewModel()
     @StateObject private var dosimetry = Lu177DosimetryViewModel()
+    /// Dictation session — survives panel open/close so an in-progress
+    /// transcript isn't lost when the user toggles the inspector. Engine
+    /// (Apple Speech today, WhisperKit later) is hot-swappable via
+    /// `dictation.setEngine(_:)`.
+    @StateObject private var dictation = DictationSession()
     @State private var showingFileImporter = false
     @State private var showingDirectoryPicker = false
     @State private var fileImporterMode: FileImporterMode = .volume
@@ -36,6 +41,7 @@ public struct ContentView: View {
     @State private var showLesionDetectorPanel = false
     @State private var showPETACPanel = false
     @State private var showNuclearToolsPanel = false
+    @State private var showDictationPanel = false
     @State private var cohortStudies: [PACSWorklistStudy] = []
     @State private var showAboutWindow = false
     @State private var showOnboarding = false
@@ -188,6 +194,12 @@ public struct ContentView: View {
                     closeInspectorButton { showNuclearToolsPanel = false }
                 }
         }
+        .modifier(DictationInspectorModifier(
+            isCompact: useCompactEnginePresentation,
+            isPresented: $showDictationPanel,
+            session: dictation,
+            close: { showDictationPanel = false }
+        ))
         .fileImporter(
             isPresented: $showingFileImporter,
             allowedContentTypes: [.data, .item],
@@ -571,13 +583,23 @@ public struct ContentView: View {
                       systemImage: "atom")
             }
             .keyboardShortcut("u", modifiers: [.command, .shift])
+
+            Divider()
+
+            Button {
+                showInspector(.dictation)
+            } label: {
+                Label("Dictation — push-to-talk reporting + AI",
+                      systemImage: "waveform.and.mic")
+            }
+            .keyboardShortcut("v", modifiers: [.command, .shift])
         } label: {
             Label("AI Engines", systemImage: "cpu")
                 .font(.system(size: 12, weight: .medium))
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .help("AI Engines\n• MONAI Label (⌘⇧M)\n• nnU-Net (⌘⇧N)\n• PET Engine (⌘⇧P)\n• Classify (⌘⇧C)\n• Model Manager (⌘⇧W)\n• Cohort Batch (⌘⇧B)\n• Lesion Detection (⌘⇧D)\n• PET AC (⌘⇧K)\n• Nuclear Tools (⌘⇧U)\nPanels open as side inspectors — ⌘. to close.")
+        .help("AI Engines\n• MONAI Label (⌘⇧M)\n• nnU-Net (⌘⇧N)\n• PET Engine (⌘⇧P)\n• Classify (⌘⇧C)\n• Model Manager (⌘⇧W)\n• Cohort Batch (⌘⇧B)\n• Lesion Detection (⌘⇧D)\n• PET AC (⌘⇧K)\n• Nuclear Tools (⌘⇧U)\n• Dictation (⌘⇧V)\nPanels open as side inspectors — ⌘. to close.")
     }
 
     private var orientationMenu: some View {
@@ -972,6 +994,7 @@ public struct ContentView: View {
         showLesionDetectorPanel = false
         showPETACPanel = false
         showNuclearToolsPanel = false
+        showDictationPanel = false
         // Open the requested one next tick so the close animations settle.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
             switch which {
@@ -984,11 +1007,12 @@ public struct ContentView: View {
             case .lesionDetector: showLesionDetectorPanel = true
             case .petAC: showPETACPanel = true
             case .nuclearTools: showNuclearToolsPanel = true
+            case .dictation: showDictationPanel = true
             }
         }
     }
 
-    private enum EngineInspector { case monai, nnunet, pet, classification, modelManager, cohort, lesionDetector, petAC, nuclearTools }
+    private enum EngineInspector { case monai, nnunet, pet, classification, modelManager, cohort, lesionDetector, petAC, nuclearTools, dictation }
 
     /// Pull the full worklist (every indexed study in the SwiftData store)
     /// into the cohort panel. Called when the user opens the panel so the
@@ -1275,6 +1299,40 @@ private struct KeyboardShortcutIfAvailable: ViewModifier {
             content.keyboardShortcut(KeyEquivalent(c), modifiers: [])
         } else {
             content
+        }
+    }
+}
+
+/// Wraps the dictation panel's `engineInspector` modifier so the main
+/// `body` doesn't grow the modifier chain past Swift's type-inference
+/// budget. (SwiftUI `body` builders type-check each `.modifier(...)` link;
+/// past ~10 panels in one chain the inference times out.)
+private struct DictationInspectorModifier: ViewModifier {
+    let isCompact: Bool
+    @Binding var isPresented: Bool
+    @ObservedObject var session: DictationSession
+    let close: () -> Void
+
+    func body(content: Content) -> some View {
+        content.engineInspector(
+            isCompact: isCompact,
+            isPresented: $isPresented,
+            inspectorWidth: (min: 460, ideal: 520, max: 680)
+        ) {
+            DictationPanel(session: session)
+                .overlay(alignment: .topTrailing) {
+                    Button {
+                        close()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 16))
+                            .foregroundColor(.secondary)
+                            .padding(8)
+                    }
+                    .buttonStyle(.borderless)
+                    .keyboardShortcut(".", modifiers: [.command])
+                    .help("Close inspector (⌘.)")
+                }
         }
     }
 }
