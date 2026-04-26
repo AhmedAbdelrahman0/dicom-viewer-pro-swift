@@ -1232,8 +1232,8 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     public func openWorklistStudy(_ study: PACSWorklistStudy) async {
-        let ct = study.series.first { Modality.normalize($0.modality) == .CT }
-        let pet = study.series.first { Modality.normalize($0.modality) == .PT }
+        let ct = study.preferredAnatomicalSeriesForPETCT
+        let pet = study.preferredPETSeriesForPETCT
 
         if let ct, let pet {
             await openIndexedSeries(ct)

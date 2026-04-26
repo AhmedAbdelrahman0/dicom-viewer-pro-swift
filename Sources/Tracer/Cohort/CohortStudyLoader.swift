@@ -98,8 +98,8 @@ enum CohortStudyLoader {
         if !dicomSeries.isEmpty {
             return try loadDICOM(study: study, series: dicomSeries)
         }
-        if let firstNifti = niftiSeries.first {
-            return try loadNIfTI(study: study, series: firstNifti)
+        if !niftiSeries.isEmpty {
+            return try loadNIfTI(study: study, series: niftiSeries)
         }
         throw LoadError.emptyStudy
     }
@@ -137,8 +137,8 @@ enum CohortStudyLoader {
 
     private static func loadDICOM(study: PACSWorklistStudy,
                                   series: [PACSIndexedSeriesSnapshot]) throws -> LoadedStudy {
-        let ctSeries = series.first { Modality.normalize($0.modality) == .CT }
-        let petSeries = series.first { Modality.normalize($0.modality) == .PT }
+        let ctSeries = PACSWorklistStudy.preferredAnatomicalSeriesForPETCT(in: series)
+        let petSeries = PACSWorklistStudy.preferredPETSeriesForPETCT(in: series)
 
         // PET/CT → CT is the anatomic reference (primary), PET is aux ch 0.
         if let ctSeries, let petSeries {
@@ -188,15 +188,34 @@ enum CohortStudyLoader {
     // MARK: - NIfTI
 
     private static func loadNIfTI(study: PACSWorklistStudy,
-                                  series: PACSIndexedSeriesSnapshot) throws -> LoadedStudy {
-        let path = series.filePaths.first ?? series.sourcePath
+                                  series: [PACSIndexedSeriesSnapshot]) throws -> LoadedStudy {
+        let ctSeries = PACSWorklistStudy.preferredAnatomicalSeriesForPETCT(in: series)
+        let petSeries = PACSWorklistStudy.preferredPETSeriesForPETCT(in: series)
+
+        // NIfTI PET/CT archives such as AutoPET often store CT, CTres,
+        // PET, SUV, and SEG side by side. Treat CTres + SUV as the model
+        // input pair when available, and keep SEG out of imaging channels.
+        if let ctSeries, let petSeries {
+            let ct = try loadNIfTISeries(snapshot: ctSeries)
+            let pet = try loadNIfTISeries(snapshot: petSeries)
+            return LoadedStudy(primary: ct, auxiliary: [pet])
+        }
+
+        guard let primary = PACSWorklistStudy.preferredPrimaryImageSeries(in: series) else {
+            throw LoadError.emptyStudy
+        }
+        let vol = try loadNIfTISeries(snapshot: primary)
+        return LoadedStudy(primary: vol, auxiliary: [])
+    }
+
+    private static func loadNIfTISeries(snapshot: PACSIndexedSeriesSnapshot) throws -> ImageVolume {
+        let path = snapshot.filePaths.first ?? snapshot.sourcePath
         guard !path.isEmpty else {
             throw LoadError.niftiLoadFailed("NIfTI series has no file path")
         }
         do {
             let url = URL(fileURLWithPath: path)
-            let vol = try NIfTILoader.load(url, modalityHint: series.modality)
-            return LoadedStudy(primary: vol, auxiliary: [])
+            return try NIfTILoader.load(url, modalityHint: snapshot.modality)
         } catch {
             throw LoadError.niftiLoadFailed(error.localizedDescription)
         }

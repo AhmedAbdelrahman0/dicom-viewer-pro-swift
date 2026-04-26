@@ -45,6 +45,30 @@ final class GeometryAndIOTests: XCTestCase {
         return modelFolder
     }
 
+    private func makeIndexedSnapshot(path: String,
+                                     modality: String,
+                                     seriesDescription: String,
+                                     studyDescription: String = "FDG PET/CT",
+                                     studyDate: String = "20260426") -> PACSIndexedSeriesSnapshot {
+        PACSIndexedSeriesSnapshot(
+            id: "nifti:\(path)",
+            kind: .nifti,
+            seriesUID: "nifti:\(path)",
+            studyUID: "NIFTI_STUDY",
+            modality: modality,
+            patientID: "NIFTI_Import",
+            patientName: "NIfTI Import",
+            accessionNumber: "",
+            studyDescription: studyDescription,
+            studyDate: studyDate,
+            seriesDescription: seriesDescription,
+            sourcePath: path,
+            filePaths: [path],
+            instanceCount: 1,
+            indexedAt: Date()
+        )
+    }
+
     func testVolumeWorldVoxelRoundTripUsesDirection() {
         let direction = simd_double3x3(
             SIMD3<Double>(0, 1, 0),
@@ -332,6 +356,30 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertFalse(NIfTILoader.isVolumeFile(URL(fileURLWithPath: "/tmp/study.nrrd")))
         XCTAssertFalse(NIfTILoader.isVolumeFile(URL(fileURLWithPath: "/tmp/study.mha")))
         XCTAssertFalse(NIfTILoader.isVolumeFile(URL(fileURLWithPath: "/tmp/study.hdr")))
+    }
+
+    func testNIfTIWriterRoundTripsFirstVoxelWithoutExtensionShift() throws {
+        let volume = ImageVolume(
+            pixels: [11, 22, 33, 44],
+            depth: 1,
+            height: 2,
+            width: 2,
+            spacing: (2, 3, 4),
+            origin: (5, 6, 7),
+            modality: "PT",
+            seriesDescription: "SUV"
+        )
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("roundtrip-\(UUID().uuidString).nii")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try NIfTIWriter.write(volume, to: url)
+        let reloaded = try NIfTILoader.load(url, modalityHint: "PT")
+
+        XCTAssertEqual(reloaded.pixels, volume.pixels)
+        XCTAssertEqual(reloaded.spacing.x, 2, accuracy: 1e-6)
+        XCTAssertEqual(reloaded.spacing.y, 3, accuracy: 1e-6)
+        XCTAssertEqual(reloaded.spacing.z, 4, accuracy: 1e-6)
     }
 
     func testCompressedDICOMTransferSyntaxFailsBeforePixelRead() {
@@ -1813,6 +1861,98 @@ final class GeometryAndIOTests: XCTestCase {
         let studies = PACSWorklistStudy.grouped(from: [seriesA, seriesB])
         XCTAssertEqual(studies.count, 2,
                        "Each directory-scoped series should surface as its own worklist study")
+    }
+
+    func testPETCTWorklistPrefersResampledCTAndSUVNIfTIChannels() {
+        let series = [
+            makeIndexedSnapshot(path: "/study/CT.nii.gz", modality: "CT", seriesDescription: "CT"),
+            makeIndexedSnapshot(path: "/study/CTres.nii.gz", modality: "CT", seriesDescription: "CTres"),
+            makeIndexedSnapshot(path: "/study/PET.nii.gz", modality: "PT", seriesDescription: "PET"),
+            makeIndexedSnapshot(path: "/study/SUV.nii.gz", modality: "PT", seriesDescription: "SUV"),
+            makeIndexedSnapshot(path: "/study/SEG.nii.gz", modality: "SEG", seriesDescription: "SEG"),
+        ]
+        let study = PACSWorklistStudy.grouped(from: series).first
+
+        XCTAssertEqual(study?.preferredAnatomicalSeriesForPETCT?.seriesDescription, "CTres")
+        XCTAssertEqual(study?.preferredPETSeriesForPETCT?.seriesDescription, "SUV")
+        XCTAssertEqual(PACSWorklistStudy.preferredPrimaryImageSeries(in: series)?.seriesDescription, "CT")
+    }
+
+    func testCohortNIfTIStudyLoadsMatchedPETCTPairAndIgnoresSEGChannel() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracer-nifti-cohort-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        func writeVolume(_ name: String, modality: String, pixels: [Float]) throws -> PACSIndexedSeriesSnapshot {
+            let url = root.appendingPathComponent("\(name).nii")
+            let volume = ImageVolume(
+                pixels: pixels,
+                depth: 1,
+                height: 1,
+                width: pixels.count,
+                modality: modality,
+                seriesDescription: name,
+                sourceFiles: [url.path]
+            )
+            try NIfTIWriter.write(volume, to: url)
+            return PACSIndexBuilder.snapshotForNIfTI(url: url, indexedAt: Date())
+        }
+
+        let snapshots = try [
+            writeVolume("CT", modality: "CT", pixels: [100, 200]),
+            writeVolume("CTres", modality: "CT", pixels: [110, 210]),
+            writeVolume("PET", modality: "PT", pixels: [1, 2]),
+            writeVolume("SUV", modality: "PT", pixels: [3, 4]),
+            writeVolume("SEG", modality: "SEG", pixels: [1, 0]),
+        ]
+        let study = try XCTUnwrap(PACSWorklistStudy.grouped(from: snapshots).first)
+
+        let loaded = try CohortStudyLoader.load(study)
+
+        XCTAssertEqual(loaded.primary.seriesDescription, "CTres")
+        XCTAssertEqual(loaded.primary.modality, "CT")
+        XCTAssertEqual(loaded.primary.pixels, [110, 210])
+        XCTAssertEqual(loaded.auxiliary.count, 1)
+        XCTAssertEqual(loaded.auxiliary[0].seriesDescription, "SUV")
+        XCTAssertEqual(loaded.auxiliary[0].modality, "PT")
+        XCTAssertEqual(loaded.auxiliary[0].pixels, [3, 4])
+        XCTAssertFalse(loaded.allVolumes.contains { Modality.normalize($0.modality) == .SEG })
+    }
+
+    func testFDGPETCTLesionsDatasetIndexingScaleSmoke() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard env["TRACER_RUN_LARGE_DATASET_TESTS"] == "1" else {
+            throw XCTSkip("Set TRACER_RUN_LARGE_DATASET_TESTS=1 to run the local FDG PET/CT scale smoke.")
+        }
+
+        let rootPath = env["TRACER_LARGE_DATASET_ROOT"]
+            ?? "/Users/ahmedabdelrahman/Desktop/Datasets/FDG-PET-CT-Lesions"
+        let root = URL(fileURLWithPath: rootPath, isDirectory: true)
+        guard FileManager.default.fileExists(atPath: root.path) else {
+            throw XCTSkip("FDG PET/CT dataset not found at \(root.path)")
+        }
+
+        let result = PACSDirectoryIndexer.scan(url: root, progressStride: 2_000)
+        XCTAssertFalse(result.cancelled)
+        XCTAssertGreaterThanOrEqual(result.scannedFiles, 5_000)
+        XCTAssertGreaterThanOrEqual(result.niftiVolumes, 5_000)
+
+        let studies = PACSWorklistStudy.grouped(from: result.records)
+        XCTAssertGreaterThanOrEqual(studies.count, 850)
+
+        let petCTStudies = studies.filter {
+            $0.preferredAnatomicalSeriesForPETCT != nil &&
+            $0.preferredPETSeriesForPETCT != nil
+        }
+        XCTAssertGreaterThanOrEqual(petCTStudies.count, 850)
+
+        let matchedFixtureStudy = try XCTUnwrap(studies.first { study in
+            study.series.contains { $0.seriesDescription.caseInsensitiveCompare("CTres") == .orderedSame } &&
+            study.series.contains { $0.seriesDescription.caseInsensitiveCompare("SUV") == .orderedSame }
+        })
+        XCTAssertEqual(matchedFixtureStudy.preferredAnatomicalSeriesForPETCT?.seriesDescription, "CTres")
+        XCTAssertEqual(matchedFixtureStudy.preferredPETSeriesForPETCT?.seriesDescription, "SUV")
     }
 
     func testVolumeResamplerUsesWorldGeometry() {

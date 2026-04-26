@@ -36,7 +36,7 @@ struct StudyBrowserView: View {
     @State private var searchText: String = ""
     @State private var indexedSeries: [PACSIndexedSeriesSnapshot] = []
     @State private var indexedTotalCount: Int = 0
-    @State private var indexFetchLimit: Int = 5_000
+    @State private var indexFetchLimit: Int = 25_000
     @State private var statusFilter: WorklistStatusFilter = .all
     @State private var modalityFilter: String = "All"
     @State private var dateFilter: WorklistDateFilter = .all
@@ -44,7 +44,7 @@ struct StudyBrowserView: View {
     @State private var expandedStudyIDs: Set<String> = []
     @State private var isDropTargeted: Bool = false
 
-    private let indexPageSize = 5_000
+    private let indexPageSize = 25_000
     private let statusDefaultsKey = "Tracer.WorklistStudyStatuses"
 
     var body: some View {

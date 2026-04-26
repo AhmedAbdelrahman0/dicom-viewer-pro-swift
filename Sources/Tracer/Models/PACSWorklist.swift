@@ -123,6 +123,14 @@ public struct PACSWorklistStudy: Identifiable, Hashable, Sendable {
         series.reduce(0) { $0 + $1.instanceCount }
     }
 
+    public var preferredAnatomicalSeriesForPETCT: PACSIndexedSeriesSnapshot? {
+        Self.preferredAnatomicalSeriesForPETCT(in: series)
+    }
+
+    public var preferredPETSeriesForPETCT: PACSIndexedSeriesSnapshot? {
+        Self.preferredPETSeriesForPETCT(in: series)
+    }
+
     public var searchableText: String {
         ([
             patientID,
@@ -212,12 +220,63 @@ public struct PACSWorklistStudy: Identifiable, Hashable, Sendable {
         return snapshot.sourcePath
     }
 
+    public static func preferredAnatomicalSeriesForPETCT(in series: [PACSIndexedSeriesSnapshot]) -> PACSIndexedSeriesSnapshot? {
+        let anatomical = series.filter {
+            let modality = Modality.normalize($0.modality)
+            return modality == .CT || modality == .MR
+        }
+        return anatomical.max { lhs, rhs in
+            preferredAnatomicalScore(lhs) < preferredAnatomicalScore(rhs)
+        }
+    }
+
+    public static func preferredPETSeriesForPETCT(in series: [PACSIndexedSeriesSnapshot]) -> PACSIndexedSeriesSnapshot? {
+        let pet = series.filter { Modality.normalize($0.modality) == .PT }
+        return pet.max { lhs, rhs in
+            preferredPETScore(lhs) < preferredPETScore(rhs)
+        }
+    }
+
+    public static func preferredPrimaryImageSeries(in series: [PACSIndexedSeriesSnapshot]) -> PACSIndexedSeriesSnapshot? {
+        let images = series.filter { Modality.normalize($0.modality) != .SEG }
+        let candidates = images.isEmpty ? series : images
+        return candidates.min(by: seriesSort)
+    }
+
     private static func seriesSort(_ lhs: PACSIndexedSeriesSnapshot,
                                    _ rhs: PACSIndexedSeriesSnapshot) -> Bool {
         let lhsRank = modalitySortRank(lhs.modality)
         let rhsRank = modalitySortRank(rhs.modality)
         if lhsRank != rhsRank { return lhsRank < rhsRank }
         return lhs.seriesDescription < rhs.seriesDescription
+    }
+
+    private static func preferredAnatomicalScore(_ snapshot: PACSIndexedSeriesSnapshot) -> Int {
+        let desc = snapshot.seriesDescription.lowercased()
+        var score = Modality.normalize(snapshot.modality) == .CT ? 100 : 80
+        if desc == "ctres" || desc == "ct_res" || desc == "ct-res" {
+            score += 80
+        } else if desc.contains("ctres") || desc.contains("resampled") || desc.contains("registered") {
+            score += 60
+        } else if desc == "ct" {
+            score += 20
+        }
+        score += min(snapshot.instanceCount, 10)
+        return score
+    }
+
+    private static func preferredPETScore(_ snapshot: PACSIndexedSeriesSnapshot) -> Int {
+        let desc = snapshot.seriesDescription.lowercased()
+        var score = 100
+        if desc == "suv" || desc == "suvbw" {
+            score += 80
+        } else if desc.contains("suv") {
+            score += 60
+        } else if desc == "pet" || desc.contains("pet") {
+            score += 20
+        }
+        score += min(snapshot.instanceCount, 10)
+        return score
     }
 
     private static func modalitySortRank(_ modality: String) -> Int {

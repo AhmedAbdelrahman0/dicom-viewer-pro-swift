@@ -47,7 +47,6 @@ public enum NIfTIWriter {
 
         var out = Data()
         out.append(buildHeader(volume: volume, datatype: 16 /* DT_FLOAT32 */, bitpix: 32))
-        out.append(Data([0, 0, 0, 0])) // no extensions
 
         volume.pixels.withUnsafeBufferPointer { buf in
             out.append(UnsafeBufferPointer(start: buf.baseAddress, count: buf.count))
