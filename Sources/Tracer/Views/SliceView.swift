@@ -204,6 +204,18 @@ public struct SliceView: View {
 
             Spacer()
 
+            if displayMode == .fused, vm.fusion != nil, vm.hangingGrid.paneCount <= 16 {
+                fusionPETColorPicker
+
+                HoverIconButton(
+                    systemImage: vm.fusion?.overlayVisible == true ? "eye" : "eye.slash",
+                    tooltip: "Toggle fused PET overlay\nShows or hides the PET layer without changing PET-only or MIP panes.",
+                    isActive: vm.fusion?.overlayVisible == true
+                ) {
+                    vm.setFusionOverlayVisible(!(vm.fusion?.overlayVisible ?? false))
+                }
+            }
+
             if displayMode == .petOnly, vm.hangingGrid.paneCount <= 16 {
                 petOnlyColorPicker
 
@@ -238,6 +250,22 @@ public struct SliceView: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(TracerTheme.headerBackground)
+    }
+
+    private var fusionPETColorPicker: some View {
+        Picker("", selection: Binding(
+            get: { vm.overlayColormap },
+            set: { vm.setFusionColormap($0) }
+        )) {
+            ForEach(Colormap.allCases) { color in
+                Text(color.displayName).tag(color)
+            }
+        }
+        .labelsHidden()
+        .pickerStyle(.menu)
+        .frame(width: 92)
+        .controlSize(.mini)
+        .help("Fused PET overlay colormap. This is independent from PET-only and MIP coloring.")
     }
 
     private var petOnlyColorPicker: some View {

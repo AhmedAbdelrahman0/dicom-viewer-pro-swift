@@ -1968,6 +1968,9 @@ private struct PETMIPPane: View {
     @State private var dragStartPan: CGSize?
     @State private var gestureStartZoom: CGFloat?
     @State private var viewportBeforeInteraction: ViewportTransformState?
+    #if os(macOS)
+    @State private var wheelAccumulator: CGFloat = 0
+    #endif
 
     var body: some View {
         VStack(spacing: 0) {
@@ -2038,6 +2041,11 @@ private struct PETMIPPane: View {
                     vm.resetViewportTransform(for: index)
                 }
                 .help("Drag the PET MIP to navigate the linked MPR crosshair. Use Pan or Zoom tools for viewport movement.")
+                #if os(macOS)
+                .background(PETMIPScrollWheelBridge { event in
+                    handleScrollWheel(event)
+                })
+                #endif
             }
             .background(TracerTheme.viewportBackground)
             .overlay(Rectangle().stroke(TracerTheme.hairline, lineWidth: 1))
@@ -2210,6 +2218,21 @@ private struct PETMIPPane: View {
         .help("Horizontal MIP rotation. Drag to rotate AP/lateral projections.")
     }
 
+    #if os(macOS)
+    private func handleScrollWheel(_ event: PETMIPScrollWheelEvent) {
+        let rawDelta = event.rawDeltaY
+        guard abs(rawDelta) > 0.01 else { return }
+
+        let threshold: CGFloat = event.hasPreciseScrollingDeltas ? 5 : 1
+        wheelAccumulator += rawDelta
+        let steps = Int(wheelAccumulator / threshold)
+        guard steps != 0 else { return }
+
+        wheelAccumulator -= CGFloat(steps) * threshold
+        vm.previewPETMIPRotationDegrees(vm.petMIPRotationDegrees + Double(steps) * 5)
+    }
+    #endif
+
     private var mipBadge: some View {
         HStack(spacing: 6) {
             Image(systemName: "cube.transparent")
@@ -2351,6 +2374,90 @@ private struct PETMIPPane: View {
         return (Int(localX.rounded(.down)), Int(localY.rounded(.down)))
     }
 }
+
+#if os(macOS)
+private struct PETMIPScrollWheelEvent {
+    let rawDeltaY: CGFloat
+    let hasPreciseScrollingDeltas: Bool
+
+    init(_ event: NSEvent) {
+        self.rawDeltaY = event.scrollingDeltaY != 0 ? event.scrollingDeltaY : event.deltaY
+        self.hasPreciseScrollingDeltas = event.hasPreciseScrollingDeltas
+    }
+}
+
+private struct PETMIPScrollWheelBridge: NSViewRepresentable {
+    var onScroll: (PETMIPScrollWheelEvent) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onScroll: onScroll)
+    }
+
+    func makeNSView(context: Context) -> ScrollWheelView {
+        let view = ScrollWheelView()
+        view.coordinator = context.coordinator
+        return view
+    }
+
+    func updateNSView(_ nsView: ScrollWheelView, context: Context) {
+        context.coordinator.onScroll = onScroll
+        nsView.coordinator = context.coordinator
+    }
+
+    static func dismantleNSView(_ nsView: ScrollWheelView, coordinator: Coordinator) {
+        nsView.removeMonitor()
+    }
+
+    final class Coordinator {
+        var onScroll: (PETMIPScrollWheelEvent) -> Void
+
+        init(onScroll: @escaping (PETMIPScrollWheelEvent) -> Void) {
+            self.onScroll = onScroll
+        }
+    }
+
+    final class ScrollWheelView: NSView {
+        weak var coordinator: Coordinator?
+        private var monitor: Any?
+
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+            installMonitor()
+        }
+
+        required init?(coder: NSCoder) {
+            super.init(coder: coder)
+            installMonitor()
+        }
+
+        deinit {
+            removeMonitor()
+        }
+
+        private func installMonitor() {
+            guard monitor == nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                guard let self,
+                      let window = self.window,
+                      event.window === window else {
+                    return event
+                }
+                let point = convert(event.locationInWindow, from: nil)
+                guard bounds.contains(point) else { return event }
+                coordinator?.onScroll(PETMIPScrollWheelEvent(event))
+                return nil
+            }
+        }
+
+        func removeMonitor() {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+                self.monitor = nil
+            }
+        }
+    }
+}
+#endif
 
 private struct EmptyWorkstationView: View {
     var body: some View {
