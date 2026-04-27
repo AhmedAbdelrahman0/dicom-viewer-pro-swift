@@ -7,6 +7,7 @@ struct SegmentationRunsPanel: View {
         VStack(alignment: .leading, spacing: 14) {
             header
             actions
+            activeQuality
             Divider()
             if vm.segmentationRuns.isEmpty {
                 emptyState
@@ -53,6 +54,36 @@ struct SegmentationRunsPanel: View {
         .controlSize(.small)
     }
 
+    @ViewBuilder
+    private var activeQuality: some View {
+        if let report = vm.activeSegmentationQualityReport {
+            VStack(alignment: .leading, spacing: 5) {
+                Label("Active QA: \(report.compactSummary)", systemImage: icon(for: report.status))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(color(for: report.status))
+                if !report.warnings.isEmpty {
+                    Text(report.warnings.prefix(2).joined(separator: " "))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(TracerTheme.viewportBackground.opacity(0.62))
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+        } else if vm.labeling.activeLabelMap != nil {
+            Button {
+                _ = vm.refreshActiveSegmentationQuality()
+            } label: {
+                Label("Run Active QA", systemImage: "checkmark.seal")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+    }
+
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 8) {
             Label("No saved segmentation runs for this study", systemImage: "tray")
@@ -64,6 +95,22 @@ struct SegmentationRunsPanel: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.vertical, 8)
+    }
+
+    private func icon(for status: SegmentationQualityReport.Status) -> String {
+        switch status {
+        case .pass: return "checkmark.seal"
+        case .warning: return "exclamationmark.triangle"
+        case .fail: return "xmark.octagon"
+        }
+    }
+
+    private func color(for status: SegmentationQualityReport.Status) -> Color {
+        switch status {
+        case .pass: return .green
+        case .warning: return .orange
+        case .fail: return .red
+        }
     }
 }
 
@@ -86,6 +133,11 @@ private struct SegmentationRunRow: View {
                         .font(.system(size: 10, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
+                    if let qa = record.metadata["qa.status"] {
+                        Text("QA \(qa.uppercased())")
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(qaColor(qa))
+                    }
                     Text(record.createdAt, style: .date)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -141,5 +193,14 @@ private struct SegmentationRunRow: View {
                 .stroke(TracerTheme.hairline, lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: 7))
+    }
+
+    private func qaColor(_ status: String) -> Color {
+        switch status {
+        case "pass": return .green
+        case "warning": return .orange
+        case "fail": return .red
+        default: return .secondary
+        }
     }
 }

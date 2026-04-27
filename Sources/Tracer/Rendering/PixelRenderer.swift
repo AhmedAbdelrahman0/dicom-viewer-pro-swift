@@ -57,6 +57,58 @@ public enum PixelRenderer {
         return makeCGImage(rgbaBytes: rgba, width: width, height: height)
     }
 
+    /// Render a PET/anatomic fusion as a true cross-fade, not as a translucent
+    /// overlay. `opacity == 0` is base anatomy only; `opacity == 1` is PET only.
+    public static func makeFusedImage(
+        basePixels: [Float],
+        overlayPixels: [Float],
+        width: Int,
+        height: Int,
+        baseWindow: Double,
+        baseLevel: Double,
+        overlayWindow: Double,
+        overlayLevel: Double,
+        colormap: Colormap,
+        opacity: Double,
+        invertBase: Bool = false,
+        invertOverlay: Bool = false
+    ) -> CGImage? {
+        guard basePixels.count == width * height,
+              overlayPixels.count == width * height else { return nil }
+
+        let lut = ColormapLUT.generate(colormap, size: 256)
+        let baseMin = baseLevel - baseWindow / 2
+        let baseRange = max(baseWindow, 0.0001)
+        let overlayMin = overlayLevel - overlayWindow / 2
+        let overlayRange = max(overlayWindow, 0.0001)
+        let petWeight = max(0, min(1, opacity))
+        var rgba = [UInt8](repeating: 0, count: width * height * 4)
+
+        for i in 0..<basePixels.count {
+            let baseNormalized = max(0, min(1, (Double(basePixels[i]) - baseMin) / baseRange))
+            let baseMapped = invertBase ? (1 - baseNormalized) : baseNormalized
+            let baseByte = baseMapped * 255
+
+            let overlayNormalized = max(0, min(1, (Double(overlayPixels[i]) - overlayMin) / overlayRange))
+            let overlayMapped = invertOverlay ? (1 - overlayNormalized) : overlayNormalized
+            let idx = Int(overlayMapped * 255)
+            let (r, g, b, _) = lut[idx]
+            // Fusion blend opacity is an operator-facing PET/CT mix, not the
+            // colormap's overlay alpha. At 100% PET, even low-uptake PET
+            // background should replace the CT instead of letting anatomy
+            // show through.
+            let overlayWeight = petWeight
+            let baseWeight = 1 - overlayWeight
+
+            rgba[i * 4] = UInt8(max(0, min(255, baseByte * baseWeight + Double(r) * overlayWeight)))
+            rgba[i * 4 + 1] = UInt8(max(0, min(255, baseByte * baseWeight + Double(g) * overlayWeight)))
+            rgba[i * 4 + 2] = UInt8(max(0, min(255, baseByte * baseWeight + Double(b) * overlayWeight)))
+            rgba[i * 4 + 3] = 255
+        }
+
+        return makeCGImage(rgbaBytes: rgba, width: width, height: height)
+    }
+
     // MARK: - CGImage creation helpers
 
     private static func makeCGImage(grayBytes bytes: [UInt8], width: Int, height: Int) -> CGImage? {

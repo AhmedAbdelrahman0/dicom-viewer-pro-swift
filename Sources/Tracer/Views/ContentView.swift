@@ -49,6 +49,7 @@ public struct ContentView: View {
     @State private var showOnboarding = false
     @State private var showJobCenter = false
     @State private var showActivityLog = false
+    @State private var showWindowingPanel = false
     /// First-launch onboarding gate — once dismissed the welcome card
     /// sheet stays closed across relaunches. Users can re-open it from
     /// Help → Show Welcome Walkthrough.
@@ -447,7 +448,7 @@ public struct ContentView: View {
 
         hangingLayoutMenu
 
-        petDisplayMenu
+        windowingPopoverButton
 
         HoverIconButton(
             systemImage: "flame",
@@ -463,16 +464,6 @@ public struct ContentView: View {
         .disabled(vm.labeling.activeLabelMap == nil || vm.isVolumeOperationRunning)
 
         volumetryMenu
-
-        HoverIconButton(
-            systemImage: "wand.and.stars",
-            tooltip: "Auto Window / Level  (⌘R or ⌘4)\n"
-                   + "Automatically compute window/level from the\n"
-                   + "1–99 percentile of the current volume."
-        ) {
-            vm.autoWLHistogram(preset: .balanced)
-        }
-        .keyboardShortcut("r", modifiers: [.command])
 
         // Invisible buttons that own the global W/L shortcuts. Kept off-
         // screen so they participate in the shortcut graph without
@@ -493,6 +484,8 @@ public struct ContentView: View {
             .keyboardShortcut("3", modifiers: [.command])
             Button("Auto W/L") { vm.autoWLHistogram(preset: .balanced) }
                 .keyboardShortcut("4", modifiers: [.command])
+            Button("Auto W/L (Command R)") { vm.autoWLHistogram(preset: .balanced) }
+                .keyboardShortcut("r", modifiers: [.command])
         }
         .frame(width: 0, height: 0)
         .hidden()
@@ -662,83 +655,22 @@ public struct ContentView: View {
         .help("Image Positioning\nControls anterior/posterior and right/left display flips from the toolbar.")
     }
 
-    private var petDisplayMenu: some View {
-        Menu {
-            Section("Colormaps") {
-                Picker("Fusion PET Color", selection: Binding(
-                    get: { vm.overlayColormap },
-                    set: { vm.setFusionColormap($0) }
-                )) {
-                    ForEach(Colormap.allCases) { color in
-                        Text(color.displayName).tag(color)
-                    }
-                }
-                Picker("PET-only Color", selection: Binding(
-                    get: { vm.petOnlyColormap },
-                    set: { vm.setPETOnlyColormap($0) }
-                )) {
-                    ForEach(Colormap.allCases) { color in
-                        Text(color.displayName).tag(color)
-                    }
-                }
-                Picker("MIP PET Color", selection: Binding(
-                    get: { vm.mipColormap },
-                    set: { vm.setPETMIPColormap($0) }
-                )) {
-                    ForEach(Colormap.allCases) { color in
-                        Text(color.displayName).tag(color)
-                    }
-                }
-            }
-            Section("Inversion") {
-                Toggle("Invert PET images", isOn: Binding(
-                    get: { vm.invertPETImages },
-                    set: { vm.setInvertPETImages($0) }
-                ))
-                Toggle("Invert CT images", isOn: Binding(
-                    get: { vm.invertCTImages },
-                    set: { vm.setInvertCTImages($0) }
-                ))
-                Toggle("Invert MIP", isOn: Binding(
-                    get: { vm.invertPETMIP },
-                    set: { vm.setInvertPETMIP($0) }
-                ))
-            }
-            Section("Fusion SUV Range") {
-                Button("SUV 0–5") { vm.setPETOverlayRange(min: 0, max: 5) }
-                Button("SUV 0–10") { vm.setPETOverlayRange(min: 0, max: 10) }
-                Button("SUV 0–15") { vm.setPETOverlayRange(min: 0, max: 15) }
-                Button("SUV 2.5–15") { vm.setPETOverlayRange(min: 2.5, max: 15) }
-                Button {
-                    if let pet = vm.activePETQuantificationVolume {
-                        let range = vm.petSUVDisplayRange(for: pet)
-                        vm.setPETOverlayRange(min: max(0, range.min), max: max(1, range.max))
-                    }
-                } label: {
-                    Label("Auto Fusion SUV Range", systemImage: "wand.and.stars")
-                }
-            }
-            Section("PET-only SUV Range") {
-                Button("SUV 0–5") { vm.setPETOnlyRange(min: 0, max: 5) }
-                Button("SUV 0–10") { vm.setPETOnlyRange(min: 0, max: 10) }
-                Button("SUV 0–15") { vm.setPETOnlyRange(min: 0, max: 15) }
-                Button("SUV 2.5–15") { vm.setPETOnlyRange(min: 2.5, max: 15) }
-                Button {
-                    if let pet = vm.activePETQuantificationVolume {
-                        let range = vm.petSUVDisplayRange(for: pet)
-                        vm.setPETOnlyRange(min: max(0, range.min), max: max(1, range.max))
-                    }
-                } label: {
-                    Label("Auto PET-only SUV Range", systemImage: "wand.and.stars")
-                }
-            }
+    private var windowingPopoverButton: some View {
+        Button {
+            showWindowingPanel.toggle()
         } label: {
-            Label("PET Color", systemImage: "paintpalette")
+            Label("Windowing", systemImage: "slider.horizontal.3")
                 .font(.system(size: 12, weight: .medium))
         }
-        .menuStyle(.borderlessButton)
+        .buttonStyle(.borderless)
         .fixedSize()
-        .help("PET Coloring\nFusion overlay, PET-only panes, and MIP now have independent color and inversion controls.")
+        .help("Image Windowing\nCT/MR window-level, PET SUV ranges, PET palettes, and inversion controls in one panel.")
+        .popover(isPresented: $showWindowingPanel, arrowEdge: .bottom) {
+            WindowingControlsView(showTitle: true, compact: true)
+                .environmentObject(vm)
+                .padding(14)
+                .frame(width: 420)
+        }
     }
 
     private var hangingLayoutMenu: some View {
@@ -1976,8 +1908,8 @@ private struct PETMIPPane: View {
         VStack(spacing: 0) {
             header
             GeometryReader { geo in
-                let mipImage = vm.makePETMIPImage(for: plane.axis)
-                let labelImage = vm.makePETMIPLabelImage(for: plane.axis)
+                let mipImage = vm.cachedPETMIPImage(for: plane.axis)
+                let labelImage = vm.cachedPETMIPLabelImage(for: plane.axis)
                 ZStack {
                     TracerTheme.viewportBackground
                     if let cg = mipImage {
@@ -2009,6 +1941,14 @@ private struct PETMIPPane: View {
                             }
                         }
                         .padding(8)
+
+                        if !vm.isPETMIPCineReady(for: plane.axis) {
+                            VStack {
+                                cineWarmupBadge
+                                Spacer()
+                            }
+                            .padding(8)
+                        }
                     } else if vm.activePETQuantificationVolume != nil {
                         VStack(spacing: 8) {
                             ProgressView()
@@ -2051,6 +1991,12 @@ private struct PETMIPPane: View {
             .overlay(Rectangle().stroke(TracerTheme.hairline, lineWidth: 1))
         }
         .background(TracerTheme.panelBackground)
+        .onAppear {
+            vm.preparePETMIPCine(for: plane.axis)
+        }
+        .onChange(of: plane.axis) { _, axis in
+            vm.preparePETMIPCine(for: axis)
+        }
     }
 
     private var zoom: CGFloat {
@@ -2088,17 +2034,8 @@ private struct PETMIPPane: View {
             Spacer()
 
             if vm.hangingGrid.paneCount <= 16 {
-                mipColorPicker
                 mipRotationMenu
                 mipRotationSlider
-
-                HoverIconButton(
-                    systemImage: "circle.righthalf.filled",
-                    tooltip: "Invert PET MIP\nReverses only the MIP color window.",
-                    isActive: vm.invertPETMIP
-                ) {
-                    vm.setInvertPETMIP(!vm.invertPETMIP)
-                }
 
                 HoverIconButton(
                     systemImage: "rectangle.on.rectangle.angled",
@@ -2107,7 +2044,7 @@ private struct PETMIPPane: View {
                     vm.resetViewportTransform(for: index)
                 }
 
-                Text(String(format: "SUV %.1f–%.1f", vm.petOverlayRangeMin, vm.petOverlayRangeMax))
+                Text(String(format: "SUV %.1f-%.1f", vm.petMIPRangeMin, vm.petMIPRangeMax))
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.secondary)
             }
@@ -2160,62 +2097,49 @@ private struct PETMIPPane: View {
         .controlSize(.mini)
     }
 
-    private var mipColorPicker: some View {
-        Picker("", selection: Binding(
-            get: { vm.mipColormap },
-            set: { vm.setPETMIPColormap($0) }
-        )) {
-            ForEach(Colormap.allCases) { color in
-                Text(color.displayName).tag(color)
-            }
-        }
-        .labelsHidden()
-        .pickerStyle(.menu)
-        .frame(width: 92)
-        .controlSize(.mini)
-        .help("PET MIP colormap. This is independent from fused PET coloring.")
-    }
-
     private var mipRotationMenu: some View {
         Menu {
             Text(String(format: "Horizontal rotation %.0f°", vm.petMIPRotationDegrees))
             Divider()
             Button("Rotate -15°") {
-                vm.setPETMIPRotationDegrees(vm.petMIPRotationDegrees - 15)
+                applyPreparedMIPRotation(vm.petMIPRotationDegrees - 15, commit: true)
             }
             Button("Rotate -5°") {
-                vm.setPETMIPRotationDegrees(vm.petMIPRotationDegrees - 5)
+                applyPreparedMIPRotation(vm.petMIPRotationDegrees - 5, commit: true)
             }
             Button("Reset 0°") {
-                vm.setPETMIPRotationDegrees(0)
+                applyPreparedMIPRotation(0, commit: true)
             }
             Button("Rotate +5°") {
-                vm.setPETMIPRotationDegrees(vm.petMIPRotationDegrees + 5)
+                applyPreparedMIPRotation(vm.petMIPRotationDegrees + 5, commit: true)
             }
             Button("Rotate +15°") {
-                vm.setPETMIPRotationDegrees(vm.petMIPRotationDegrees + 15)
+                applyPreparedMIPRotation(vm.petMIPRotationDegrees + 15, commit: true)
             }
             Divider()
-            Button("AP MIP") { vm.setPETMIPRotationDegrees(0) }
-            Button("Left lateral MIP") { vm.setPETMIPRotationDegrees(90) }
-            Button("Right lateral MIP") { vm.setPETMIPRotationDegrees(-90) }
+            Button("AP MIP") { applyPreparedMIPRotation(0, commit: true) }
+            Button("Left lateral MIP") { applyPreparedMIPRotation(90, commit: true) }
+            Button("PA MIP") { applyPreparedMIPRotation(180, commit: true) }
+            Button("Right lateral MIP") { applyPreparedMIPRotation(270, commit: true) }
         } label: {
             Label(String(format: "%.0f°", vm.petMIPRotationDegrees), systemImage: "arrow.triangle.2.circlepath")
                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
         }
         .menuStyle(.borderlessButton)
         .controlSize(.mini)
-        .help("Rotate PET MIP around the horizontal axial plane. This creates AP/lateral MIP views for navigation.")
+        .disabled(!vm.isPETMIPCurrentFrameReady(for: plane.axis))
+        .help("Rotate PET MIP through the full 0–360° horizontal axial circle. This creates AP/PA/lateral MIP views for navigation.")
     }
 
     private var mipRotationSlider: some View {
         Slider(value: Binding(
             get: { vm.petMIPRotationDegrees },
-            set: { vm.previewPETMIPRotationDegrees($0) }
-        ), in: -180...180, step: 5)
+            set: { applyPreparedMIPRotation($0, commit: false) }
+        ), in: 0...360, step: 5)
         .frame(width: 84)
         .controlSize(.mini)
-        .help("Horizontal MIP rotation. Drag to rotate AP/lateral projections.")
+        .disabled(!vm.isPETMIPCurrentFrameReady(for: plane.axis))
+        .help("Horizontal MIP rotation. Drag through the full 0–360° AP/PA/lateral circle.")
     }
 
     #if os(macOS)
@@ -2229,9 +2153,47 @@ private struct PETMIPPane: View {
         guard steps != 0 else { return }
 
         wheelAccumulator -= CGFloat(steps) * threshold
-        vm.previewPETMIPRotationDegrees(vm.petMIPRotationDegrees + Double(steps) * 5)
+        let degreesPerStep = event.hasPreciseScrollingDeltas ? 5.0 : 10.0
+        applyPreparedMIPRotation(vm.petMIPRotationDegrees + Double(steps) * degreesPerStep,
+                                 commit: false)
     }
     #endif
+
+    private func applyPreparedMIPRotation(_ degrees: Double, commit: Bool) {
+        guard vm.isPETMIPRenderedFrameReady(for: plane.axis, rotationDegrees: degrees) else {
+            vm.preparePETMIPFrame(for: plane.axis, rotationDegrees: degrees)
+            vm.statusMessage = String(format: "Preparing HD PET MIP frame %.0f° (cine %.0f%%)",
+                                      degrees,
+                                      vm.petMIPCineProgress(for: plane.axis) * 100)
+            return
+        }
+        if commit {
+            vm.setPETMIPRotationDegrees(degrees,
+                                        priorityAxis: plane.axis,
+                                        scheduleFullQuality: false)
+        } else {
+            vm.previewPETMIPRotationDegrees(degrees,
+                                            priorityAxis: plane.axis,
+                                            scheduleFullQuality: false)
+        }
+    }
+
+    private var cineWarmupBadge: some View {
+        let progress = vm.petMIPCineProgress(for: plane.axis)
+        return HStack(spacing: 8) {
+            ProgressView(value: progress)
+                .frame(width: 72)
+                .controlSize(.mini)
+            Text(String(format: "HD cine %.0f%%", progress * 100))
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundColor(.white)
+        }
+        .padding(.vertical, 5)
+        .padding(.horizontal, 8)
+        .background(Color.black.opacity(0.64))
+        .cornerRadius(5)
+        .help("Pre-rendering full-resolution PET MIP frames so wheel rotation stays sharp.")
+    }
 
     private var mipBadge: some View {
         HStack(spacing: 6) {

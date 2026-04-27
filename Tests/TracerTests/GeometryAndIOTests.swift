@@ -503,6 +503,31 @@ final class GeometryAndIOTests: XCTestCase {
     }
 
     @MainActor
+    func testVisibleSliceCacheWarmupPopulatesCacheForHangingPanes() {
+        let vm = ViewerViewModel()
+        let volume = ImageVolume(
+            pixels: Array(0..<64).map(Float.init),
+            depth: 4,
+            height: 4,
+            width: 4,
+            modality: "CT"
+        )
+        vm.displayVolume(volume)
+        vm.setHangingGrid(columns: 2, rows: 1)
+        vm.clearSliceRenderCache()
+
+        let warmed = vm.warmVisibleSliceCacheNow(limit: 2)
+        let missesAfterWarmup = vm.sliceRenderCacheMissCount
+        let warmedAgain = vm.warmVisibleSliceCacheNow(limit: 2)
+
+        XCTAssertEqual(warmed, 2)
+        XCTAssertEqual(warmedAgain, 2)
+        XCTAssertGreaterThan(missesAfterWarmup, 0)
+        XCTAssertGreaterThan(vm.sliceRenderCacheHitCount, 0)
+        XCTAssertEqual(vm.sliceRenderCacheMissCount, missesAfterWarmup)
+    }
+
+    @MainActor
     func testLabelRenderCacheInvalidatesWhenVoxelsChange() throws {
         let vm = ViewerViewModel()
         let volume = ImageVolume(
@@ -1660,6 +1685,206 @@ final class GeometryAndIOTests: XCTestCase {
 
         XCTAssertEqual(stats?.suvMax ?? 0, 10, accuracy: 1e-9)
         XCTAssertEqual(stats?.suvMean ?? 0, 7.5, accuracy: 1e-9)
+    }
+
+    func testPETOncologyReviewBuildsTargetLesionTable() throws {
+        var pixels = [Float](repeating: 1, count: 4 * 4 * 4)
+        pixels[0] = 12
+        pixels[1] = 8
+        pixels[63] = 6
+        let pet = ImageVolume(
+            pixels: pixels,
+            depth: 4,
+            height: 4,
+            width: 4,
+            spacing: (2, 3, 4),
+            modality: "PT",
+            suvScaleFactor: 0.5
+        )
+        let map = LabelMap(
+            parentSeriesUID: pet.seriesUID,
+            depth: 4,
+            height: 4,
+            width: 4,
+            classes: [LabelClass(labelID: 1, name: "Lesion", category: .lesion, color: .orange)]
+        )
+        map.setValue(1, z: 0, y: 0, x: 0)
+        map.setValue(1, z: 0, y: 0, x: 1)
+        map.setValue(1, z: 3, y: 3, x: 3)
+
+        let report = try PETQuantification.compute(petVolume: pet, labelMap: map)
+        let review = PETOncologyReview.build(from: report, petVolume: pet)
+
+        XCTAssertEqual(review.lesionCount, 2)
+        XCTAssertEqual(review.maxSUV, 6, accuracy: 1e-9)
+        XCTAssertEqual(review.targetLesions.first?.suvMax ?? 0, 6, accuracy: 1e-9)
+        XCTAssertEqual(review.targetLesions.first?.longestAxisMM ?? 0, 4, accuracy: 1e-9)
+        XCTAssertTrue(review.workflowFlags.contains { $0.id == "oligometastatic-count" })
+    }
+
+    func testBrainPETFDGAnalysisUsesNormalDatabaseZScores() throws {
+        let pet = ImageVolume(
+            pixels: [5, 9, 10, 10],
+            depth: 1,
+            height: 1,
+            width: 4,
+            modality: "PT"
+        )
+        let atlas = LabelMap(
+            parentSeriesUID: pet.seriesUID,
+            depth: 1,
+            height: 1,
+            width: 4,
+            classes: [
+                LabelClass(labelID: 1, name: "Left temporal", category: .brain, color: .orange),
+                LabelClass(labelID: 2, name: "Right temporal", category: .brain, color: .blue),
+                LabelClass(labelID: 10, name: "Cerebellum", category: .brain, color: .green)
+            ]
+        )
+        atlas.voxels = [1, 2, 10, 10]
+        let normals = BrainPETNormalDatabase(
+            id: "test-fdg",
+            name: "Test FDG normals",
+            tracer: .fdg,
+            referenceRegion: "Cerebellum",
+            sourceDescription: "Unit test",
+            entries: [
+                .init(regionName: "Left temporal", labelID: 1, meanSUVR: 0.95, sdSUVR: 0.1, sampleSize: 40),
+                .init(regionName: "Right temporal", labelID: 2, meanSUVR: 0.95, sdSUVR: 0.1, sampleSize: 40)
+            ]
+        )
+
+        let report = try BrainPETAnalysis.analyze(
+            volume: pet,
+            atlas: atlas,
+            configuration: BrainPETAnalysisConfiguration(tracer: .fdg, normalDatabase: normals)
+        )
+
+        XCTAssertEqual(report.referenceMean, 10, accuracy: 1e-9)
+        XCTAssertEqual(report.targetSUVR ?? 0, 0.7, accuracy: 1e-9)
+        XCTAssertEqual(report.hypometabolicRegions.map(\.name), ["Left temporal"])
+        XCTAssertEqual(report.regions.first(where: { $0.labelID == 1 })?.zScore ?? 0, -4.5, accuracy: 1e-9)
+    }
+
+    func testBrainPETNormalDatabaseParsesCSV() throws {
+        let csv = """
+        region,labelID,meanSUVR,sdSUVR,n,ageMin,ageMax
+        "Left temporal",1,0.95,0.10,40,55,85
+        Right temporal,2,0.96,0.11,40,55,85
+        """
+
+        let database = try BrainPETNormalDatabaseIO.parseCSV(
+            csv,
+            id: "test",
+            name: "Test",
+            tracer: .fdg,
+            referenceRegion: "Cerebellum",
+            sourceDescription: "unit"
+        )
+
+        XCTAssertEqual(database.entries.count, 2)
+        XCTAssertEqual(database.entry(labelID: 1, regionName: "Left temporal")?.meanSUVR, 0.95)
+        XCTAssertEqual(database.entries.first?.ageMin, 55)
+    }
+
+    func testBrainPETAmyloidAnalysisComputesCentiloid() throws {
+        let pet = ImageVolume(
+            pixels: [2, 2, 1, 1],
+            depth: 1,
+            height: 1,
+            width: 4,
+            modality: "PT"
+        )
+        let atlas = LabelMap(
+            parentSeriesUID: pet.seriesUID,
+            depth: 1,
+            height: 1,
+            width: 4,
+            classes: [
+                LabelClass(labelID: 1, name: "Frontal cortex", category: .brain, color: .orange),
+                LabelClass(labelID: 2, name: "Precuneus", category: .brain, color: .blue),
+                LabelClass(labelID: 10, name: "Whole cerebellum", category: .brain, color: .green)
+            ]
+        )
+        atlas.voxels = [1, 2, 10, 10]
+
+        let report = try BrainPETAnalysis.analyze(
+            volume: pet,
+            atlas: atlas,
+            configuration: BrainPETAnalysisConfiguration(tracer: .amyloidPIB)
+        )
+
+        XCTAssertEqual(report.targetSUVR ?? 0, 2.0, accuracy: 1e-9)
+        XCTAssertEqual(report.centiloid ?? 0, 100 * (2.0 - 1.009) / 1.067, accuracy: 1e-9)
+    }
+
+    func testBrainPETTauAnalysisThresholdAdjustsGrade() throws {
+        let pet = ImageVolume(
+            pixels: [1.5, 1.45, 1.1, 1.0],
+            depth: 1,
+            height: 1,
+            width: 4,
+            modality: "PT"
+        )
+        let atlas = LabelMap(
+            parentSeriesUID: pet.seriesUID,
+            depth: 1,
+            height: 1,
+            width: 4,
+            classes: [
+                LabelClass(labelID: 1, name: "Entorhinal cortex", category: .brain, color: .orange),
+                LabelClass(labelID: 2, name: "Inferior temporal", category: .brain, color: .blue),
+                LabelClass(labelID: 3, name: "Parietal cortex", category: .brain, color: .purple),
+                LabelClass(labelID: 10, name: "Cerebellar gray", category: .brain, color: .green)
+            ]
+        )
+        atlas.voxels = [1, 2, 3, 10]
+
+        let permissive = try BrainPETAnalysis.analyze(
+            volume: pet,
+            atlas: atlas,
+            configuration: BrainPETAnalysisConfiguration(tracer: .tauFlortaucipir, tauSUVRThreshold: 1.34)
+        )
+        let strict = try BrainPETAnalysis.analyze(
+            volume: pet,
+            atlas: atlas,
+            configuration: BrainPETAnalysisConfiguration(tracer: .tauFlortaucipir, tauSUVRThreshold: 1.6)
+        )
+
+        XCTAssertEqual(permissive.tauGrade?.stage, "Braak III/IV-like")
+        XCTAssertEqual(strict.tauGrade?.stage, "Tau-negative or below threshold")
+    }
+
+    func testSegmentationQualityFlagsTinyIslandsAndEdges() {
+        let volume = ImageVolume(
+            pixels: [Float](repeating: 0, count: 4 * 4 * 4),
+            depth: 4,
+            height: 4,
+            width: 4,
+            spacing: (2, 2, 2),
+            modality: "PT"
+        )
+        let map = LabelMap(
+            parentSeriesUID: volume.seriesUID,
+            depth: 4,
+            height: 4,
+            width: 4,
+            classes: [
+                LabelClass(labelID: 1, name: "Lesion", category: .lesion, color: .orange),
+                LabelClass(labelID: 2, name: "Unused", category: .organ, color: .blue)
+            ]
+        )
+        map.setValue(1, z: 0, y: 0, x: 0)
+        map.setValue(1, z: 2, y: 2, x: 2)
+
+        let report = SegmentationQuality.analyze(labelMap: map, referenceVolume: volume)
+
+        XCTAssertEqual(report.status, .warning)
+        XCTAssertEqual(report.nonzeroVoxelCount, 2)
+        XCTAssertEqual(report.componentCount, 2)
+        XCTAssertEqual(report.tinyComponentCount, 2)
+        XCTAssertEqual(report.edgeTouchingComponentCount, 1)
+        XCTAssertEqual(report.missingClassIDs, [2])
     }
 
     func testPETSegmentationThresholdUsesSUVTransform() {
@@ -3458,6 +3683,8 @@ final class GeometryAndIOTests: XCTestCase {
 
         let saved = try XCTUnwrap(vm.captureActiveSegmentationRun(engine: "Assistant", backend: "DGX", modelID: "test-model"))
         XCTAssertEqual(vm.segmentationRuns.count, 1)
+        XCTAssertEqual(saved.metadata["qa.status"], "warning")
+        XCTAssertNotNil(saved.metadata["oncology.summary"])
 
         vm.labeling.replaceLabelMapsForStudySession([])
         XCTAssertTrue(vm.loadSegmentationRun(id: saved.id))
@@ -5223,19 +5450,35 @@ final class GeometryAndIOTests: XCTestCase {
         vm.setFusionColormap(.petHotIron)
         vm.setPETOnlyColormap(.petViridis)
         vm.setPETMIPColormap(.grayscale)
+        vm.setInvertPETImages(true)
+        vm.setInvertPETOnlyImages(false)
+        vm.setInvertPETMIP(false)
         vm.setPETOverlayRange(min: 0, max: 5)
         vm.setPETOnlyRange(min: 2.5, max: 15)
+        vm.setPETMIPRange(min: 0, max: 8)
 
         XCTAssertEqual(vm.overlayColormap, .petHotIron)
         XCTAssertEqual(vm.petOnlyColormap, .petViridis)
         XCTAssertEqual(vm.mipColormap, .grayscale)
+        XCTAssertTrue(vm.invertPETImages)
+        XCTAssertFalse(vm.invertPETOnlyImages)
+        XCTAssertFalse(vm.invertPETMIP)
         XCTAssertEqual(vm.petOverlayRangeMax, 5, accuracy: 1e-9)
         XCTAssertEqual(vm.petOnlyRangeMin, 2.5, accuracy: 1e-9)
+        XCTAssertEqual(vm.petMIPRangeMax, 8, accuracy: 1e-9)
 
         vm.setPETMIPColormap(.invertedGray)
+        vm.setInvertPETOnlyImages(true)
+        vm.adjustPETMIPIntensity(brighter: true)
         XCTAssertEqual(vm.overlayColormap, .petHotIron)
         XCTAssertEqual(vm.petOnlyColormap, .petViridis)
         XCTAssertEqual(vm.mipColormap, .invertedGray)
+        XCTAssertTrue(vm.invertPETImages)
+        XCTAssertTrue(vm.invertPETOnlyImages)
+        XCTAssertFalse(vm.invertPETMIP)
+        XCTAssertEqual(vm.petOverlayRangeMax, 5, accuracy: 1e-9)
+        XCTAssertEqual(vm.petOnlyRangeMin, 2.5, accuracy: 1e-9)
+        XCTAssertLessThan(vm.petMIPRangeMax, 8)
     }
 
     @MainActor
@@ -5243,14 +5486,21 @@ final class GeometryAndIOTests: XCTestCase {
         let vm = ViewerViewModel()
 
         vm.setInvertPETImages(true)
+        vm.setInvertPETOnlyImages(true)
         vm.setInvertCTImages(true)
 
         XCTAssertTrue(vm.invertPETImages)
+        XCTAssertTrue(vm.invertPETOnlyImages)
         XCTAssertTrue(vm.invertCTImages)
 
         vm.undoLastEdit()
         XCTAssertTrue(vm.invertPETImages)
+        XCTAssertTrue(vm.invertPETOnlyImages)
         XCTAssertFalse(vm.invertCTImages)
+
+        vm.undoLastEdit()
+        XCTAssertTrue(vm.invertPETImages)
+        XCTAssertFalse(vm.invertPETOnlyImages)
 
         vm.undoLastEdit()
         XCTAssertFalse(vm.invertPETImages)
@@ -5278,6 +5528,7 @@ final class GeometryAndIOTests: XCTestCase {
         vm.annotations.append(Annotation(type: .distance, points: [CGPoint(x: 0, y: 0), CGPoint(x: 1, y: 1)]))
         vm.setViewportZoom(2, for: 0)
         vm.setInvertPETImages(true)
+        vm.setInvertPETOnlyImages(true)
         vm.setInvertCTImages(true)
         vm.setInvertPETMIP(true)
 
@@ -5287,6 +5538,7 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertTrue(vm.annotations.isEmpty)
         XCTAssertTrue(vm.viewportTransform(for: 0).isIdentity)
         XCTAssertFalse(vm.invertPETImages)
+        XCTAssertFalse(vm.invertPETOnlyImages)
         XCTAssertFalse(vm.invertCTImages)
         XCTAssertFalse(vm.invertPETMIP)
 
@@ -5296,6 +5548,7 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(vm.annotations.count, 1)
         XCTAssertEqual(vm.viewportTransform(for: 0).zoom, 2, accuracy: 1e-9)
         XCTAssertTrue(vm.invertPETImages)
+        XCTAssertTrue(vm.invertPETOnlyImages)
         XCTAssertTrue(vm.invertCTImages)
         XCTAssertTrue(vm.invertPETMIP)
     }
@@ -5402,6 +5655,129 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(vm.petMIPCacheRevision, revision)
     }
 
+    @MainActor
+    func testPETMIPRotationUsesFullCircleNormalization() {
+        let vm = ViewerViewModel()
+
+        vm.previewPETMIPRotationDegrees(-90)
+        XCTAssertEqual(vm.petMIPRotationDegrees, 270, accuracy: 0.0001)
+
+        vm.previewPETMIPRotationDegrees(365)
+        XCTAssertEqual(vm.petMIPRotationDegrees, 5, accuracy: 0.0001)
+
+        vm.previewPETMIPRotationDegrees(720)
+        XCTAssertEqual(vm.petMIPRotationDegrees, 0, accuracy: 0.0001)
+    }
+
+    @MainActor
+    func testPETMIPRotationKeepsNearestCachedProjectionVisible() async throws {
+        let pixels = (0..<(6 * 6 * 4)).map { Float($0 % 17) }
+        let pet = ImageVolume(pixels: pixels,
+                              depth: 4,
+                              height: 6,
+                              width: 6,
+                              modality: "PT",
+                              seriesDescription: "PET")
+        let vm = ViewerViewModel()
+        vm.displayVolume(pet)
+
+        XCTAssertNil(vm.makePETMIPImage(for: SlicePlane.coronal.axis))
+        for _ in 0..<100 where vm.isPETMIPProjectionPending(for: SlicePlane.coronal.axis) {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertNotNil(vm.makePETMIPImage(for: SlicePlane.coronal.axis))
+
+        vm.previewPETMIPRotationDegrees(15)
+        XCTAssertNotNil(vm.makePETMIPImage(for: SlicePlane.coronal.axis))
+        // The interactive cine cache may already have the requested frame;
+        // either way, rotation must keep a drawable MIP instead of blanking.
+        for _ in 0..<20 where vm.isPETMIPProjectionPending(for: SlicePlane.coronal.axis) {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertNotNil(vm.makePETMIPImage(for: SlicePlane.coronal.axis))
+    }
+
+    @MainActor
+    func testPETMIPCinePreparesRenderedFramesForWheelRotation() async throws {
+        let voxelCount = 8 * 8 * 5
+        let pixels = (0..<voxelCount).map { value -> Float in
+            Float((value * 7) % 31)
+        }
+        let pet = ImageVolume(pixels: pixels,
+                              depth: 5,
+                              height: 8,
+                              width: 8,
+                              modality: "PT",
+                              seriesDescription: "PET")
+        let vm = ViewerViewModel()
+        vm.displayVolume(pet)
+        vm.preparePETMIPCine(for: SlicePlane.coronal.axis)
+
+        for _ in 0..<200 where !vm.isPETMIPCineReady(for: SlicePlane.coronal.axis) {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertTrue(vm.isPETMIPCineReady(for: SlicePlane.coronal.axis))
+        XCTAssertTrue(vm.isPETMIPRenderedFrameReady(for: SlicePlane.coronal.axis, rotationDegrees: 5))
+
+        vm.previewPETMIPRotationDegrees(5,
+                                        priorityAxis: SlicePlane.coronal.axis,
+                                        scheduleFullQuality: false)
+        let image = try XCTUnwrap(vm.cachedPETMIPImage(for: SlicePlane.coronal.axis))
+        XCTAssertEqual(image.height, pet.depth)
+        XCTAssertFalse(vm.isPETMIPProjectionPending(for: SlicePlane.coronal.axis))
+    }
+
+    @MainActor
+    func testPETMIPCineFramesKeepStableCanvasAcrossRotation() async throws {
+        let voxelCount = 8 * 6 * 5
+        let pixels = (0..<voxelCount).map { value -> Float in
+            Float((value * 11) % 37)
+        }
+        let pet = ImageVolume(pixels: pixels,
+                              depth: 5,
+                              height: 6,
+                              width: 8,
+                              modality: "PT",
+                              seriesDescription: "PET")
+        let vm = ViewerViewModel()
+        vm.displayVolume(pet)
+        vm.preparePETMIPCine(for: SlicePlane.coronal.axis)
+
+        for _ in 0..<300 where !vm.isPETMIPCineReady(for: SlicePlane.coronal.axis) {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertTrue(vm.isPETMIPCineReady(for: SlicePlane.coronal.axis))
+
+        var sizes: [String] = []
+        for angle in [0.0, 45.0, 90.0, 135.0] {
+            XCTAssertTrue(vm.isPETMIPRenderedFrameReady(for: SlicePlane.coronal.axis, rotationDegrees: angle))
+            vm.previewPETMIPRotationDegrees(angle,
+                                            priorityAxis: SlicePlane.coronal.axis,
+                                            scheduleFullQuality: false)
+            let image = try XCTUnwrap(vm.cachedPETMIPImage(for: SlicePlane.coronal.axis))
+            sizes.append("\(image.width)x\(image.height)")
+        }
+
+        XCTAssertEqual(Set(sizes).count, 1)
+    }
+
+    @MainActor
+    func testCachedPETMIPImageDoesNotStartMissingFrameWork() {
+        let pet = ImageVolume(pixels: [Float](repeating: 1, count: 2 * 2 * 2),
+                              depth: 2,
+                              height: 2,
+                              width: 2,
+                              modality: "PT",
+                              seriesDescription: "PET")
+        let vm = ViewerViewModel()
+        vm.displayVolume(pet)
+
+        XCTAssertNil(vm.cachedPETMIPImage(for: SlicePlane.axial.axis))
+        XCTAssertFalse(vm.isPETMIPProjectionPending(for: SlicePlane.axial.axis))
+    }
+
     func testColorRendererCanInvertMIPWindowMapping() throws {
         let normal = try XCTUnwrap(PixelRenderer.makeColorImage(
             pixels: [0, 1],
@@ -5428,6 +5804,57 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(normalData[4], 255)
         XCTAssertEqual(invertedData[0], 255)
         XCTAssertEqual(invertedData[4], 0)
+    }
+
+    func testFusedRendererCrossFadesBaseDownAsPETComesUp() throws {
+        let ctOnly = try XCTUnwrap(PixelRenderer.makeFusedImage(
+            basePixels: [1],
+            overlayPixels: [0],
+            width: 1,
+            height: 1,
+            baseWindow: 1,
+            baseLevel: 0.5,
+            overlayWindow: 1,
+            overlayLevel: 0.5,
+            colormap: .tracerPET,
+            opacity: 0
+        ))
+        let halfBlend = try XCTUnwrap(PixelRenderer.makeFusedImage(
+            basePixels: [1],
+            overlayPixels: [0],
+            width: 1,
+            height: 1,
+            baseWindow: 1,
+            baseLevel: 0.5,
+            overlayWindow: 1,
+            overlayLevel: 0.5,
+            colormap: .tracerPET,
+            opacity: 0.5
+        ))
+        let petOnly = try XCTUnwrap(PixelRenderer.makeFusedImage(
+            basePixels: [1],
+            overlayPixels: [0],
+            width: 1,
+            height: 1,
+            baseWindow: 1,
+            baseLevel: 0.5,
+            overlayWindow: 1,
+            overlayLevel: 0.5,
+            colormap: .tracerPET,
+            opacity: 1
+        ))
+
+        let ctData = try XCTUnwrap(ctOnly.dataProvider?.data as Data?)
+        let halfData = try XCTUnwrap(halfBlend.dataProvider?.data as Data?)
+        let petData = try XCTUnwrap(petOnly.dataProvider?.data as Data?)
+
+        XCTAssertEqual(ctData[0], 255)
+        XCTAssertEqual(ctData[1], 255)
+        XCTAssertEqual(ctData[2], 255)
+        XCTAssertEqual(petData[0], 0)
+        XCTAssertEqual(petData[1], 0)
+        XCTAssertGreaterThan(petData[2], 0)
+        XCTAssertLessThanOrEqual(abs(Int(halfData[0]) - 127), 1)
     }
 
     // MARK: - PET attenuation correction integration tests

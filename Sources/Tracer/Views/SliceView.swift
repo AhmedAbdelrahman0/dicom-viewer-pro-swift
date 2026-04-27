@@ -222,9 +222,9 @@ public struct SliceView: View {
                 HoverIconButton(
                     systemImage: "circle.lefthalf.filled",
                     tooltip: "Invert PET-only image\nReverses PET-only color mapping without changing fused or MIP panes.",
-                    isActive: vm.invertPETImages
+                    isActive: vm.invertPETOnlyImages
                 ) {
-                    vm.setInvertPETImages(!vm.invertPETImages)
+                    vm.setInvertPETOnlyImages(!vm.invertPETOnlyImages)
                 }
             }
 
@@ -417,14 +417,15 @@ public struct SliceView: View {
         guard displayMode == .fused, let pair = vm.fusion, pair.overlayVisible else { return nil }
         let overlay = Modality.normalize(pair.overlayVolume.modality).displayName
         let base = Modality.normalize(pair.baseVolume.modality).displayName
-        let opacity = Int(pair.opacity * 100)
+        let petOpacity = Int(pair.opacity * 100)
+        let baseOpacity = 100 - petOpacity
         return AnyView(
             HStack(spacing: 6) {
                 Image(systemName: "square.3.layers.3d.down.right")
                     .foregroundColor(TracerTheme.accentBright)
-                Text("Top \(overlay) \(opacity)%")
+                Text("\(overlay) \(petOpacity)%")
                     .foregroundColor(.white)
-                Text("over \(base)")
+                Text("\(base) \(baseOpacity)%")
                     .foregroundColor(.secondary)
                 Circle()
                     .fill(Color.orange)

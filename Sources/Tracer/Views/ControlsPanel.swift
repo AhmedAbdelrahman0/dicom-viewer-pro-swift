@@ -13,6 +13,8 @@ struct ControlsPanel: View {
     enum Group: String, CaseIterable, Identifiable, Hashable {
         case assistant = "AI"
         case viewing = "Viewing"
+        case oncology = "Oncology"
+        case brain = "Brain"
         case segmentation = "Segmentation"
         case registration = "Reg"
         case info = "Info"
@@ -81,6 +83,10 @@ struct ControlsPanel: View {
                     case .dynamic: ScrollView { DynamicTab().padding(16) }
                     case .display: ScrollView { DisplayTab().padding(16) }
                     }
+                case .oncology:
+                    ScrollView { OncologyReviewPanel().padding(16) }
+                case .brain:
+                    ScrollView { BrainPETPanel().padding(16) }
                 case .segmentation:
                     switch segSub {
                     case .labels:       ScrollView { LabelingPanel() }
@@ -117,64 +123,7 @@ private struct WLTab: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Window / Level")
-                .font(.headline)
-
-            HStack {
-                Text("W:")
-                    .frame(width: 20, alignment: .leading)
-                Slider(value: Binding(
-                    get: { vm.window },
-                    set: { vm.setWindow($0) }
-                ), in: 1...5000)
-                Text(String(format: "%.0f", vm.window))
-                    .font(.system(size: 11, design: .monospaced))
-                    .frame(width: 48, alignment: .trailing)
-            }
-
-            HStack {
-                Text("L:")
-                    .frame(width: 20, alignment: .leading)
-                Slider(value: Binding(
-                    get: { vm.level },
-                    set: { vm.setLevel($0) }
-                ), in: -1000...3000)
-                Text(String(format: "%.0f", vm.level))
-                    .font(.system(size: 11, design: .monospaced))
-                    .frame(width: 48, alignment: .trailing)
-            }
-
-            Divider()
-
-            if let v = vm.currentVolume {
-                let modality = Modality.normalize(v.modality)
-                Text("\(modality.displayName) Presets")
-                    .font(.subheadline)
-
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())],
-                          spacing: 4) {
-                    ForEach(WLPresets.presets(for: modality)) { p in
-                        Button {
-                            vm.applyPreset(p)
-                        } label: {
-                            Text(p.name)
-                                .font(.system(size: 11))
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        .help("W: \(Int(p.window))  L: \(Int(p.level))")
-                    }
-                }
-            }
-
-            Button {
-                vm.autoWL()
-            } label: {
-                Label("Auto Window / Level", systemImage: "wand.and.stars")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
+            WindowingControlsView(showTitle: true, compact: false)
 
             Divider()
             StudySessionPanel()
@@ -488,12 +437,13 @@ private struct FusionTab: View {
                 ))
                     .help("Use this when anterior/posterior anatomy appears swapped in CT/PET panes.")
 
-                // Opacity
+                // PET/CT blend. At 100% PET the fused pane is PET-only; at
+                // 0% PET it is anatomy-only.
                 VStack(alignment: .leading) {
                     HStack {
-                        Text("Opacity")
+                        Text("PET blend")
                         Spacer()
-                        Text("\(Int(vm.overlayOpacity * 100))%")
+                        Text("PET \(Int(vm.overlayOpacity * 100)) / CT \(100 - Int(vm.overlayOpacity * 100))")
                             .font(.system(size: 11, design: .monospaced))
                     }
                     Slider(value: Binding(
@@ -501,81 +451,6 @@ private struct FusionTab: View {
                         set: { vm.setFusionOpacity($0) }
                     ), in: 0...1)
                 }
-
-                // Colormap
-                HStack {
-                    Text("Fusion colormap")
-                    Spacer()
-                    Picker("", selection: Binding(
-                        get: { vm.overlayColormap },
-                        set: { vm.setFusionColormap($0) }
-                    )) {
-                        ForEach(Colormap.allCases) { c in
-                            Text(c.displayName).tag(c)
-                        }
-                    }
-                    .labelsHidden()
-                }
-
-                HStack {
-                    Text("PET-only colormap")
-                    Spacer()
-                    Picker("", selection: Binding(
-                        get: { vm.petOnlyColormap },
-                        set: { vm.setPETOnlyColormap($0) }
-                    )) {
-                        ForEach(Colormap.allCases) { c in
-                            Text(c.displayName).tag(c)
-                        }
-                    }
-                    .labelsHidden()
-                }
-
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 5) {
-                    ForEach(petPaletteShortlist) { c in
-                        Button {
-                            vm.setFusionColormap(c)
-                        } label: {
-                            HStack(spacing: 5) {
-                                paletteSwatch(c)
-                                Text(shortPaletteName(c))
-                                    .font(.system(size: 10, weight: .medium))
-                                    .lineLimit(1)
-                                    .minimumScaleFactor(0.75)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.mini)
-                    }
-                }
-
-                Toggle("Invert PET images", isOn: Binding(
-                    get: { vm.invertPETImages },
-                    set: { vm.setInvertPETImages($0) }
-                ))
-                    .help("Reverses PET-only and fused PET overlay color mapping. MIP inversion remains separate.")
-
-                Toggle("Invert CT images", isOn: Binding(
-                    get: { vm.invertCTImages },
-                    set: { vm.setInvertCTImages($0) }
-                ))
-                    .help("Reverses CT grayscale panes and the CT base layer in fused PET/CT.")
-
-                Toggle("Invert PET MIP window", isOn: Binding(
-                    get: { vm.invertPETMIP },
-                    set: { vm.setInvertPETMIP($0) }
-                ))
-                    .help("Reverses the PET MIP color mapping, useful when a black-hot or white-hot projection makes low uptake easier to read.")
-
-                petSUVRangePanel
-                petOnlySUVRangePanel
-
-                Divider()
-
-                ctWindowPanel
-
-                Divider()
 
                 hangingProtocolPanel
 
@@ -604,10 +479,6 @@ private struct FusionTab: View {
 
             Spacer()
         }
-    }
-
-    private var petPaletteShortlist: [Colormap] {
-        [.tracerPET, .petRainbow, .petHotIron, .petMagma, .petViridis, .hot]
     }
 
     private func fusionLayerStack(_ pair: FusionPair) -> some View {
@@ -761,223 +632,6 @@ private struct FusionTab: View {
         case .caution: return "exclamationmark.triangle"
         case .fail: return "xmark.octagon"
         case .unknown: return "questionmark.diamond"
-        }
-    }
-
-    private func paletteSwatch(_ colormap: Colormap) -> some View {
-        Canvas { context, size in
-            let lut = ColormapLUT.generate(colormap, size: 32)
-            let step = size.width / CGFloat(lut.count)
-            for (index, color) in lut.enumerated() {
-                let rect = CGRect(x: CGFloat(index) * step, y: 0, width: step + 0.5, height: size.height)
-                context.fill(Path(rect), with: .color(Color(
-                    red: Double(color.0) / 255,
-                    green: Double(color.1) / 255,
-                    blue: Double(color.2) / 255
-                )))
-            }
-        }
-        .frame(width: 30, height: 10)
-        .cornerRadius(2)
-    }
-
-    private func shortPaletteName(_ colormap: Colormap) -> String {
-        switch colormap {
-        case .tracerPET: return "Tracer"
-        case .petRainbow: return "Rainbow"
-        case .petHotIron: return "Hot Iron"
-        case .petMagma: return "Magma"
-        case .petViridis: return "Viridis"
-        default: return colormap.displayName
-        }
-    }
-
-    private var petSUVRangePanel: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Fusion PET SUV Range")
-                    .font(.subheadline)
-                Spacer()
-                Text(String(format: "%.1f–%.1f", vm.petOverlayRangeMin, vm.petOverlayRangeMax))
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(TracerTheme.pet)
-            }
-
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 6) { petRangePresetButtons }
-                VStack(alignment: .leading, spacing: 6) { petRangePresetButtons }
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.mini)
-
-            HStack {
-                Text("Min")
-                    .frame(width: 28, alignment: .leading)
-                Slider(value: Binding(
-                    get: { max(0, vm.petOverlayRangeMin) },
-                    set: { vm.setPETOverlayRange(min: $0, max: vm.petOverlayRangeMax) }
-                ), in: 0...60, step: 0.1)
-                Text(String(format: "%.1f", vm.petOverlayRangeMin))
-                    .font(.system(size: 11, design: .monospaced))
-                    .frame(width: 36, alignment: .trailing)
-                Stepper("", value: Binding(
-                    get: { max(0, vm.petOverlayRangeMin) },
-                    set: { vm.setPETOverlayRange(min: $0, max: vm.petOverlayRangeMax) }
-                ), in: 0...60, step: 0.1)
-                .labelsHidden()
-                .frame(width: 28)
-            }
-
-            HStack {
-                Text("Max")
-                    .frame(width: 28, alignment: .leading)
-                Slider(value: Binding(
-                    get: { min(80, max(0.1, vm.petOverlayRangeMax)) },
-                    set: { vm.setPETOverlayRange(min: vm.petOverlayRangeMin, max: $0) }
-                ), in: 0.1...80, step: 0.1)
-                Text(String(format: "%.1f", vm.petOverlayRangeMax))
-                    .font(.system(size: 11, design: .monospaced))
-                    .frame(width: 36, alignment: .trailing)
-                Stepper("", value: Binding(
-                    get: { min(80, max(0.1, vm.petOverlayRangeMax)) },
-                    set: { vm.setPETOverlayRange(min: vm.petOverlayRangeMin, max: $0) }
-                ), in: 0.1...80, step: 0.1)
-                .labelsHidden()
-                .frame(width: 28)
-            }
-        }
-    }
-
-    private var petOnlySUVRangePanel: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("PET-only SUV Range")
-                    .font(.subheadline)
-                Spacer()
-                Text(String(format: "%.1f–%.1f", vm.petOnlyRangeMin, vm.petOnlyRangeMax))
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(TracerTheme.pet)
-            }
-
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 6) { petOnlyRangePresetButtons }
-                VStack(alignment: .leading, spacing: 6) { petOnlyRangePresetButtons }
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.mini)
-
-            HStack {
-                Text("Min")
-                    .frame(width: 28, alignment: .leading)
-                Slider(value: Binding(
-                    get: { max(0, vm.petOnlyRangeMin) },
-                    set: { vm.setPETOnlyRange(min: $0, max: vm.petOnlyRangeMax) }
-                ), in: 0...60, step: 0.1)
-                Text(String(format: "%.1f", vm.petOnlyRangeMin))
-                    .font(.system(size: 11, design: .monospaced))
-                    .frame(width: 36, alignment: .trailing)
-                Stepper("", value: Binding(
-                    get: { max(0, vm.petOnlyRangeMin) },
-                    set: { vm.setPETOnlyRange(min: $0, max: vm.petOnlyRangeMax) }
-                ), in: 0...60, step: 0.1)
-                .labelsHidden()
-                .frame(width: 28)
-            }
-
-            HStack {
-                Text("Max")
-                    .frame(width: 28, alignment: .leading)
-                Slider(value: Binding(
-                    get: { min(80, max(0.1, vm.petOnlyRangeMax)) },
-                    set: { vm.setPETOnlyRange(min: vm.petOnlyRangeMin, max: $0) }
-                ), in: 0.1...80, step: 0.1)
-                Text(String(format: "%.1f", vm.petOnlyRangeMax))
-                    .font(.system(size: 11, design: .monospaced))
-                    .frame(width: 36, alignment: .trailing)
-                Stepper("", value: Binding(
-                    get: { min(80, max(0.1, vm.petOnlyRangeMax)) },
-                    set: { vm.setPETOnlyRange(min: vm.petOnlyRangeMin, max: $0) }
-                ), in: 0.1...80, step: 0.1)
-                .labelsHidden()
-                .frame(width: 28)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var petRangePresetButtons: some View {
-        Button("0–5") { vm.setPETOverlayRange(min: 0, max: 5) }
-        Button("0–10") { vm.setPETOverlayRange(min: 0, max: 10) }
-        Button("0–15") { vm.setPETOverlayRange(min: 0, max: 15) }
-        Button("2.5–15") { vm.setPETOverlayRange(min: 2.5, max: 15) }
-        Button("Auto") {
-            if let overlay = vm.activePETQuantificationVolume {
-                let range = vm.petSUVDisplayRange(for: overlay)
-                vm.setPETOverlayRange(min: max(0, range.min), max: max(1, range.max))
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var petOnlyRangePresetButtons: some View {
-        Button("0–5") { vm.setPETOnlyRange(min: 0, max: 5) }
-        Button("0–10") { vm.setPETOnlyRange(min: 0, max: 10) }
-        Button("0–15") { vm.setPETOnlyRange(min: 0, max: 15) }
-        Button("2.5–15") { vm.setPETOnlyRange(min: 2.5, max: 15) }
-        Button("Auto") {
-            if let overlay = vm.activePETQuantificationVolume {
-                let range = vm.petSUVDisplayRange(for: overlay)
-                vm.setPETOnlyRange(min: max(0, range.min), max: max(1, range.max))
-            }
-        }
-    }
-
-    private var ctWindowPanel: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("CT Window")
-                    .font(.subheadline)
-                Spacer()
-                Text("W \(Int(vm.window)) / L \(Int(vm.level))")
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(.secondary)
-            }
-
-            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 5) {
-                ForEach(WLPresets.CT) { preset in
-                    Button(preset.name) {
-                        vm.applyPreset(preset)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.mini)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-                }
-            }
-
-            HStack {
-                Text("W")
-                    .frame(width: 18, alignment: .leading)
-                Slider(value: Binding(
-                    get: { vm.window },
-                    set: { vm.setWindow($0) }
-                ), in: 1...5000)
-                Text("\(Int(vm.window))")
-                    .font(.system(size: 11, design: .monospaced))
-                    .frame(width: 48, alignment: .trailing)
-            }
-
-            HStack {
-                Text("L")
-                    .frame(width: 18, alignment: .leading)
-                Slider(value: Binding(
-                    get: { vm.level },
-                    set: { vm.setLevel($0) }
-                ), in: -1200...3000)
-                Text("\(Int(vm.level))")
-                    .font(.system(size: 11, design: .monospaced))
-                    .frame(width: 48, alignment: .trailing)
-            }
         }
     }
 
@@ -1653,11 +1307,17 @@ private struct DisplayTab: View {
             ))
                 .help("Useful for MR or X-ray inversion")
 
-            Toggle("Invert PET Images", isOn: Binding(
+            Toggle("Invert Fused PET", isOn: Binding(
                 get: { vm.invertPETImages },
                 set: { vm.setInvertPETImages($0) }
             ))
-                .help("Reverses PET-only panes and fused PET overlays without changing CT grayscale.")
+                .help("Reverses PET color mapping in fused panes without changing PET-only or MIP panes.")
+
+            Toggle("Invert PET-only Images", isOn: Binding(
+                get: { vm.invertPETOnlyImages },
+                set: { vm.setInvertPETOnlyImages($0) }
+            ))
+                .help("Reverses PET-only color mapping without changing fused PET or MIP panes.")
 
             Toggle("Invert CT Images", isOn: Binding(
                 get: { vm.invertCTImages },
@@ -1758,6 +1418,10 @@ private struct InfoTab: View {
                 if let suv = v.suvScaleFactor {
                     InfoRow(label: "SUV factor", value: String(format: "%.4e", suv))
                 }
+                Divider()
+                InfoRow(label: "Slice cache", value: vm.sliceRenderWarmupStatus)
+                InfoRow(label: "Cache hits", value: "\(vm.sliceRenderCacheHitCount)")
+                InfoRow(label: "Cache misses", value: "\(vm.sliceRenderCacheMissCount)")
             } else {
                 Text("No volume loaded")
                     .foregroundColor(.secondary)
