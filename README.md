@@ -27,6 +27,8 @@ The default branch contains the core workstation:
 - SUV ROI and PET lesion metrics
 - nnU-Net, MONAI Label, MedSAM2, and assistant-driven segmentation routing
 - cohort processing, classification infrastructure, and remote/DGX execution
+- push-to-talk reporting and assistant voice commands through Apple Speech
+  or Google MedASR
 - native exports for label maps, annotations, landmarks, meshes, and reports
 
 Several large research modules live on feature branches so they can evolve
@@ -40,6 +42,30 @@ without destabilizing the main viewer:
 | `feature/synthetic-ct-from-pet` | Synthetic CT generation from PET-derived features |
 | `feature/dynamic-nm-workflow` | Dynamic PET / nuclear medicine visualization and time-activity workflows |
 | `feature/lu177-dosimetry` | Lu-177 SPECT/CT dosimetry, absorbed dose maps, timepoint curves, and cycle planning |
+
+---
+
+## Voice Dictation
+
+Tracer supports swappable speech recognition engines for structured report
+dictation and assistant voice commands:
+
+- Apple Speech for native on-device macOS dictation.
+- Google MedASR through `workers/medasr/transcribe_medasr.py` for
+  medical/radiology-focused recognition. Tracer records the utterance,
+  writes a temporary 16 kHz mono WAV, and the worker returns report or
+  command text as JSON.
+
+Install the MedASR worker dependencies with:
+
+```bash
+python3 -m venv .venv-medasr
+.venv-medasr/bin/python -m pip install -r workers/medasr/requirements.txt
+```
+
+Then choose **Google MedASR** in the Dictation panel. If the model requires
+protected Hugging Face access, set `HF_TOKEN=...` in the panel environment
+field.
 
 ---
 
@@ -152,6 +178,33 @@ large local datasets.
 - series-level selection
 - filters and search
 - recently opened studies
+
+### Spark Dataset Registry
+
+Large remote datasets on DGX Spark are organized under the Tracer registry:
+
+`/home/ahmed/tracer-registry`
+
+Raw datasets remain in their original Spark storage location, while the
+registry exposes stable symlinks and keeps generated outputs separate:
+
+| Dataset ID | Registry Path | Raw Spark Target |
+|---|---|---|
+| `fdg-pet-ct-lesions` | `/home/ahmed/tracer-registry/datasets/fdg-pet-ct-lesions` | `/home/ahmed/desktop/FDG-PET-CT-Lesions` |
+| `ncia-pet-all-10-16` | `/home/ahmed/tracer-registry/datasets/ncia-pet-all-10-16` | `/home/ahmed/desktop/PET all 10 16 ncia` |
+| `prostate-ncia` | `/home/ahmed/tracer-registry/datasets/prostate-ncia` | `/home/ahmed/desktop/Prostate ncia/manifest-1759972609262` |
+| `openneuro-ds004054` | `/home/ahmed/tracer-registry/datasets/openneuro-ds004054` | `/home/ahmed/desktop/ds004054-1.0.0` |
+
+Generated masks, metrics, reports, exports, and QA files should go under:
+
+`/home/ahmed/tracer-registry/derivatives/<dataset-id>/...`
+
+Index snapshots should go under:
+
+`/home/ahmed/tracer-registry/indexes/<dataset-id>/...`
+
+This keeps raw archives read-only by convention and lets Tracer sync only the
+results that matter back to the Mac workstation.
 - separation between browsing and viewing
 - foundation for cohort selection and batch jobs
 
@@ -308,18 +361,26 @@ Tracer can route segmentation tasks to multiple backends:
 
 ### PET Segmentator Migration
 
-The `feature/segmentation-fusion` branch adds a bridge from the old PET
-Segmentator project into Tracer:
+The old standalone PET Segmentator project has been absorbed into Tracer.
+Tracer now treats Spark as the source of truth for the remote LesionTracer
+runtime:
 
-- discovers the existing LesionTracer model folder
-- registers it without copying several gigabytes of weights
-- uses nnU-Net model-folder inference
+- registry root: `/home/ahmed/tracer-registry`
+- LesionTracer weights: `models/lesiontracer-autopetiii`
+- required nnU-Net source tree: `sources/autopet-3-nnunet`
+- reusable Docker worker: `tracer-lesiontracer:latest`
+- validation script: `bin/validate-lesiontracer.sh`
+
+The PET Engine uses this registry through DGX Spark remote execution:
+
+- stages CT as channel 0 and SUV-scaled PET as channel 1
+- uses nnU-Net model-folder inference with the legacy AutoPET III trainer
 - preserves PET SUV channel scaling
-- exposes fast, accurate, and max-sensitivity segmentation profiles
+- streams logs into Tracer's job/activity infrastructure
 - adds SUV-attention connected-component cleanup
 
-The end goal is to retire the standalone Segmentator app and make Tracer the
-single home for PET/CT segmentation, editing, measurement, and export.
+The standalone Segmentator app is no longer required for normal Tracer
+operation; keep the Spark registry, not the old app shell.
 
 ---
 

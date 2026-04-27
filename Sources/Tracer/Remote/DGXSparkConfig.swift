@@ -20,6 +20,18 @@ public struct DGXSparkConfig: Codable, Equatable, Sendable {
     public var remoteNNUnetBinary: String
     /// Path to `llama-cli` / `llama-mtmd-cli` on the DGX. Empty = PATH.
     public var remoteLlamaBinary: String
+    /// Optional override for the absorbed PET Segmentator / LesionTracer
+    /// nnU-Net source tree on the DGX. Empty/nil uses Tracer's known default.
+    public var remoteSegmentatorSourcePath: String?
+    /// Optional override for the legacy LesionTracer trained-model folder.
+    /// Empty/nil uses Tracer's known default.
+    public var remoteSegmentatorModelFolder: String?
+    /// Reusable Docker image tag on the DGX for the LesionTracer worker.
+    /// Empty/nil falls back to `tracer-lesiontracer:latest`.
+    public var remoteSegmentatorWorkerImage: String?
+    /// Base image used the first time Tracer bootstraps the worker image.
+    /// Empty/nil falls back to NVIDIA's PyTorch 25.03 image.
+    public var remoteSegmentatorBaseImage: String?
     /// Optional extra env vars to export before the remote command. KEY=VAL
     /// pairs separated by newlines. Typical use:
     /// `nnUNet_results=/home/ahmed/nnUNet_results`.
@@ -35,6 +47,10 @@ public struct DGXSparkConfig: Codable, Equatable, Sendable {
                 remoteWorkdir: String = "~/tracer-remote",
                 remoteNNUnetBinary: String = "",
                 remoteLlamaBinary: String = "",
+                remoteSegmentatorSourcePath: String? = nil,
+                remoteSegmentatorModelFolder: String? = nil,
+                remoteSegmentatorWorkerImage: String? = nil,
+                remoteSegmentatorBaseImage: String? = nil,
                 remoteEnvironment: String = "",
                 enabled: Bool = false) {
         self.host = host
@@ -44,6 +60,10 @@ public struct DGXSparkConfig: Codable, Equatable, Sendable {
         self.remoteWorkdir = remoteWorkdir
         self.remoteNNUnetBinary = remoteNNUnetBinary
         self.remoteLlamaBinary = remoteLlamaBinary
+        self.remoteSegmentatorSourcePath = remoteSegmentatorSourcePath
+        self.remoteSegmentatorModelFolder = remoteSegmentatorModelFolder
+        self.remoteSegmentatorWorkerImage = remoteSegmentatorWorkerImage
+        self.remoteSegmentatorBaseImage = remoteSegmentatorBaseImage
         self.remoteEnvironment = remoteEnvironment
         self.enabled = enabled
     }

@@ -433,6 +433,32 @@ public struct DGXSparkSettingsTab: View {
                     .foregroundColor(.secondary)
             }
 
+            Section("Legacy Segmentator / LesionTracer") {
+                TextField("nnU-Net source path",
+                          text: optionalTextBinding(\.remoteSegmentatorSourcePath),
+                          prompt: Text(RemoteLesionTracerRunner.Configuration.defaultSourcePath))
+                    .textFieldStyle(.roundedBorder)
+                    .disableAutocorrection(true)
+                TextField("Model folder",
+                          text: optionalTextBinding(\.remoteSegmentatorModelFolder),
+                          prompt: Text(RemoteLesionTracerRunner.Configuration.defaultModelFolder))
+                    .textFieldStyle(.roundedBorder)
+                    .disableAutocorrection(true)
+                TextField("Worker image tag",
+                          text: optionalTextBinding(\.remoteSegmentatorWorkerImage),
+                          prompt: Text(RemoteLesionTracerRunner.Configuration.defaultWorkerImage))
+                    .textFieldStyle(.roundedBorder)
+                    .disableAutocorrection(true)
+                TextField("Base image",
+                          text: optionalTextBinding(\.remoteSegmentatorBaseImage),
+                          prompt: Text(RemoteLesionTracerRunner.Configuration.defaultBaseImage))
+                    .textFieldStyle(.roundedBorder)
+                    .disableAutocorrection(true)
+                Text("Tracer builds the worker image on Spark only if it is missing, so LesionTracer dependencies are reused instead of installed every inference.")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+            }
+
             Section("Diagnostics") {
                 HStack {
                     Button {
@@ -469,6 +495,16 @@ public struct DGXSparkSettingsTab: View {
         } catch {
             probeStatus = "✗ \(error.localizedDescription)"
         }
+    }
+
+    private func optionalTextBinding(_ keyPath: WritableKeyPath<DGXSparkConfig, String?>) -> Binding<String> {
+        Binding(
+            get: { config[keyPath: keyPath] ?? "" },
+            set: { value in
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                config[keyPath: keyPath] = trimmed.isEmpty ? nil : trimmed
+            }
+        )
     }
 }
 

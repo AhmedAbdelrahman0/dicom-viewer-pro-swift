@@ -169,6 +169,7 @@ public final class AppleSpeechDictationEngine: DictationEngine, @unchecked Senda
             if !cancelled {
                 eventsContinuation?.yield(.error(error.localizedDescription))
             }
+            cleanupRecognitionSession()
             eventsContinuation?.yield(.idle)
             return
         }
@@ -181,13 +182,17 @@ public final class AppleSpeechDictationEngine: DictationEngine, @unchecked Senda
         }()
         if result.isFinal {
             eventsContinuation?.yield(.final(text, confidence: mean))
+            cleanupRecognitionSession()
             eventsContinuation?.yield(.idle)
-            lock.withLock { active = false }
-            task = nil
-            request = nil
         } else {
             eventsContinuation?.yield(.partial(text, confidence: mean))
         }
+    }
+
+    private func cleanupRecognitionSession() {
+        lock.withLock { active = false }
+        task = nil
+        request = nil
     }
 
     private static func requestSpeechAuthorization() async -> SFSpeechRecognizerAuthorizationStatus {

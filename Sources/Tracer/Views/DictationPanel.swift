@@ -8,6 +8,7 @@ import SwiftUI
 /// Opens from AI Engines menu via ⌘⇧V.
 public struct DictationPanel: View {
     @ObservedObject public var session: DictationSession
+    @ObservedObject public var viewer: ViewerViewModel
     /// Owned by the panel — the same DictationSession can be wired to
     /// different stores across panel-reopens (e.g. opening a different
     /// patient). The panel rebinds the session on appear so the user can
@@ -23,6 +24,13 @@ public struct DictationPanel: View {
     /// True while an AI feature is in flight; disables the buttons so the
     /// user can't fire two drafts at once.
     @State private var aiInFlight: Bool = false
+    @AppStorage("Tracer.Dictation.ReportingClinician") private var clinicianName: String = ""
+    @AppStorage("Tracer.Dictation.EngineKind") private var selectedEngineID: String = DictationEngineKind.appleSpeech.rawValue
+    @AppStorage("Tracer.Dictation.MedASR.PythonExecutable") private var medASRPythonExecutable: String = "/usr/bin/env"
+    @AppStorage("Tracer.Dictation.MedASR.ScriptPath") private var medASRScriptPath: String = ""
+    @AppStorage("Tracer.Dictation.MedASR.ModelIdentifier") private var medASRModelIdentifier: String = GoogleMedASRDictationEngine.defaultModelIdentifier
+    @AppStorage("Tracer.Dictation.MedASR.Device") private var medASRDevice: String = GoogleMedASRDictationEngine.defaultDevice
+    @AppStorage("Tracer.Dictation.MedASR.Environment") private var medASREnvironment: String = ""
 
     enum Tab: String, CaseIterable, Identifiable {
         case transcript
@@ -42,8 +50,9 @@ public struct DictationPanel: View {
         }
     }
 
-    public init(session: DictationSession) {
+    public init(session: DictationSession, viewer: ViewerViewModel) {
         self.session = session
+        self.viewer = viewer
     }
 
     public var body: some View {
@@ -51,6 +60,8 @@ public struct DictationPanel: View {
             header
             Divider()
             controls
+            engineControls
+            studyWorkflow
             Divider()
             tabPicker
             Group {
@@ -69,6 +80,32 @@ public struct DictationPanel: View {
             // initializer. Routes finalised dictation into the report
             // until the panel disappears.
             session.reportStore = report
+            syncReportWithActiveStudy(preferExisting: true)
+            if clinicianName.isEmpty {
+                clinicianName = report.report.metadata.reportingClinician
+            }
+            applySelectedEngine()
+        }
+        .onChange(of: activeStudyDigest) { _, _ in
+            syncReportWithActiveStudy(preferExisting: true)
+        }
+        .onChange(of: selectedEngineID) { _, _ in
+            applySelectedEngine()
+        }
+        .onChange(of: medASRPythonExecutable) { _, _ in
+            applySelectedEngineIfMedASR()
+        }
+        .onChange(of: medASRScriptPath) { _, _ in
+            applySelectedEngineIfMedASR()
+        }
+        .onChange(of: medASRModelIdentifier) { _, _ in
+            applySelectedEngineIfMedASR()
+        }
+        .onChange(of: medASRDevice) { _, _ in
+            applySelectedEngineIfMedASR()
+        }
+        .onChange(of: medASREnvironment) { _, _ in
+            applySelectedEngineIfMedASR()
         }
     }
 
@@ -83,6 +120,17 @@ public struct DictationPanel: View {
             }
         }
         .pickerStyle(.segmented)
+    }
+
+    private var activeStudyVolumes: [ImageVolume] {
+        viewer.currentStudyVolumes
+    }
+
+    private var activeStudyDigest: String {
+        activeStudyVolumes
+            .map(\.sessionIdentity)
+            .sorted()
+            .joined(separator: "\u{1f}")
     }
 
     // MARK: - Sections
@@ -118,6 +166,7 @@ public struct DictationPanel: View {
                 // No in-panel hotkey: ⌘V is system Paste, and global
                 // push-to-talk via NSEvent monitoring lands in C3.
                 .help("Click to start / stop dictation. Open the panel with ⌘⇧V.")
+                .disabled(report.report.isFinalised)
 
                 Button {
                     Task { await session.cancel() }
@@ -146,6 +195,117 @@ public struct DictationPanel: View {
         }
     }
 
+    private var studyWorkflow: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 8) {
+                reportStatusBadge
+                if let current = viewer.currentVolume {
+                    Text(current.patientName.isEmpty ? "Unknown patient" : current.patientName)
+                        .font(.system(size: 11, weight: .semibold))
+                        .lineLimit(1)
+                    Text(current.studyDescription.isEmpty ? current.seriesDescription : current.studyDescription)
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                } else {
+                    Text("No active study")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    startNewDraft()
+                } label: {
+                    Label("New Draft", systemImage: "doc.badge.plus")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(activeStudyVolumes.isEmpty || session.isRecording)
+
+                Button {
+                    saveDraft()
+                } label: {
+                    Label("Save Draft", systemImage: "tray.and.arrow.down")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(session.isRecording)
+
+                Button {
+                    attachReportToStudy()
+                } label: {
+                    Label("Attach", systemImage: "link")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(activeStudyVolumes.isEmpty || session.isRecording)
+
+                Spacer(minLength: 4)
+
+                TextField("Clinician", text: $clinicianName)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11))
+                    .frame(minWidth: 120, idealWidth: 150, maxWidth: 180)
+                    .onChange(of: clinicianName) { _, newValue in
+                        report.setMetadata { metadata in
+                            metadata.reportingClinician = newValue
+                        }
+                    }
+
+                if report.report.isFinalised {
+                    Button {
+                        report.reopenFinalReport(by: clinicianName)
+                    } label: {
+                        Label("Reopen", systemImage: "lock.open")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(session.isRecording)
+                } else {
+                    Button {
+                        finaliseReport()
+                    } label: {
+                        Label("Finalize", systemImage: "checkmark.seal")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(session.isRecording || clinicianName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+
+            if let key = viewer.currentStudyReportKey,
+               report.report.metadata.studyKey == key,
+               !key.isEmpty {
+                Text("Attached study report")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.secondary)
+            } else if !activeStudyVolumes.isEmpty {
+                Text("Report is not attached to the current study yet.")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.orange)
+            }
+        }
+        .padding(9)
+        .background(RoundedRectangle(cornerRadius: 6)
+            .fill(Color.secondary.opacity(0.08)))
+        .overlay(RoundedRectangle(cornerRadius: 6)
+            .stroke(Color.secondary.opacity(0.22), lineWidth: 0.5))
+    }
+
+    private var reportStatusBadge: some View {
+        let final = report.report.isFinalised
+        return Label(final ? "Final" : "Draft",
+                     systemImage: final ? "checkmark.seal.fill" : "doc.text")
+            .font(.system(size: 10, weight: .bold))
+            .foregroundColor(final ? .green : .accentColor)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(Capsule().fill((final ? Color.green : Color.accentColor).opacity(0.14)))
+    }
+
     /// Tiny VU meter — fills from left to right with the live RMS. Uses
     /// a square-rooted scale because spoken-voice RMS rarely exceeds
     /// ~0.2 even at full conversational volume; sqrt makes the bar feel
@@ -167,6 +327,83 @@ public struct DictationPanel: View {
         if level > 0.8 { return .red }
         if level > 0.5 { return .orange }
         return .green
+    }
+
+    private var engineControls: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 8) {
+                Picker("Engine", selection: Binding(
+                    get: { selectedEngineKind },
+                    set: { selectedEngineID = $0.rawValue }
+                )) {
+                    ForEach(DictationEngineKind.allCases) { kind in
+                        Text(kind.displayName + (kind.isImplemented ? "" : " · soon"))
+                            .tag(kind)
+                            .disabled(!kind.isImplemented)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(maxWidth: 260)
+                .disabled(session.isRecording || session.isFinishing)
+
+                if selectedEngineKind == .googleMedASR {
+                    Label("Buffers until Stop", systemImage: "waveform.badge.magnifyingglass")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.secondary)
+                } else {
+                    Label("Streaming", systemImage: "waveform")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer()
+            }
+
+            if selectedEngineKind == .googleMedASR {
+                medASRControls
+            }
+        }
+        .padding(9)
+        .background(RoundedRectangle(cornerRadius: 6)
+            .fill(Color.secondary.opacity(0.06)))
+        .overlay(RoundedRectangle(cornerRadius: 6)
+            .stroke(Color.secondary.opacity(0.18), lineWidth: 0.5))
+    }
+
+    private var medASRControls: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                TextField("/usr/bin/env or python3 path", text: $medASRPythonExecutable)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 10, design: .monospaced))
+                TextField(GoogleMedASRDictationEngine.defaultModelIdentifier,
+                          text: $medASRModelIdentifier)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 10, design: .monospaced))
+            }
+            HStack(spacing: 8) {
+                TextField("Optional worker script path", text: $medASRScriptPath)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 10, design: .monospaced))
+                Picker("Device", selection: $medASRDevice) {
+                    Text("Auto").tag("auto")
+                    Text("CPU").tag("cpu")
+                    Text("CUDA").tag("cuda")
+                    Text("MPS").tag("mps")
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(width: 82)
+            }
+            TextField("Optional env, e.g. HF_TOKEN=...", text: $medASREnvironment, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 10, design: .monospaced))
+                .lineLimit(1...3)
+            Text("MedASR runs from a local Python worker. First run may download the model; protected Hugging Face access can use HF_TOKEN here.")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     private var transcript: some View {
@@ -256,7 +493,7 @@ public struct DictationPanel: View {
                 Spacer()
 
                 Button {
-                    report.save()
+                    saveDraft()
                 } label: {
                     Label("Save", systemImage: "tray.and.arrow.down")
                 }
@@ -453,7 +690,101 @@ public struct DictationPanel: View {
 
     // MARK: - Actions
 
+    private var selectedEngineKind: DictationEngineKind {
+        DictationEngineKind(rawValue: selectedEngineID) ?? .appleSpeech
+    }
+
+    private var medASRConfiguration: GoogleMedASRConfiguration {
+        let model = medASRModelIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        let script = medASRScriptPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let python = medASRPythonExecutable.trimmingCharacters(in: .whitespacesAndNewlines)
+        let device = medASRDevice.trimmingCharacters(in: .whitespacesAndNewlines)
+        return GoogleMedASRConfiguration(
+            pythonExecutablePath: python.isEmpty ? "/usr/bin/env" : python,
+            scriptPath: script.isEmpty ? nil : script,
+            modelIdentifier: model.isEmpty ? GoogleMedASRDictationEngine.defaultModelIdentifier : model,
+            device: device.isEmpty ? GoogleMedASRDictationEngine.defaultDevice : device,
+            environment: GoogleMedASRConfiguration.parseEnvironmentLines(medASREnvironment)
+        )
+    }
+
+    private func applySelectedEngineIfMedASR() {
+        guard selectedEngineKind == .googleMedASR else { return }
+        applySelectedEngine()
+    }
+
+    private func applySelectedEngine() {
+        let kind = selectedEngineKind
+        guard kind.isImplemented else {
+            selectedEngineID = DictationEngineKind.appleSpeech.rawValue
+            session.statusMessage = "\(kind.displayName) is not wired yet; using Apple Speech."
+            return
+        }
+        guard !session.isRecording && !session.isFinishing else {
+            session.statusMessage = "Stop dictation before switching engines."
+            return
+        }
+        switch kind {
+        case .appleSpeech:
+            session.setEngine(AppleSpeechDictationEngine())
+        case .googleMedASR:
+            session.setEngine(GoogleMedASRDictationEngine(configuration: medASRConfiguration))
+        case .whisperKit, .remoteDGXWhisper:
+            break
+        }
+    }
+
+    private func syncReportWithActiveStudy(preferExisting: Bool) {
+        let volumes = activeStudyVolumes
+        guard !volumes.isEmpty else { return }
+        report.bindToStudy(volumes: volumes, preferExisting: preferExisting)
+        if !report.report.metadata.reportingClinician.isEmpty {
+            clinicianName = report.report.metadata.reportingClinician
+        } else if !clinicianName.isEmpty {
+            report.setMetadata { metadata in
+                metadata.reportingClinician = clinicianName
+            }
+        }
+    }
+
+    private func startNewDraft() {
+        report.newDraft(for: activeStudyVolumes)
+        if !clinicianName.isEmpty {
+            report.setMetadata { metadata in
+                metadata.reportingClinician = clinicianName
+            }
+        }
+        session.clearTranscripts()
+        rawTab = Tab.report.rawValue
+    }
+
+    private func saveDraft() {
+        if activeStudyVolumes.isEmpty {
+            report.save()
+        } else {
+            _ = report.attachToStudy(volumes: activeStudyVolumes)
+        }
+    }
+
+    private func attachReportToStudy() {
+        _ = report.attachToStudy(volumes: activeStudyVolumes)
+        rawTab = Tab.report.rawValue
+    }
+
+    private func finaliseReport() {
+        _ = report.finaliseReport(by: clinicianName, volumes: activeStudyVolumes)
+        rawTab = Tab.report.rawValue
+    }
+
     private func toggleRecording() async {
+        guard !report.report.isFinalised else {
+            session.statusMessage = "Report is final — reopen it before adding dictation."
+            return
+        }
+        if !activeStudyVolumes.isEmpty,
+           report.report.metadata.studyKey != viewer.currentStudyReportKey {
+            report.bindToStudy(volumes: activeStudyVolumes, preferExisting: true)
+        }
         if session.isRecording {
             await session.stop()
         } else {

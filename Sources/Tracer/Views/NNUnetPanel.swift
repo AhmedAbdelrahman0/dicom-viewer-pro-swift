@@ -255,7 +255,22 @@ public struct NNUnetPanel: View {
                         nnunet.statusMessage = "No volume loaded."
                         return
                     }
-                    _ = await nnunet.run(on: vol, labeling: labeling)
+                    if let labelMap = await nnunet.run(on: vol, labeling: labeling) {
+                        let entry = nnunet.selectedEntry
+                        viewer.recordSegmentationRun(
+                            labelMap: labelMap,
+                            name: entry?.displayName ?? labelMap.name,
+                            engine: "nnU-Net",
+                            backend: nnunet.mode.displayName,
+                            modelID: entry?.datasetID ?? nnunet.selectedEntryID,
+                            metadata: [
+                                "mode": nnunet.mode.rawValue,
+                                "fullEnsemble": nnunet.useFullEnsemble ? "true" : "false",
+                                "disableTTA": nnunet.disableTTA ? "true" : "false"
+                            ]
+                        )
+                        viewer.saveCurrentStudySession(named: "nnU-Net")
+                    }
                 }
             } label: {
                 Label("Run on current volume", systemImage: "play.fill")

@@ -4,6 +4,8 @@ struct AssistantPanel: View {
     @EnvironmentObject var vm: ViewerViewModel
     @EnvironmentObject var monai: MONAILabelViewModel
     @EnvironmentObject var nnunet: NNUnetViewModel
+    @EnvironmentObject var pet: PETEngineViewModel
+    @StateObject private var voice = DictationSession()
     @State private var provider: AssistantCLIProvider = .local
     @State private var draft: String = ""
     @State private var messages: [AssistantChatMessage] = [
@@ -11,6 +13,12 @@ struct AssistantPanel: View {
     ]
     @State private var activeAssistantTasks = 0
     @State private var isSubmittingRequest = false
+    @AppStorage("Tracer.Dictation.EngineKind") private var selectedVoiceEngineID: String = DictationEngineKind.appleSpeech.rawValue
+    @AppStorage("Tracer.Dictation.MedASR.PythonExecutable") private var medASRPythonExecutable: String = "/usr/bin/env"
+    @AppStorage("Tracer.Dictation.MedASR.ScriptPath") private var medASRScriptPath: String = ""
+    @AppStorage("Tracer.Dictation.MedASR.ModelIdentifier") private var medASRModelIdentifier: String = GoogleMedASRDictationEngine.defaultModelIdentifier
+    @AppStorage("Tracer.Dictation.MedASR.Device") private var medASRDevice: String = GoogleMedASRDictationEngine.defaultDevice
+    @AppStorage("Tracer.Dictation.MedASR.Environment") private var medASREnvironment: String = ""
 
     private let runner = AssistantCLIRunner()
     private var isRunning: Bool { isSubmittingRequest || activeAssistantTasks > 0 }
@@ -29,6 +37,35 @@ struct AssistantPanel: View {
         }
         .background(TracerTheme.panelBackground)
         .tint(TracerTheme.accent)
+        .onAppear {
+            configureVoiceEngineFromSettings()
+            voice.finalUtteranceHandler = { text, confidence in
+                handleVoiceCommand(text, confidence: confidence)
+                return true
+            }
+        }
+        .onDisappear {
+            voice.finalUtteranceHandler = nil
+            Task { await voice.cancel() }
+        }
+        .onChange(of: selectedVoiceEngineID) { _, _ in
+            configureVoiceEngineFromSettings()
+        }
+        .onChange(of: medASRPythonExecutable) { _, _ in
+            configureVoiceEngineFromSettingsIfMedASR()
+        }
+        .onChange(of: medASRScriptPath) { _, _ in
+            configureVoiceEngineFromSettingsIfMedASR()
+        }
+        .onChange(of: medASRModelIdentifier) { _, _ in
+            configureVoiceEngineFromSettingsIfMedASR()
+        }
+        .onChange(of: medASRDevice) { _, _ in
+            configureVoiceEngineFromSettingsIfMedASR()
+        }
+        .onChange(of: medASREnvironment) { _, _ in
+            configureVoiceEngineFromSettingsIfMedASR()
+        }
     }
 
     private var providerStrip: some View {
@@ -124,24 +161,80 @@ struct AssistantPanel: View {
     }
 
     private var composer: some View {
-        HStack(alignment: .bottom, spacing: 8) {
-            TextField("Ask or command the viewer", text: $draft, axis: .vertical)
-                .textFieldStyle(.roundedBorder)
-                .lineLimit(1...4)
-                .onSubmit {
-                    submit(draft)
-                }
-
-            Button {
-                submit(draft)
-            } label: {
-                Image(systemName: "paperplane.fill")
-                    .frame(width: 24, height: 24)
+        VStack(alignment: .leading, spacing: 6) {
+            if shouldShowVoiceStatus {
+                voiceStatus
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isRunning)
+
+            HStack(alignment: .bottom, spacing: 8) {
+                Button {
+                    toggleVoiceCommand()
+                } label: {
+                    Image(systemName: voice.isRecording ? "stop.circle.fill" : "mic.circle.fill")
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.bordered)
+                .tint(voice.isRecording ? .red : TracerTheme.accent)
+                .disabled(!voice.isRecording && (isRunning || voice.isFinishing))
+                .help("Voice command with \(voice.engineDescription). Speak a viewer command, then press Stop.")
+
+                TextField("Ask or command the viewer", text: $draft, axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .lineLimit(1...4)
+                    .onSubmit {
+                        submit(draft)
+                    }
+
+                Button {
+                    submit(draft)
+                } label: {
+                    Image(systemName: "paperplane.fill")
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isRunning)
+            }
         }
         .padding(12)
+    }
+
+    private var shouldShowVoiceStatus: Bool {
+        voice.isRecording ||
+        voice.isFinishing ||
+        !voice.partialTranscript.isEmpty ||
+        !voice.statusMessage.isEmpty
+    }
+
+    private var voiceStatus: some View {
+        HStack(spacing: 7) {
+            Image(systemName: voice.isRecording ? "waveform" : "mic")
+                .foregroundColor(voice.isRecording ? .red : TracerTheme.accent)
+            Text(voiceStatusText)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundColor(voice.statusMessage.lowercased().contains("denied") ? .red : TracerTheme.mutedText)
+                .lineLimit(2)
+            Spacer(minLength: 4)
+            if voice.isRecording || voice.isFinishing {
+                ProgressView()
+                    .controlSize(.small)
+            }
+        }
+    }
+
+    private var voiceStatusText: String {
+        if !voice.partialTranscript.isEmpty {
+            return voice.partialTranscript
+        }
+        if !voice.statusMessage.isEmpty {
+            return voice.statusMessage
+        }
+        if voice.isFinishing {
+            return "Finishing voice command..."
+        }
+        if voice.isRecording {
+            return "Listening for assistant command..."
+        }
+        return "Voice ready"
     }
 
     private func submit(_ text: String) {
@@ -176,10 +269,15 @@ struct AssistantPanel: View {
 
         // nnU-Net routing — resolve the catalog entry and (if possible) run it.
         var kickOffNNUnet = false
+        var kickOffPETEngine = false
         if let plan, plan.preferredEngine == .nnUNet {
             if let entry = nnunet.selectBestEntry(for: plan) {
                 summary += "\nSelected nnU-Net model \(entry.displayName) (\(entry.datasetID))."
-                if let readinessMessage = nnunet.assistantReadinessMessage(for: entry) {
+                if let engine = petEngine(for: entry) {
+                    pet.selectedEngine = engine
+                    summary += "\nRouting through PET Engine so CT + SUV PET channels are paired correctly."
+                    kickOffPETEngine = true
+                } else if let readinessMessage = nnunet.assistantReadinessMessage(for: entry) {
                     nnunet.statusMessage = readinessMessage
                     summary += "\n\(readinessMessage)"
                 } else {
@@ -198,7 +296,9 @@ struct AssistantPanel: View {
         // End-to-end execution: kick off the selected engine asynchronously.
         // Skips if both are eligible to avoid running two models against the
         // same volume in parallel; nnU-Net wins when it was explicitly routed.
-        if kickOffNNUnet {
+        if kickOffPETEngine {
+            runPETEngineFromAssistant()
+        } else if kickOffNNUnet {
             runNNUnetFromAssistant()
         } else if kickOffMONAI {
             runMONAIFromAssistant()
@@ -282,6 +382,15 @@ struct AssistantPanel: View {
         Task { @MainActor in
             defer { finishAssistantTask() }
             if let labelMap = await nnunet.run(on: volume, labeling: vm.labeling) {
+                vm.recordSegmentationRun(
+                    labelMap: labelMap,
+                    name: entryName,
+                    engine: "Assistant nnU-Net",
+                    backend: nnunet.mode.displayName,
+                    modelID: entry.datasetID,
+                    metadata: ["assistant": "true"]
+                )
+                vm.saveCurrentStudySession(named: "Assistant nnU-Net")
                 messages.append(AssistantChatMessage(
                     role: .assistant,
                     text: "✓ \(entryName): \(labelMap.classes.count) classes produced. Open the Labels tab to edit."
@@ -314,6 +423,15 @@ struct AssistantPanel: View {
         Task { @MainActor in
             defer { finishAssistantTask() }
             if let labelMap = await monai.runInference(on: volume, in: vm.labeling) {
+                vm.recordSegmentationRun(
+                    labelMap: labelMap,
+                    name: "MONAI · \(modelName)",
+                    engine: "Assistant MONAI Label",
+                    backend: monai.serverURL,
+                    modelID: modelName,
+                    metadata: ["assistant": "true"]
+                )
+                vm.saveCurrentStudySession(named: "Assistant MONAI")
                 messages.append(AssistantChatMessage(
                     role: .assistant,
                     text: "✓ MONAI Label \(modelName): \(labelMap.classes.count) classes produced."
@@ -325,6 +443,99 @@ struct AssistantPanel: View {
                 ))
             }
         }
+    }
+
+    /// PET/CT lesion models need channel pairing, SUV scaling, and optional
+    /// DGX Segmentator routing. The PET Engine owns that clinical plumbing,
+    /// so chat commands use it instead of launching raw nnU-Net directly.
+    private func runPETEngineFromAssistant() {
+        let engineName = pet.selectedEngine.displayName
+        messages.append(AssistantChatMessage(
+            role: .assistant,
+            text: "Running \(engineName) through PET Engine..."
+        ))
+        beginAssistantTask()
+        Task { @MainActor in
+            defer { finishAssistantTask() }
+            let summary = await pet.run(viewer: vm,
+                                        nnunet: nnunet,
+                                        labeling: vm.labeling)
+            messages.append(AssistantChatMessage(
+                role: .assistant,
+                text: summary
+            ))
+        }
+    }
+
+    private func petEngine(for entry: NNUnetCatalog.Entry) -> PETEngineViewModel.Engine? {
+        switch entry.id {
+        case "AutoPET-II-2023":
+            return .autoPETII
+        case "LesionTracer-AutoPETIII":
+            return .lesionTracer
+        case "LesionLocator-AutoPETIV":
+            return .lesionLocator
+        default:
+            return nil
+        }
+    }
+
+    private var selectedVoiceEngineKind: DictationEngineKind {
+        DictationEngineKind(rawValue: selectedVoiceEngineID) ?? .appleSpeech
+    }
+
+    private var medASRConfiguration: GoogleMedASRConfiguration {
+        let model = medASRModelIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        let script = medASRScriptPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let python = medASRPythonExecutable.trimmingCharacters(in: .whitespacesAndNewlines)
+        let device = medASRDevice.trimmingCharacters(in: .whitespacesAndNewlines)
+        return GoogleMedASRConfiguration(
+            pythonExecutablePath: python.isEmpty ? "/usr/bin/env" : python,
+            scriptPath: script.isEmpty ? nil : script,
+            modelIdentifier: model.isEmpty ? GoogleMedASRDictationEngine.defaultModelIdentifier : model,
+            device: device.isEmpty ? GoogleMedASRDictationEngine.defaultDevice : device,
+            environment: GoogleMedASRConfiguration.parseEnvironmentLines(medASREnvironment)
+        )
+    }
+
+    private func configureVoiceEngineFromSettingsIfMedASR() {
+        guard selectedVoiceEngineKind == .googleMedASR else { return }
+        configureVoiceEngineFromSettings()
+    }
+
+    private func configureVoiceEngineFromSettings() {
+        guard !voice.isRecording && !voice.isFinishing else { return }
+        switch selectedVoiceEngineKind {
+        case .appleSpeech:
+            voice.setEngine(AppleSpeechDictationEngine())
+        case .googleMedASR:
+            voice.setEngine(GoogleMedASRDictationEngine(configuration: medASRConfiguration))
+        case .whisperKit, .remoteDGXWhisper:
+            voice.setEngine(AppleSpeechDictationEngine())
+        }
+    }
+
+    private func toggleVoiceCommand() {
+        Task {
+            if voice.isRecording {
+                await voice.stop()
+            } else {
+                await voice.start()
+            }
+        }
+    }
+
+    private func handleVoiceCommand(_ text: String, confidence: Double?) {
+        let request = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !request.isEmpty else { return }
+        guard !isRunning else {
+            messages.append(AssistantChatMessage(
+                role: .assistant,
+                text: "Voice command captured, but another assistant task is still running: \(request)"
+            ))
+            return
+        }
+        submit(request)
     }
 }
 

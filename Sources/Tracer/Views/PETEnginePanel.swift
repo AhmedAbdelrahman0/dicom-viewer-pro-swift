@@ -159,6 +159,16 @@ public struct PETEnginePanel: View {
                         .foregroundColor(.secondary)
                         .lineLimit(1)
                 }
+                if pet.selectedEngine == .lesionTracer, nnunet.mode == .dgxRemote {
+                    Label("DGX Segmentator Docker backend active",
+                          systemImage: "shippingbox.fill")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.secondary)
+                    Text("Worker image: \(RemoteLesionTracerRunner.Configuration(dgx: nnunet.dgxConfig).workerImage)")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
                 if entry.id == "LesionLocator-AutoPETIV" {
                     Label("Experimental — weights from AutoPET IV are still rolling out.",
                           systemImage: "exclamationmark.triangle.fill")

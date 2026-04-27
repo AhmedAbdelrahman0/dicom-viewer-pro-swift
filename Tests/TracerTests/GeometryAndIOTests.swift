@@ -3214,6 +3214,71 @@ final class GeometryAndIOTests: XCTestCase {
     }
 
     @MainActor
+    func testViewerDeletesROIsAndMeasurementsWithUndoRedo() throws {
+        let vm = ViewerViewModel()
+        let ct = ImageVolume(
+            pixels: (1...27).map(Float.init),
+            depth: 3,
+            height: 3,
+            width: 3,
+            spacing: (1, 1, 1),
+            modality: "CT",
+            seriesDescription: "CT"
+        )
+        vm.displayVolume(ct)
+
+        var annotation = Annotation(
+            type: .distance,
+            points: [CGPoint(x: 0, y: 0), CGPoint(x: 2, y: 0)],
+            axis: 2,
+            sliceIndex: 1
+        )
+        annotation.value = 2
+        annotation.unit = "mm"
+        vm.addAnnotation(annotation)
+        XCTAssertTrue(vm.deleteAnnotation(id: annotation.id))
+        XCTAssertTrue(vm.annotations.isEmpty)
+        vm.undoLastEdit()
+        XCTAssertEqual(vm.annotations.count, 1)
+        vm.redoLastEdit()
+        XCTAssertTrue(vm.annotations.isEmpty)
+
+        let huROI = try XCTUnwrap(vm.addSphericalIntensityROI(
+            at: ct.worldPoint(z: 1, y: 1, x: 1),
+            in: ct,
+            radiusMM: 1.1
+        ))
+        XCTAssertTrue(vm.deleteSphericalIntensityROI(id: huROI.id))
+        XCTAssertTrue(vm.intensityROIMeasurements.isEmpty)
+        vm.undoLastEdit()
+        XCTAssertEqual(vm.intensityROIMeasurements.count, 1)
+        vm.redoLastEdit()
+        XCTAssertTrue(vm.intensityROIMeasurements.isEmpty)
+
+        let pet = ImageVolume(
+            pixels: (1...27).map(Float.init),
+            depth: 3,
+            height: 3,
+            width: 3,
+            spacing: (1, 1, 1),
+            modality: "PT",
+            seriesDescription: "PET",
+            suvScaleFactor: 1
+        )
+        vm.displayVolume(pet)
+        let suvROI = try XCTUnwrap(vm.addSphericalSUVROI(
+            at: pet.worldPoint(z: 1, y: 1, x: 1),
+            radiusMM: 1.1
+        ))
+        XCTAssertTrue(vm.deleteSphericalSUVROI(id: suvROI.id))
+        XCTAssertTrue(vm.suvROIMeasurements.isEmpty)
+        vm.undoLastEdit()
+        XCTAssertEqual(vm.suvROIMeasurements.count, 1)
+        vm.redoLastEdit()
+        XCTAssertTrue(vm.suvROIMeasurements.isEmpty)
+    }
+
+    @MainActor
     func testViewerToolSelectionClearsLabelingMode() {
         let vm = ViewerViewModel()
         vm.labeling.labelingTool = .brush
@@ -3327,6 +3392,137 @@ final class GeometryAndIOTests: XCTestCase {
         let restoredMap = try XCTUnwrap(loaded.sessions[0].labelMaps.first?.makeLabelMap())
         XCTAssertEqual(restoredMap.value(z: 1, y: 1, x: 1), 1)
         XCTAssertEqual(restoredMap.classInfo(id: 1)?.name, "Tumor")
+    }
+
+    func testSegmentationRunRegistryRoundTripsByStudy() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracer-segmentation-runs-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SegmentationRunRegistryStore(rootURL: root)
+        let volume = makeTestVolume(modality: "PT", description: "PET", width: 4, height: 4, depth: 2)
+        let map = LabelMap(parentSeriesUID: volume.seriesUID,
+                           depth: volume.depth,
+                           height: volume.height,
+                           width: volume.width,
+                           name: "LesionTracer",
+                           classes: [LabelClass(labelID: 1, name: "Lesion", category: .lesion, color: .orange)])
+        map.setValue(1, z: 1, y: 1, x: 1)
+        let key = StudySessionStore.studyKey(for: [volume])
+        let record = SegmentationRunRecord(
+            studyKey: key,
+            studyUID: volume.studyUID,
+            patientID: volume.patientID,
+            patientName: volume.patientName,
+            studyDescription: volume.studyDescription,
+            name: "DGX LesionTracer",
+            engine: "LesionTracer",
+            backend: "DGX Docker",
+            modelID: "Dataset222_AutoPETIII_2024",
+            sourceVolumeIdentities: [volume.sessionIdentity],
+            labelMap: StudySessionLabelMap(map),
+            metadata: ["profile": "fast"]
+        )
+
+        try store.saveRecords([record], studyKey: key, volumes: [volume])
+        let loaded = try store.loadRecords(studyKey: key)
+
+        XCTAssertEqual(loaded.count, 1)
+        XCTAssertEqual(loaded[0].name, "DGX LesionTracer")
+        XCTAssertEqual(loaded[0].metadata["profile"], "fast")
+        XCTAssertNil(loaded[0].labelMap)
+        XCTAssertNotNil(loaded[0].payloadFileName)
+        let restoredMap = try store.loadLabelMap(for: loaded[0]).makeLabelMap()
+        XCTAssertEqual(restoredMap.value(z: 1, y: 1, x: 1), 1)
+    }
+
+    @MainActor
+    func testViewerRecordsAndLoadsSegmentationRuns() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracer-viewer-segmentation-runs-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessionStore = StudySessionStore(rootURL: root.appendingPathComponent("sessions", isDirectory: true))
+        let runStore = SegmentationRunRegistryStore(rootURL: root.appendingPathComponent("runs", isDirectory: true))
+        let volume = makeTestVolume(modality: "PT", description: "PET", width: 4, height: 4, depth: 2)
+        let vm = ViewerViewModel(studySessionStore: sessionStore, segmentationRunStore: runStore)
+        vm.displayVolume(volume)
+
+        let map = LabelMap(parentSeriesUID: volume.seriesUID,
+                           depth: volume.depth,
+                           height: volume.height,
+                           width: volume.width,
+                           name: "Assistant Lesions",
+                           classes: [LabelClass(labelID: 1, name: "Lesion", category: .lesion, color: .orange)])
+        map.setValue(1, z: 1, y: 1, x: 1)
+        vm.labeling.labelMaps.append(map)
+        vm.labeling.activeLabelMap = map
+
+        let saved = try XCTUnwrap(vm.captureActiveSegmentationRun(engine: "Assistant", backend: "DGX", modelID: "test-model"))
+        XCTAssertEqual(vm.segmentationRuns.count, 1)
+
+        vm.labeling.replaceLabelMapsForStudySession([])
+        XCTAssertTrue(vm.loadSegmentationRun(id: saved.id))
+        XCTAssertEqual(vm.labeling.activeLabelMap?.value(z: 1, y: 1, x: 1), 1)
+        XCTAssertTrue(vm.loadSegmentationRun(id: saved.id))
+        XCTAssertEqual(vm.labeling.labelMaps.count, 1)
+
+        let reloaded = ViewerViewModel(studySessionStore: sessionStore, segmentationRunStore: runStore)
+        reloaded.displayVolume(volume)
+        XCTAssertEqual(reloaded.segmentationRuns.first?.id, saved.id)
+    }
+
+    @MainActor
+    func testPETOnlyWindowLevelTargetsPETOnlyRange() {
+        let vm = ViewerViewModel()
+        let pet = makeTestVolume(modality: "PT", description: "PET")
+        vm.displayVolume(pet)
+        let baseBefore = (vm.window, vm.level)
+        let petBefore = vm.windowLevelSnapshot(for: .petOnly, volume: pet)
+
+        vm.adjustWindowLevel(dw: 100, dl: 40, mode: .petOnly, volume: pet)
+        let petAfter = vm.windowLevelSnapshot(for: .petOnly, volume: pet)
+
+        XCTAssertEqual(vm.window, baseBefore.0)
+        XCTAssertEqual(vm.level, baseBefore.1)
+        XCTAssertGreaterThan(petAfter.window, petBefore.window)
+        XCTAssertGreaterThan(petAfter.level, petBefore.level)
+
+        vm.recordWindowLevelChange(before: petBefore, after: petAfter, name: "PET-only W/L")
+        vm.undoLastEdit()
+        XCTAssertEqual(vm.petOnlyWindow, petBefore.window, accuracy: 0.0001)
+        XCTAssertEqual(vm.petOnlyLevel, petBefore.level, accuracy: 0.0001)
+    }
+
+    @MainActor
+    func testPETMIPShowsActiveSegmentationOverlay() async throws {
+        let vm = ViewerViewModel()
+        var pixels = [Float](repeating: 0, count: 4 * 4 * 3)
+        pixels[1 * 4 * 4 + 2 * 4 + 3] = 10
+        let pet = ImageVolume(pixels: pixels,
+                              depth: 3,
+                              height: 4,
+                              width: 4,
+                              modality: "PT",
+                              seriesDescription: "PET")
+        vm.displayVolume(pet)
+        let map = LabelMap(parentSeriesUID: pet.seriesUID,
+                           depth: pet.depth,
+                           height: pet.height,
+                           width: pet.width,
+                           name: "MIP labels",
+                           classes: [LabelClass(labelID: 1, name: "Lesion", category: .lesion, color: .orange)])
+        map.setValue(1, z: 1, y: 2, x: 3)
+        vm.labeling.labelMaps.append(map)
+        vm.labeling.activeLabelMap = map
+
+        for _ in 0..<50 {
+            if vm.makePETMIPImage(for: SlicePlane.coronal.axis) != nil {
+                break
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertNotNil(vm.makePETMIPImage(for: SlicePlane.coronal.axis))
+        XCTAssertNotNil(vm.makePETMIPLabelImage(for: SlicePlane.coronal.axis))
     }
 
     func testPACSArchiveRootStorePersistsAndDeduplicatesIndexedRoots() throws {
@@ -5021,18 +5217,44 @@ final class GeometryAndIOTests: XCTestCase {
     }
 
     @MainActor
-    func testMIPColormapIsIndependentFromFusionColormap() {
+    func testPETDisplayMapsAreIndependent() {
         let vm = ViewerViewModel()
 
         vm.setFusionColormap(.petHotIron)
+        vm.setPETOnlyColormap(.petViridis)
         vm.setPETMIPColormap(.grayscale)
+        vm.setPETOverlayRange(min: 0, max: 5)
+        vm.setPETOnlyRange(min: 2.5, max: 15)
 
         XCTAssertEqual(vm.overlayColormap, .petHotIron)
+        XCTAssertEqual(vm.petOnlyColormap, .petViridis)
         XCTAssertEqual(vm.mipColormap, .grayscale)
+        XCTAssertEqual(vm.petOverlayRangeMax, 5, accuracy: 1e-9)
+        XCTAssertEqual(vm.petOnlyRangeMin, 2.5, accuracy: 1e-9)
 
         vm.setPETMIPColormap(.invertedGray)
         XCTAssertEqual(vm.overlayColormap, .petHotIron)
+        XCTAssertEqual(vm.petOnlyColormap, .petViridis)
         XCTAssertEqual(vm.mipColormap, .invertedGray)
+    }
+
+    @MainActor
+    func testModalitySpecificInversionIsUndoableAndIndependent() {
+        let vm = ViewerViewModel()
+
+        vm.setInvertPETImages(true)
+        vm.setInvertCTImages(true)
+
+        XCTAssertTrue(vm.invertPETImages)
+        XCTAssertTrue(vm.invertCTImages)
+
+        vm.undoLastEdit()
+        XCTAssertTrue(vm.invertPETImages)
+        XCTAssertFalse(vm.invertCTImages)
+
+        vm.undoLastEdit()
+        XCTAssertFalse(vm.invertPETImages)
+        XCTAssertFalse(vm.invertCTImages)
     }
 
     @MainActor
@@ -5055,6 +5277,8 @@ final class GeometryAndIOTests: XCTestCase {
         map.voxels[0] = 1
         vm.annotations.append(Annotation(type: .distance, points: [CGPoint(x: 0, y: 0), CGPoint(x: 1, y: 1)]))
         vm.setViewportZoom(2, for: 0)
+        vm.setInvertPETImages(true)
+        vm.setInvertCTImages(true)
         vm.setInvertPETMIP(true)
 
         vm.resetEditableChanges()
@@ -5062,6 +5286,8 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(map.voxels.filter { $0 == 1 }.count, 0)
         XCTAssertTrue(vm.annotations.isEmpty)
         XCTAssertTrue(vm.viewportTransform(for: 0).isIdentity)
+        XCTAssertFalse(vm.invertPETImages)
+        XCTAssertFalse(vm.invertCTImages)
         XCTAssertFalse(vm.invertPETMIP)
 
         vm.undoLastEdit()
@@ -5069,6 +5295,8 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(map.voxels[0], 1)
         XCTAssertEqual(vm.annotations.count, 1)
         XCTAssertEqual(vm.viewportTransform(for: 0).zoom, 2, accuracy: 1e-9)
+        XCTAssertTrue(vm.invertPETImages)
+        XCTAssertTrue(vm.invertCTImages)
         XCTAssertTrue(vm.invertPETMIP)
     }
 
@@ -5164,6 +5392,11 @@ final class GeometryAndIOTests: XCTestCase {
         let image = try XCTUnwrap(vm.makePETMIPImage(for: 2))
         XCTAssertEqual(image.width, 2)
         XCTAssertEqual(image.height, 2)
+        XCTAssertTrue(vm.navigateUsingPETMIP(axis: 2, displayPixelX: 1, displayPixelY: 0))
+        let indices = vm.displayedSliceIndices(for: pet)
+        XCTAssertEqual(indices.sag, 1)
+        XCTAssertEqual(indices.cor, 1)
+        XCTAssertEqual(indices.ax, 1)
         let revision = vm.petMIPCacheRevision
         XCTAssertNotNil(vm.makePETMIPImage(for: 2))
         XCTAssertEqual(vm.petMIPCacheRevision, revision)

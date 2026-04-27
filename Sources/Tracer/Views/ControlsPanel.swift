@@ -29,6 +29,7 @@ struct ControlsPanel: View {
 
     enum SegSub: String, CaseIterable, Identifiable, Hashable {
         case labels = "Labels"
+        case runs = "Runs"
         case registration = "Landmarks"
         var id: String { rawValue }
     }
@@ -83,6 +84,7 @@ struct ControlsPanel: View {
                 case .segmentation:
                     switch segSub {
                     case .labels:       ScrollView { LabelingPanel() }
+                    case .runs:         ScrollView { SegmentationRunsPanel().padding(16) }
                     case .registration: ScrollView { RegistrationPanel() }
                     }
                 case .registration:
@@ -502,11 +504,25 @@ private struct FusionTab: View {
 
                 // Colormap
                 HStack {
-                    Text("Colormap")
+                    Text("Fusion colormap")
                     Spacer()
                     Picker("", selection: Binding(
                         get: { vm.overlayColormap },
                         set: { vm.setFusionColormap($0) }
+                    )) {
+                        ForEach(Colormap.allCases) { c in
+                            Text(c.displayName).tag(c)
+                        }
+                    }
+                    .labelsHidden()
+                }
+
+                HStack {
+                    Text("PET-only colormap")
+                    Spacer()
+                    Picker("", selection: Binding(
+                        get: { vm.petOnlyColormap },
+                        set: { vm.setPETOnlyColormap($0) }
                     )) {
                         ForEach(Colormap.allCases) { c in
                             Text(c.displayName).tag(c)
@@ -534,6 +550,18 @@ private struct FusionTab: View {
                     }
                 }
 
+                Toggle("Invert PET images", isOn: Binding(
+                    get: { vm.invertPETImages },
+                    set: { vm.setInvertPETImages($0) }
+                ))
+                    .help("Reverses PET-only and fused PET overlay color mapping. MIP inversion remains separate.")
+
+                Toggle("Invert CT images", isOn: Binding(
+                    get: { vm.invertCTImages },
+                    set: { vm.setInvertCTImages($0) }
+                ))
+                    .help("Reverses CT grayscale panes and the CT base layer in fused PET/CT.")
+
                 Toggle("Invert PET MIP window", isOn: Binding(
                     get: { vm.invertPETMIP },
                     set: { vm.setInvertPETMIP($0) }
@@ -541,6 +569,7 @@ private struct FusionTab: View {
                     .help("Reverses the PET MIP color mapping, useful when a black-hot or white-hot projection makes low uptake easier to read.")
 
                 petSUVRangePanel
+                petOnlySUVRangePanel
 
                 Divider()
 
@@ -766,7 +795,7 @@ private struct FusionTab: View {
     private var petSUVRangePanel: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("PET SUV Range")
+                Text("Fusion PET SUV Range")
                     .font(.subheadline)
                 Spacer()
                 Text(String(format: "%.1f–%.1f", vm.petOverlayRangeMin, vm.petOverlayRangeMax))
@@ -819,6 +848,62 @@ private struct FusionTab: View {
         }
     }
 
+    private var petOnlySUVRangePanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("PET-only SUV Range")
+                    .font(.subheadline)
+                Spacer()
+                Text(String(format: "%.1f–%.1f", vm.petOnlyRangeMin, vm.petOnlyRangeMax))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(TracerTheme.pet)
+            }
+
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 6) { petOnlyRangePresetButtons }
+                VStack(alignment: .leading, spacing: 6) { petOnlyRangePresetButtons }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.mini)
+
+            HStack {
+                Text("Min")
+                    .frame(width: 28, alignment: .leading)
+                Slider(value: Binding(
+                    get: { max(0, vm.petOnlyRangeMin) },
+                    set: { vm.setPETOnlyRange(min: $0, max: vm.petOnlyRangeMax) }
+                ), in: 0...60, step: 0.1)
+                Text(String(format: "%.1f", vm.petOnlyRangeMin))
+                    .font(.system(size: 11, design: .monospaced))
+                    .frame(width: 36, alignment: .trailing)
+                Stepper("", value: Binding(
+                    get: { max(0, vm.petOnlyRangeMin) },
+                    set: { vm.setPETOnlyRange(min: $0, max: vm.petOnlyRangeMax) }
+                ), in: 0...60, step: 0.1)
+                .labelsHidden()
+                .frame(width: 28)
+            }
+
+            HStack {
+                Text("Max")
+                    .frame(width: 28, alignment: .leading)
+                Slider(value: Binding(
+                    get: { min(80, max(0.1, vm.petOnlyRangeMax)) },
+                    set: { vm.setPETOnlyRange(min: vm.petOnlyRangeMin, max: $0) }
+                ), in: 0.1...80, step: 0.1)
+                Text(String(format: "%.1f", vm.petOnlyRangeMax))
+                    .font(.system(size: 11, design: .monospaced))
+                    .frame(width: 36, alignment: .trailing)
+                Stepper("", value: Binding(
+                    get: { min(80, max(0.1, vm.petOnlyRangeMax)) },
+                    set: { vm.setPETOnlyRange(min: vm.petOnlyRangeMin, max: $0) }
+                ), in: 0.1...80, step: 0.1)
+                .labelsHidden()
+                .frame(width: 28)
+            }
+        }
+    }
+
     @ViewBuilder
     private var petRangePresetButtons: some View {
         Button("0–5") { vm.setPETOverlayRange(min: 0, max: 5) }
@@ -829,6 +914,20 @@ private struct FusionTab: View {
             if let overlay = vm.activePETQuantificationVolume {
                 let range = vm.petSUVDisplayRange(for: overlay)
                 vm.setPETOverlayRange(min: max(0, range.min), max: max(1, range.max))
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var petOnlyRangePresetButtons: some View {
+        Button("0–5") { vm.setPETOnlyRange(min: 0, max: 5) }
+        Button("0–10") { vm.setPETOnlyRange(min: 0, max: 10) }
+        Button("0–15") { vm.setPETOnlyRange(min: 0, max: 15) }
+        Button("2.5–15") { vm.setPETOnlyRange(min: 2.5, max: 15) }
+        Button("Auto") {
+            if let overlay = vm.activePETQuantificationVolume {
+                let range = vm.petSUVDisplayRange(for: overlay)
+                vm.setPETOnlyRange(min: max(0, range.min), max: max(1, range.max))
             }
         }
     }
@@ -1354,7 +1453,7 @@ private struct FusionTab: View {
 
                 HStack(spacing: 6) {
                     Button {
-                        vm.suvSphereRadiusMM = 6.2
+                        vm.setSUVSphereRadiusMM(6.2)
                     } label: {
                         Text("1 mL")
                     }
@@ -1553,6 +1652,18 @@ private struct DisplayTab: View {
                 set: { vm.setInvertColors($0) }
             ))
                 .help("Useful for MR or X-ray inversion")
+
+            Toggle("Invert PET Images", isOn: Binding(
+                get: { vm.invertPETImages },
+                set: { vm.setInvertPETImages($0) }
+            ))
+                .help("Reverses PET-only panes and fused PET overlays without changing CT grayscale.")
+
+            Toggle("Invert CT Images", isOn: Binding(
+                get: { vm.invertCTImages },
+                set: { vm.setInvertCTImages($0) }
+            ))
+                .help("Reverses CT-only panes and fused CT base images without changing PET coloring.")
 
             Toggle("Correct A/P Display Flip", isOn: Binding(
                 get: { vm.correctAnteriorPosteriorDisplay },

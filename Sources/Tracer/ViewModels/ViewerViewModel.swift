@@ -94,76 +94,205 @@ public struct VolumeOperationStatus: Identifiable, Equatable, Sendable {
     public let startedAt: Date
 }
 
+public enum DisplayWindowLevelTarget: String, Equatable, Sendable {
+    case base
+    case petOnly
+    case petOverlay
+}
+
+public struct DisplayWindowLevelSnapshot: Equatable, Sendable {
+    public let target: DisplayWindowLevelTarget
+    public let window: Double
+    public let level: Double
+}
+
 private struct PETMIPProjectionKey: Hashable, Sendable {
     let volumeIdentity: String
     let axis: Int
     let width: Int
     let height: Int
     let depth: Int
+    let rotationTenths: Int
 
-    init(volume: ImageVolume, axis: Int) {
+    init(volume: ImageVolume, axis: Int, rotationDegrees: Double) {
         self.volumeIdentity = volume.sessionIdentity
         self.axis = axis
         self.width = volume.width
         self.height = volume.height
         self.depth = volume.depth
+        self.rotationTenths = axis == 2 ? 0 : PETMIPProjectionKey.quantizedRotationTenths(rotationDegrees)
+    }
+
+    private static func quantizedRotationTenths(_ degrees: Double) -> Int {
+        guard degrees.isFinite else { return 0 }
+        var normalized = degrees.truncatingRemainder(dividingBy: 360)
+        if normalized > 180 { normalized -= 360 }
+        if normalized < -180 { normalized += 360 }
+        return Int((normalized * 10).rounded())
     }
 }
 
 private struct PETMIPProjection: Sendable {
     let pixels: [Float]
+    let argmaxX: [Int]
+    let argmaxY: [Int]
+    let argmaxZ: [Int]
     let width: Int
     let height: Int
 
-    static func compute(volume: ImageVolume, axis: Int) -> PETMIPProjection {
+    static func compute(volume: ImageVolume, axis: Int, horizontalRotationDegrees: Double) -> PETMIPProjection {
         let pixels = volume.pixels
         let width = volume.width
         let height = volume.height
         let depth = volume.depth
 
+        if axis != 2, abs(horizontalRotationDegrees) >= 0.05 {
+            return computeRotatedAxialProjection(
+                pixels: pixels,
+                volumeWidth: width,
+                volumeHeight: height,
+                volumeDepth: depth,
+                axis: axis,
+                horizontalRotationDegrees: horizontalRotationDegrees
+            )
+        }
+
         switch axis {
         case 0:
             var out = [Float](repeating: 0, count: depth * height)
+            var argX = [Int](repeating: 0, count: out.count)
+            var argY = [Int](repeating: 0, count: out.count)
+            var argZ = [Int](repeating: 0, count: out.count)
             for z in 0..<depth {
                 let slabStart = z * height * width
                 for y in 0..<height {
                     let rowStart = slabStart + y * width
                     var maxValue = -Float.greatestFiniteMagnitude
+                    var maxX = 0
                     for x in 0..<width {
-                        maxValue = Swift.max(maxValue, pixels[rowStart + x])
+                        let value = pixels[rowStart + x]
+                        if value > maxValue {
+                            maxValue = value
+                            maxX = x
+                        }
                     }
-                    out[z * height + y] = maxValue
+                    let outIndex = z * height + y
+                    out[outIndex] = maxValue
+                    argX[outIndex] = maxX
+                    argY[outIndex] = y
+                    argZ[outIndex] = z
                 }
             }
-            return PETMIPProjection(pixels: out, width: height, height: depth)
+            return PETMIPProjection(pixels: out, argmaxX: argX, argmaxY: argY, argmaxZ: argZ, width: height, height: depth)
 
         case 1:
             var out = [Float](repeating: 0, count: depth * width)
+            var argX = [Int](repeating: 0, count: out.count)
+            var argY = [Int](repeating: 0, count: out.count)
+            var argZ = [Int](repeating: 0, count: out.count)
             for z in 0..<depth {
                 let slabStart = z * height * width
                 for x in 0..<width {
                     var maxValue = -Float.greatestFiniteMagnitude
+                    var maxY = 0
                     for y in 0..<height {
-                        maxValue = Swift.max(maxValue, pixels[slabStart + y * width + x])
+                        let value = pixels[slabStart + y * width + x]
+                        if value > maxValue {
+                            maxValue = value
+                            maxY = y
+                        }
                     }
-                    out[z * width + x] = maxValue
+                    let outIndex = z * width + x
+                    out[outIndex] = maxValue
+                    argX[outIndex] = x
+                    argY[outIndex] = maxY
+                    argZ[outIndex] = z
                 }
             }
-            return PETMIPProjection(pixels: out, width: width, height: depth)
+            return PETMIPProjection(pixels: out, argmaxX: argX, argmaxY: argY, argmaxZ: argZ, width: width, height: depth)
 
         default:
             var out = [Float](repeating: 0, count: height * width)
+            var argX = [Int](repeating: 0, count: out.count)
+            var argY = [Int](repeating: 0, count: out.count)
+            var argZ = [Int](repeating: 0, count: out.count)
             for y in 0..<height {
                 for x in 0..<width {
                     var maxValue = -Float.greatestFiniteMagnitude
+                    var maxZ = 0
                     for z in 0..<depth {
-                        maxValue = Swift.max(maxValue, pixels[z * height * width + y * width + x])
+                        let value = pixels[z * height * width + y * width + x]
+                        if value > maxValue {
+                            maxValue = value
+                            maxZ = z
+                        }
                     }
-                    out[y * width + x] = maxValue
+                    let outIndex = y * width + x
+                    out[outIndex] = maxValue
+                    argX[outIndex] = x
+                    argY[outIndex] = y
+                    argZ[outIndex] = maxZ
                 }
             }
-            return PETMIPProjection(pixels: out, width: width, height: height)
+            return PETMIPProjection(pixels: out, argmaxX: argX, argmaxY: argY, argmaxZ: argZ, width: width, height: height)
         }
+    }
+
+    private static func computeRotatedAxialProjection(pixels: [Float],
+                                                      volumeWidth: Int,
+                                                      volumeHeight: Int,
+                                                      volumeDepth: Int,
+                                                      axis: Int,
+                                                      horizontalRotationDegrees: Double) -> PETMIPProjection {
+        let cx = (Double(volumeWidth) - 1) / 2
+        let cy = (Double(volumeHeight) - 1) / 2
+        let baseAngle = axis == 0 ? Double.pi / 2 : 0
+        let angle = baseAngle + horizontalRotationDegrees * Double.pi / 180
+        let cosA = cos(angle)
+        let sinA = sin(angle)
+        let corners = [
+            SIMD2<Double>(0 - cx, 0 - cy),
+            SIMD2<Double>(Double(volumeWidth - 1) - cx, 0 - cy),
+            SIMD2<Double>(0 - cx, Double(volumeHeight - 1) - cy),
+            SIMD2<Double>(Double(volumeWidth - 1) - cx, Double(volumeHeight - 1) - cy)
+        ]
+        let projected = corners.map { $0.x * cosA + $0.y * sinA }
+        let minU = floor(projected.min() ?? 0)
+        let maxU = ceil(projected.max() ?? 0)
+        let outWidth = max(1, Int(maxU - minU) + 1)
+        let outHeight = volumeDepth
+        let count = outWidth * outHeight
+        var out = [Float](repeating: -Float.greatestFiniteMagnitude, count: count)
+        var argX = [Int](repeating: -1, count: count)
+        var argY = [Int](repeating: -1, count: count)
+        var argZ = [Int](repeating: -1, count: count)
+
+        for z in 0..<volumeDepth {
+            let slabStart = z * volumeHeight * volumeWidth
+            for y in 0..<volumeHeight {
+                let rowStart = slabStart + y * volumeWidth
+                let dy = Double(y) - cy
+                for x in 0..<volumeWidth {
+                    let dx = Double(x) - cx
+                    let u = dx * cosA + dy * sinA
+                    let outX = Int((u - minU).rounded())
+                    guard outX >= 0, outX < outWidth else { continue }
+                    let outIndex = z * outWidth + outX
+                    let value = pixels[rowStart + x]
+                    if value > out[outIndex] {
+                        out[outIndex] = value
+                        argX[outIndex] = x
+                        argY[outIndex] = y
+                        argZ[outIndex] = z
+                    }
+                }
+            }
+        }
+
+        for index in out.indices where out[index] == -Float.greatestFiniteMagnitude {
+            out[index] = 0
+        }
+        return PETMIPProjection(pixels: out, argmaxX: argX, argmaxY: argY, argmaxZ: argZ, width: outWidth, height: outHeight)
     }
 }
 
@@ -223,6 +352,8 @@ public final class ViewerViewModel: ObservableObject {
 
     // Display transforms
     @Published public var invertColors: Bool = false
+    @Published public var invertPETImages: Bool = false
+    @Published public var invertCTImages: Bool = false
     @Published public var invertPETMIP: Bool = false
     @Published public var correctAnteriorPosteriorDisplay: Bool = true
     @Published public var correctRightLeftDisplay: Bool = false
@@ -233,9 +364,13 @@ public final class ViewerViewModel: ObservableObject {
     // Overlay display settings
     @Published public var overlayOpacity: Double = 0.5
     @Published public var overlayColormap: Colormap = .tracerPET
+    @Published public var petOnlyColormap: Colormap = .petHotIron
     @Published public var mipColormap: Colormap = .grayscale
+    @Published public var petMIPRotationDegrees: Double = 0
     @Published public var overlayWindow: Double = 6
     @Published public var overlayLevel: Double = 3
+    @Published public var petOnlyWindow: Double = 6
+    @Published public var petOnlyLevel: Double = 3
     @Published public var petMRRegistrationMode: PETMRRegistrationMode = .rigidThenDeformable
     @Published public var petMRDeformableRegistration = PETMRDeformableRegistrationConfiguration()
     @Published public var hangingGrid: HangingGridLayout = .defaultPETCT
@@ -250,6 +385,7 @@ public final class ViewerViewModel: ObservableObject {
     @Published public private(set) var studySessions: [StudyMeasurementSession] = []
     @Published public private(set) var activeStudySessionID: UUID?
     @Published public private(set) var activeStudySessionKey: String?
+    @Published public private(set) var segmentationRuns: [SegmentationRunRecord] = []
     @Published public var dynamicStudy: DynamicImageStudy?
     @Published public var selectedDynamicFrameIndex: Int = 0
     @Published public var dynamicPlaybackFPS: Double = 2.0
@@ -286,6 +422,8 @@ public final class ViewerViewModel: ObservableObject {
         var window: Double
         var level: Double
         var invertColors: Bool
+        var invertPETImages: Bool
+        var invertCTImages: Bool
         var invertPETMIP: Bool
         var correctAnteriorPosteriorDisplay: Bool
         var correctRightLeftDisplay: Bool
@@ -294,9 +432,13 @@ public final class ViewerViewModel: ObservableObject {
         var paneViewportTransforms: [Int: ViewportTransformState]
         var overlayOpacity: Double
         var overlayColormap: Colormap
+        var petOnlyColormap: Colormap
         var mipColormap: Colormap
+        var petMIPRotationDegrees: Double
         var overlayWindow: Double
         var overlayLevel: Double
+        var petOnlyWindow: Double
+        var petOnlyLevel: Double
         var petMRRegistrationMode: PETMRRegistrationMode
         var petMRDeformableRegistration: PETMRDeformableRegistrationConfiguration
         var hangingGrid: HangingGridLayout
@@ -337,11 +479,14 @@ public final class ViewerViewModel: ObservableObject {
     @Published public private(set) var savedArchiveRoots: [PACSArchiveRoot] = []
     private let recentVolumesStore = RecentVolumesStore()
     private let studySessionStore: StudySessionStore
+    private let segmentationRunStore: SegmentationRunRegistryStore
     private let archiveRootStore: PACSArchiveRootStore
 
     public init(studySessionStore: StudySessionStore = StudySessionStore(),
+                segmentationRunStore: SegmentationRunRegistryStore = SegmentationRunRegistryStore(),
                 archiveRootStore: PACSArchiveRootStore = PACSArchiveRootStore()) {
         self.studySessionStore = studySessionStore
+        self.segmentationRunStore = segmentationRunStore
         self.archiveRootStore = archiveRootStore
         self.recentVolumes = recentVolumesStore.load()
         self.savedArchiveRoots = archiveRootStore.load()
@@ -395,6 +540,17 @@ public final class ViewerViewModel: ObservableObject {
 
     public var loadedMRVolumes: [ImageVolume] {
         loadedVolumes.filter { Modality.normalize($0.modality) == .MR }
+    }
+
+    public var currentStudyVolumes: [ImageVolume] {
+        guard let currentVolume else { return [] }
+        return studyVolumes(anchoredAt: currentVolume)
+    }
+
+    public var currentStudyReportKey: String? {
+        let volumes = currentStudyVolumes
+        guard !volumes.isEmpty else { return nil }
+        return StudySessionStore.studyKey(for: volumes)
     }
 
     public var loadedAnatomicalVolumes: [ImageVolume] {
@@ -459,6 +615,14 @@ public final class ViewerViewModel: ObservableObject {
 
     public var petOverlayRangeMax: Double {
         overlayLevel + overlayWindow / 2
+    }
+
+    public var petOnlyRangeMin: Double {
+        petOnlyLevel - petOnlyWindow / 2
+    }
+
+    public var petOnlyRangeMax: Double {
+        petOnlyLevel + petOnlyWindow / 2
     }
 
     public var canUndo: Bool {
@@ -550,6 +714,14 @@ public final class ViewerViewModel: ObservableObject {
         }
     }
 
+    public func setPETOnlyColormap(_ colormap: Colormap) {
+        let before = petOnlyColormap
+        petOnlyColormap = colormap
+        recordValueChange(name: "PET-only color", before: before, after: colormap) { vm, value in
+            vm.petOnlyColormap = value
+        }
+    }
+
     public func setPETMIPColormap(_ colormap: Colormap) {
         let before = mipColormap
         mipColormap = colormap
@@ -558,11 +730,55 @@ public final class ViewerViewModel: ObservableObject {
         }
     }
 
+    public func setPETMIPRotationDegrees(_ degrees: Double) {
+        let before = petMIPRotationDegrees
+        let after = normalizedPETMIPRotation(degrees)
+        applyPETMIPRotation(after)
+        recordHistoryIfNeeded(name: "PET MIP rotation", changed: before != after) { [weak self] in
+            self?.applyPETMIPRotation(before)
+        } redo: { [weak self] in
+            self?.applyPETMIPRotation(after)
+        }
+        statusMessage = String(format: "PET MIP horizontal rotation %.0f°", after)
+    }
+
+    public func previewPETMIPRotationDegrees(_ degrees: Double) {
+        let after = normalizedPETMIPRotation(degrees)
+        applyPETMIPRotation(after)
+        statusMessage = String(format: "PET MIP horizontal rotation %.0f°", after)
+    }
+
+    public func setSUVSphereRadiusMM(_ radiusMM: Double) {
+        let before = suvSphereRadiusMM
+        let after = max(0.5, min(100, radiusMM.isFinite ? radiusMM : before))
+        suvSphereRadiusMM = after
+        recordValueChange(name: "Sphere ROI radius", before: before, after: after) { vm, value in
+            vm.suvSphereRadiusMM = value
+        }
+        statusMessage = String(format: "Sphere ROI radius %.1f mm", after)
+    }
+
     public func setInvertColors(_ enabled: Bool) {
         let before = invertColors
         invertColors = enabled
         recordValueChange(name: "Invert images", before: before, after: enabled) { vm, value in
             vm.invertColors = value
+        }
+    }
+
+    public func setInvertPETImages(_ enabled: Bool) {
+        let before = invertPETImages
+        invertPETImages = enabled
+        recordValueChange(name: "Invert PET images", before: before, after: enabled) { vm, value in
+            vm.invertPETImages = value
+        }
+    }
+
+    public func setInvertCTImages(_ enabled: Bool) {
+        let before = invertCTImages
+        invertCTImages = enabled
+        recordValueChange(name: "Invert CT images", before: before, after: enabled) { vm, value in
+            vm.invertCTImages = value
         }
     }
 
@@ -629,6 +845,20 @@ public final class ViewerViewModel: ObservableObject {
             self?.applyPETOverlayWindow(window: before.0, level: before.1)
         } redo: { [weak self] in
             self?.applyPETOverlayWindow(window: after.0, level: after.1)
+        }
+    }
+
+    public func setPETOnlyRange(min rawMin: Double, max rawMax: Double) {
+        let before = (petOnlyWindow, petOnlyLevel)
+        let lower = max(0, min(rawMin, rawMax - 0.1))
+        let upper = max(lower + 0.1, rawMax)
+        petOnlyWindow = upper - lower
+        petOnlyLevel = (upper + lower) / 2
+        let after = (petOnlyWindow, petOnlyLevel)
+        recordHistoryIfNeeded(name: "PET-only SUV window", changed: abs(before.0 - after.0) > 0.0001 || abs(before.1 - after.1) > 0.0001) { [weak self] in
+            self?.applyPETOnlyWindow(window: before.0, level: before.1)
+        } redo: { [weak self] in
+            self?.applyPETOnlyWindow(window: after.0, level: after.1)
         }
     }
 
@@ -872,7 +1102,10 @@ public final class ViewerViewModel: ObservableObject {
         lastVolumeMeasurementReport = nil
         resetAllViewportTransforms()
         invertColors = false
+        invertPETImages = false
+        invertCTImages = false
         invertPETMIP = false
+        petMIPRotationDegrees = 0
         if let currentVolume {
             let (w, l) = autoWindowLevel(pixels: currentVolume.pixels)
             window = w
@@ -938,6 +1171,24 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     @discardableResult
+    public func deleteAnnotation(id: UUID) -> Bool {
+        guard let index = annotations.firstIndex(where: { $0.id == id }) else {
+            statusMessage = "Measurement was not found in the active session"
+            return false
+        }
+        let removed = annotations.remove(at: index)
+        recordHistoryIfNeeded(name: "Delete measurement", changed: true) { [weak self] in
+            guard let self, !self.annotations.contains(where: { $0.id == removed.id }) else { return }
+            self.annotations.insert(removed, at: min(index, self.annotations.count))
+        } redo: { [weak self] in
+            self?.annotations.removeAll { $0.id == removed.id }
+        }
+        statusMessage = "Deleted \(removed.displayText.isEmpty ? removed.type.rawValue : removed.displayText)"
+        autosaveActiveStudySession()
+        return true
+    }
+
+    @discardableResult
     public func addSphericalSUVROI(at worldPoint: SIMD3<Double>,
                                    radiusMM: Double? = nil) -> SUVROIMeasurement? {
         guard let pet = activePETQuantificationVolume else {
@@ -997,6 +1248,29 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     @discardableResult
+    public func deleteSphericalSUVROI(id: UUID) -> Bool {
+        guard let index = suvROIMeasurements.firstIndex(where: { $0.id == id }) else {
+            statusMessage = "SUV ROI was not found in the active session"
+            return false
+        }
+        let removed = suvROIMeasurements.remove(at: index)
+        lastSUVROIMeasurement = suvROIMeasurements.last
+        let lastAfterDelete = lastSUVROIMeasurement
+        recordHistoryIfNeeded(name: "Delete SUV ROI", changed: true) { [weak self] in
+            guard let self, !self.suvROIMeasurements.contains(where: { $0.id == removed.id }) else { return }
+            self.suvROIMeasurements.insert(removed, at: min(index, self.suvROIMeasurements.count))
+            self.lastSUVROIMeasurement = removed
+        } redo: { [weak self] in
+            guard let self else { return }
+            self.suvROIMeasurements.removeAll { $0.id == removed.id }
+            self.lastSUVROIMeasurement = lastAfterDelete
+        }
+        statusMessage = "Deleted SUV ROI: \(removed.compactSummary)"
+        autosaveActiveStudySession()
+        return true
+    }
+
+    @discardableResult
     public func addSphericalIntensityROI(at worldPoint: SIMD3<Double>,
                                          in volume: ImageVolume,
                                          radiusMM: Double? = nil) -> IntensityROIMeasurement? {
@@ -1050,6 +1324,30 @@ public final class ViewerViewModel: ObservableObject {
         }
         statusMessage = "Cleared \(before.count) intensity ROI measurements"
         autosaveActiveStudySession()
+    }
+
+    @discardableResult
+    public func deleteSphericalIntensityROI(id: UUID) -> Bool {
+        guard let index = intensityROIMeasurements.firstIndex(where: { $0.id == id }) else {
+            statusMessage = "Intensity ROI was not found in the active session"
+            return false
+        }
+        let removed = intensityROIMeasurements.remove(at: index)
+        lastIntensityROIMeasurement = intensityROIMeasurements.last
+        let lastAfterDelete = lastIntensityROIMeasurement
+        recordHistoryIfNeeded(name: "Delete intensity ROI", changed: true) { [weak self] in
+            guard let self,
+                  !self.intensityROIMeasurements.contains(where: { $0.id == removed.id }) else { return }
+            self.intensityROIMeasurements.insert(removed, at: min(index, self.intensityROIMeasurements.count))
+            self.lastIntensityROIMeasurement = removed
+        } redo: { [weak self] in
+            guard let self else { return }
+            self.intensityROIMeasurements.removeAll { $0.id == removed.id }
+            self.lastIntensityROIMeasurement = lastAfterDelete
+        }
+        statusMessage = "Deleted intensity ROI: \(removed.compactSummary)"
+        autosaveActiveStudySession()
+        return true
     }
 
     public func clearAllMeasurements() {
@@ -1266,11 +1564,13 @@ public final class ViewerViewModel: ObservableObject {
         }
     }
 
-    private func loadStudySessionsIfNeeded(anchor volume: ImageVolume, force: Bool = false) {
+    private func loadStudySessionsIfNeeded(anchor volume: ImageVolume,
+                                           force: Bool = false,
+                                           persistCurrent: Bool = true) {
         let volumes = studyVolumes(anchoredAt: volume)
         let key = StudySessionStore.studyKey(for: volumes)
         guard force || activeStudySessionKey != key else { return }
-        if hasGeneratedStudySessionContent {
+        if persistCurrent && hasGeneratedStudySessionContent {
             persistStudySessions()
         }
         activeStudySessionKey = key
@@ -1291,10 +1591,140 @@ public final class ViewerViewModel: ObservableObject {
                 activeStudySessionID = nil
                 clearCurrentStudySessionState()
             }
+            loadSegmentationRuns(studyKey: key)
         } catch {
             studySessions = []
             activeStudySessionID = nil
+            segmentationRuns = []
             statusMessage = "Study session load failed: \(error.localizedDescription)"
+        }
+    }
+
+    public func refreshSegmentationRuns() {
+        guard let key = activeStudySessionKey ?? currentStudyReportKey else {
+            segmentationRuns = []
+            statusMessage = "Load a study before refreshing segmentation runs"
+            return
+        }
+        loadSegmentationRuns(studyKey: key)
+        statusMessage = "Loaded \(segmentationRuns.count) segmentation run(s)"
+    }
+
+    @discardableResult
+    public func captureActiveSegmentationRun(name: String? = nil,
+                                             engine: String = "Manual",
+                                             backend: String = "Tracer",
+                                             modelID: String = "",
+                                             metadata: [String: String] = [:]) -> SegmentationRunRecord? {
+        guard let map = labeling.activeLabelMap else {
+            statusMessage = "No active segmentation to save"
+            return nil
+        }
+        return recordSegmentationRun(labelMap: map,
+                                     name: name ?? map.name,
+                                     engine: engine,
+                                     backend: backend,
+                                     modelID: modelID,
+                                     metadata: metadata)
+    }
+
+    @discardableResult
+    public func recordSegmentationRun(labelMap: LabelMap,
+                                      name: String,
+                                      engine: String,
+                                      backend: String,
+                                      modelID: String,
+                                      metadata: [String: String] = [:]) -> SegmentationRunRecord? {
+        let volumes = currentVolume.map { studyVolumes(anchoredAt: $0) } ?? loadedVolumes
+        guard !volumes.isEmpty else {
+            statusMessage = "Load a study before saving a segmentation run"
+            return nil
+        }
+        let key = activeStudySessionKey ?? StudySessionStore.studyKey(for: volumes)
+        activeStudySessionKey = key
+        let anchor = volumes.first
+        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let record = SegmentationRunRecord(
+            studyKey: key,
+            studyUID: anchor?.studyUID ?? "",
+            patientID: anchor?.patientID ?? "",
+            patientName: anchor?.patientName ?? "",
+            studyDescription: anchor?.studyDescription ?? "",
+            name: cleanName.isEmpty ? labelMap.name : cleanName,
+            engine: engine,
+            backend: backend,
+            modelID: modelID,
+            sourceVolumeIdentities: volumes.map(\.sessionIdentity).sorted(),
+            labelMap: StudySessionLabelMap(labelMap),
+            metadata: metadata.merging(currentGeneratedMetadata()) { explicit, _ in explicit }
+        )
+        segmentationRuns.removeAll { $0.id == record.id }
+        segmentationRuns.insert(record, at: 0)
+        persistSegmentationRuns(studyKey: key, volumes: volumes)
+        statusMessage = "Saved segmentation run: \(record.name)"
+        return record
+    }
+
+    @discardableResult
+    public func loadSegmentationRun(id: UUID) -> Bool {
+        guard let record = segmentationRuns.first(where: { $0.id == id }) else {
+            statusMessage = "Segmentation run was not found"
+            return false
+        }
+        do {
+            let storedLabelMap = try segmentationRunStore.loadLabelMap(for: record)
+            let map = try storedLabelMap.makeLabelMap()
+            map.name = record.name
+            if let existing = labeling.labelMaps.firstIndex(where: {
+                $0.name == map.name &&
+                $0.parentSeriesUID == map.parentSeriesUID &&
+                $0.width == map.width &&
+                $0.height == map.height &&
+                $0.depth == map.depth
+            }) {
+                labeling.labelMaps[existing] = map
+            } else {
+                labeling.labelMaps.append(map)
+            }
+            labeling.activeLabelMap = map
+            if let first = map.classes.first {
+                labeling.activeClassID = first.labelID
+            }
+            saveOrUpdateCurrentStudySession(announce: false, includeLabelMaps: true)
+            statusMessage = "Loaded segmentation run: \(record.name)"
+            return true
+        } catch {
+            statusMessage = "Segmentation run load failed: \(error.localizedDescription)"
+            return false
+        }
+    }
+
+    public func deleteSegmentationRun(id: UUID) {
+        guard let index = segmentationRuns.firstIndex(where: { $0.id == id }) else { return }
+        let removed = segmentationRuns.remove(at: index)
+        let volumes = currentVolume.map { studyVolumes(anchoredAt: $0) } ?? loadedVolumes
+        let key = activeStudySessionKey ?? removed.studyKey
+        segmentationRunStore.deletePayload(for: removed)
+        persistSegmentationRuns(studyKey: key, volumes: volumes)
+        statusMessage = "Deleted segmentation run: \(removed.name)"
+    }
+
+    private func loadSegmentationRuns(studyKey: String) {
+        do {
+            segmentationRuns = try segmentationRunStore.loadRecords(studyKey: studyKey)
+        } catch {
+            segmentationRuns = []
+            statusMessage = "Segmentation registry load failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func persistSegmentationRuns(studyKey: String, volumes: [ImageVolume]) {
+        do {
+            try segmentationRunStore.saveRecords(segmentationRuns,
+                                                 studyKey: studyKey,
+                                                 volumes: volumes)
+        } catch {
+            statusMessage = "Segmentation registry save failed: \(error.localizedDescription)"
         }
     }
 
@@ -1544,6 +1974,24 @@ public final class ViewerViewModel: ObservableObject {
         fusion?.objectWillChange.send()
     }
 
+    private func applyPETOnlyWindow(window: Double, level: Double) {
+        petOnlyWindow = window
+        petOnlyLevel = level
+    }
+
+    private func normalizedPETMIPRotation(_ degrees: Double) -> Double {
+        guard degrees.isFinite else { return 0 }
+        var value = degrees.truncatingRemainder(dividingBy: 360)
+        if value > 180 { value -= 360 }
+        if value < -180 { value += 360 }
+        return (value * 10).rounded() / 10
+    }
+
+    private func applyPETMIPRotation(_ degrees: Double) {
+        petMIPRotationDegrees = normalizedPETMIPRotation(degrees)
+        petMIPCacheRevision += 1
+    }
+
     private func applyViewportTransform(_ transform: ViewportTransformState, for paneKey: Int, linked: Bool) {
         if linked {
             sharedViewportTransform = transform
@@ -1557,6 +2005,8 @@ public final class ViewerViewModel: ObservableObject {
             window: window,
             level: level,
             invertColors: invertColors,
+            invertPETImages: invertPETImages,
+            invertCTImages: invertCTImages,
             invertPETMIP: invertPETMIP,
             correctAnteriorPosteriorDisplay: correctAnteriorPosteriorDisplay,
             correctRightLeftDisplay: correctRightLeftDisplay,
@@ -1565,9 +2015,13 @@ public final class ViewerViewModel: ObservableObject {
             paneViewportTransforms: paneViewportTransforms,
             overlayOpacity: overlayOpacity,
             overlayColormap: overlayColormap,
+            petOnlyColormap: petOnlyColormap,
             mipColormap: mipColormap,
+            petMIPRotationDegrees: petMIPRotationDegrees,
             overlayWindow: overlayWindow,
             overlayLevel: overlayLevel,
+            petOnlyWindow: petOnlyWindow,
+            petOnlyLevel: petOnlyLevel,
             petMRRegistrationMode: petMRRegistrationMode,
             petMRDeformableRegistration: petMRDeformableRegistration,
             hangingGrid: hangingGrid,
@@ -1588,6 +2042,8 @@ public final class ViewerViewModel: ObservableObject {
         window = snapshot.window
         level = snapshot.level
         invertColors = snapshot.invertColors
+        invertPETImages = snapshot.invertPETImages
+        invertCTImages = snapshot.invertCTImages
         invertPETMIP = snapshot.invertPETMIP
         correctAnteriorPosteriorDisplay = snapshot.correctAnteriorPosteriorDisplay
         correctRightLeftDisplay = snapshot.correctRightLeftDisplay
@@ -1596,10 +2052,13 @@ public final class ViewerViewModel: ObservableObject {
         paneViewportTransforms = snapshot.paneViewportTransforms
         overlayOpacity = snapshot.overlayOpacity
         overlayColormap = snapshot.overlayColormap
+        petOnlyColormap = snapshot.petOnlyColormap
         mipColormap = snapshot.mipColormap
+        petMIPRotationDegrees = snapshot.petMIPRotationDegrees
         petMRRegistrationMode = snapshot.petMRRegistrationMode
         petMRDeformableRegistration = snapshot.petMRDeformableRegistration
         applyPETOverlayWindow(window: snapshot.overlayWindow, level: snapshot.overlayLevel)
+        applyPETOnlyWindow(window: snapshot.petOnlyWindow, level: snapshot.petOnlyLevel)
         fusion?.opacity = snapshot.overlayOpacity
         fusion?.colormap = snapshot.overlayColormap
         fusion?.objectWillChange.send()
@@ -2667,6 +3126,13 @@ public final class ViewerViewModel: ObservableObject {
     public func displayVolume(_ volume: ImageVolume) {
         autoWindowTask?.cancel()
         autoWindowTask = nil
+        let targetVolumes = studyVolumes(anchoredAt: volume)
+        let targetKey = StudySessionStore.studyKey(for: targetVolumes)
+        if activeStudySessionKey != nil,
+           activeStudySessionKey != targetKey,
+           hasGeneratedStudySessionContent {
+            persistStudySessions()
+        }
         currentVolume = volume
         sliceIndices = [volume.width / 2, volume.height / 2, volume.depth / 2]
         let center = volume.worldPoint(voxel: SIMD3<Double>(
@@ -2680,6 +3146,7 @@ public final class ViewerViewModel: ObservableObject {
         let (w, l) = autoWindowLevel(pixels: volume.pixels)
         window = w
         level = l
+        loadStudySessionsIfNeeded(anchor: volume, persistCurrent: false)
     }
 
     private func showDynamicFrame(_ frame: DynamicFrame, resetDisplay: Bool) {
@@ -2882,6 +3349,87 @@ public final class ViewerViewModel: ObservableObject {
     public func adjustWindowLevel(dw: Double, dl: Double) {
         window = max(1, window + dw)
         level += dl
+    }
+
+    public func windowLevelSnapshot(for mode: SliceDisplayMode,
+                                    volume: ImageVolume?) -> DisplayWindowLevelSnapshot {
+        let target = windowLevelTarget(for: mode, volume: volume)
+        let pair = currentWindowLevel(for: target)
+        return DisplayWindowLevelSnapshot(target: target,
+                                          window: pair.window,
+                                          level: pair.level)
+    }
+
+    public func adjustWindowLevel(dw: Double,
+                                  dl: Double,
+                                  mode: SliceDisplayMode,
+                                  volume: ImageVolume?) {
+        let target = windowLevelTarget(for: mode, volume: volume)
+        switch target {
+        case .base:
+            adjustWindowLevel(dw: dw, dl: dl)
+        case .petOnly:
+            petOnlyWindow = max(0.1, petOnlyWindow + dw * 0.025)
+            petOnlyLevel = max(0, petOnlyLevel + dl * 0.025)
+        case .petOverlay:
+            applyPETOverlayWindow(window: max(0.1, overlayWindow + dw * 0.025),
+                                  level: max(0, overlayLevel + dl * 0.025))
+        }
+    }
+
+    public func recordWindowLevelChange(before: DisplayWindowLevelSnapshot,
+                                        after: DisplayWindowLevelSnapshot,
+                                        name: String = "Window / level") {
+        guard before.target == after.target else { return }
+        let changed = abs(before.window - after.window) > 0.0001 ||
+            abs(before.level - after.level) > 0.0001
+        recordHistoryIfNeeded(name: name, changed: changed) { [weak self] in
+            self?.applyWindowLevel(target: before.target,
+                                   window: before.window,
+                                   level: before.level)
+        } redo: { [weak self] in
+            self?.applyWindowLevel(target: after.target,
+                                   window: after.window,
+                                   level: after.level)
+        }
+    }
+
+    private func windowLevelTarget(for mode: SliceDisplayMode,
+                                   volume: ImageVolume?) -> DisplayWindowLevelTarget {
+        if mode == .petOnly {
+            return .petOnly
+        }
+        if mode == .primary,
+           let volume,
+           Modality.normalize(volume.modality) == .PT {
+            return .petOnly
+        }
+        return .base
+    }
+
+    private func currentWindowLevel(for target: DisplayWindowLevelTarget) -> (window: Double, level: Double) {
+        switch target {
+        case .base:
+            return (window, level)
+        case .petOnly:
+            return (petOnlyWindow, petOnlyLevel)
+        case .petOverlay:
+            return (overlayWindow, overlayLevel)
+        }
+    }
+
+    private func applyWindowLevel(target: DisplayWindowLevelTarget,
+                                  window: Double,
+                                  level: Double) {
+        switch target {
+        case .base:
+            self.window = max(1, window)
+            self.level = level
+        case .petOnly:
+            applyPETOnlyWindow(window: window, level: level)
+        case .petOverlay:
+            applyPETOverlayWindow(window: window, level: level)
+        }
     }
 
     public func applyPreset(_ preset: WindowLevel) {
@@ -3635,7 +4183,11 @@ public final class ViewerViewModel: ObservableObject {
         let index = sliceIndex(axis: axis, volume: v)
         let dimensions = sliceDimensions(axis: axis, volume: v)
         let transform = displayTransform(for: axis, volume: v)
-        let renderPETColor = mode == .petOnly && Modality.normalize(v.modality) == .PT
+        let modality = Modality.normalize(v.modality)
+        let renderPETColor = mode == .petOnly && modality == .PT
+        let renderWindow = renderPETColor ? petOnlyWindow : window
+        let renderLevel = renderPETColor ? petOnlyLevel : level
+        let renderInvert = invertForDisplay(volume: v)
         let key = SliceRenderCacheKey(
             layer: .base,
             sourceVolumeID: v.id,
@@ -3648,10 +4200,10 @@ public final class ViewerViewModel: ObservableObject {
             width: dimensions.width,
             height: dimensions.height,
             depth: v.depth,
-            window: renderKey(renderPETColor ? overlayWindow : window),
-            level: renderKey(renderPETColor ? overlayLevel : level),
-            invert: renderPETColor ? false : invertColors,
-            colormap: renderPETColor ? overlayColormap.rawValue : "gray",
+            window: renderKey(renderWindow),
+            level: renderKey(renderLevel),
+            invert: renderInvert,
+            colormap: renderPETColor ? petOnlyColormap.rawValue : "gray",
             opacity: renderKey(1),
             flipHorizontal: transform.flipHorizontal,
             flipVertical: transform.flipVertical,
@@ -3670,15 +4222,16 @@ public final class ViewerViewModel: ObservableObject {
                 pixels = petDisplayPixels(pixels, volume: v)
                 return PixelRenderer.makeColorImage(
                     pixels: pixels, width: w, height: h,
-                    window: overlayWindow, level: overlayLevel,
-                    colormap: overlayColormap,
-                    baseAlpha: 1.0
+                    window: petOnlyWindow, level: petOnlyLevel,
+                    colormap: petOnlyColormap,
+                    baseAlpha: 1.0,
+                    invert: renderInvert
                 )
             }
 
             return PixelRenderer.makeGrayImage(
                 pixels: pixels, width: w, height: h,
-                window: window, level: level, invert: invertColors
+                window: window, level: level, invert: renderInvert
             )
         }
     }
@@ -3741,6 +4294,7 @@ public final class ViewerViewModel: ObservableObject {
         let index = sliceIndex(axis: axis, volume: ov)
         let dimensions = sliceDimensions(axis: axis, volume: ov)
         let transform = displayTransform(for: axis, volume: pair.baseVolume)
+        let renderInvert = invertForDisplay(volume: ov)
         let key = SliceRenderCacheKey(
             layer: .overlay,
             sourceVolumeID: ov.id,
@@ -3755,7 +4309,7 @@ public final class ViewerViewModel: ObservableObject {
             depth: ov.depth,
             window: renderKey(pair.overlayWindow),
             level: renderKey(pair.overlayLevel),
-            invert: false,
+            invert: renderInvert,
             colormap: pair.colormap.rawValue,
             opacity: renderKey(pair.opacity),
             flipHorizontal: transform.flipHorizontal,
@@ -3773,8 +4327,20 @@ public final class ViewerViewModel: ObservableObject {
                 pixels: pixels, width: w, height: h,
                 window: pair.overlayWindow, level: pair.overlayLevel,
                 colormap: pair.colormap,
-                baseAlpha: pair.opacity
+                baseAlpha: pair.opacity,
+                invert: renderInvert
             )
+        }
+    }
+
+    private func invertForDisplay(volume: ImageVolume) -> Bool {
+        switch Modality.normalize(volume.modality) {
+        case .PT:
+            return invertColors || invertPETImages
+        case .CT:
+            return invertColors || invertCTImages
+        default:
+            return invertColors
         }
     }
 
@@ -3863,7 +4429,7 @@ public final class ViewerViewModel: ObservableObject {
 
     public func makePETMIPImage(for axis: Int) -> CGImage? {
         guard let pet = activePETQuantificationVolume else { return nil }
-        let key = PETMIPProjectionKey(volume: pet, axis: axis)
+        let key = PETMIPProjectionKey(volume: pet, axis: axis, rotationDegrees: petMIPRotationDegrees)
         guard let mip = petMIPProjectionCache[key] else {
             startPETMIPProjectionIfNeeded(volume: pet, axis: axis, key: key)
             return nil
@@ -3887,9 +4453,95 @@ public final class ViewerViewModel: ObservableObject {
         )
     }
 
+    public func makePETMIPLabelImage(for axis: Int) -> CGImage? {
+        guard let pet = activePETQuantificationVolume,
+              let map = labeling.activeLabelMap,
+              map.visible,
+              sameGrid(pet, map) else {
+            return nil
+        }
+        let key = PETMIPProjectionKey(volume: pet, axis: axis, rotationDegrees: petMIPRotationDegrees)
+        guard let mip = petMIPProjectionCache[key] else {
+            startPETMIPProjectionIfNeeded(volume: pet, axis: axis, key: key)
+            return nil
+        }
+        guard mip.width > 0, mip.height > 0 else { return nil }
+
+        var values = [UInt16](repeating: 0, count: mip.width * mip.height)
+        for index in values.indices {
+            guard mip.argmaxX.indices.contains(index),
+                  mip.argmaxY.indices.contains(index),
+                  mip.argmaxZ.indices.contains(index) else {
+                continue
+            }
+            let x = mip.argmaxX[index]
+            let y = mip.argmaxY[index]
+            let z = mip.argmaxZ[index]
+            guard x >= 0, x < map.width,
+                  y >= 0, y < map.height,
+                  z >= 0, z < map.depth else {
+                continue
+            }
+            values[index] = map.value(z: z, y: y, x: x)
+        }
+
+        values = SliceTransform.apply(values,
+                                      width: mip.width,
+                                      height: mip.height,
+                                      transform: displayTransform(for: axis, volume: pet))
+        return LabelRenderer.makeImage(values: values,
+                                       width: mip.width,
+                                       height: mip.height,
+                                       classes: map.classes,
+                                       baseAlpha: map.opacity)
+    }
+
     public func isPETMIPProjectionPending(for axis: Int) -> Bool {
         guard let pet = activePETQuantificationVolume else { return false }
-        return petMIPProjectionTasks[PETMIPProjectionKey(volume: pet, axis: axis)] != nil
+        return petMIPProjectionTasks[PETMIPProjectionKey(volume: pet, axis: axis, rotationDegrees: petMIPRotationDegrees)] != nil
+    }
+
+    @discardableResult
+    public func navigateUsingPETMIP(axis: Int, displayPixelX: Int, displayPixelY: Int) -> Bool {
+        guard let pet = activePETQuantificationVolume else {
+            statusMessage = "No PET MIP is available for navigation"
+            return false
+        }
+        let key = PETMIPProjectionKey(volume: pet, axis: axis, rotationDegrees: petMIPRotationDegrees)
+        guard let mip = petMIPProjectionCache[key] else {
+            startPETMIPProjectionIfNeeded(volume: pet, axis: axis, key: key)
+            statusMessage = "PET MIP is still preparing"
+            return false
+        }
+        guard mip.width > 0, mip.height > 0 else { return false }
+        var x = max(0, min(mip.width - 1, displayPixelX))
+        var y = max(0, min(mip.height - 1, displayPixelY))
+        let transform = displayTransform(for: axis, volume: pet)
+        if transform.flipHorizontal {
+            x = mip.width - 1 - x
+        }
+        if transform.flipVertical {
+            y = mip.height - 1 - y
+        }
+        let index = y * mip.width + x
+        guard mip.argmaxX.indices.contains(index),
+              mip.argmaxY.indices.contains(index),
+              mip.argmaxZ.indices.contains(index) else { return false }
+
+        let voxelX = mip.argmaxX[index]
+        let voxelY = mip.argmaxY[index]
+        let voxelZ = mip.argmaxZ[index]
+        guard voxelX >= 0, voxelY >= 0, voxelZ >= 0 else {
+            statusMessage = "No PET uptake was projected at that MIP point"
+            return false
+        }
+        let world = pet.worldPoint(z: voxelZ, y: voxelY, x: voxelX)
+        centerSlices(on: world)
+        let raw = pet.intensity(z: voxelZ, y: voxelY, x: voxelX)
+        let suv = suvValue(rawStoredValue: Double(raw), volume: pet)
+        statusMessage = String(format: "MIP navigation → PET voxel (%d, %d, %d), SUV %.2f",
+                               voxelX, voxelY, voxelZ, suv)
+        return true
     }
 
     public func petSUVDisplayRange(for volume: ImageVolume) -> (min: Double, max: Double) {
@@ -3922,8 +4574,9 @@ public final class ViewerViewModel: ObservableObject {
         let policy = ResourcePolicy.load()
         guard petMIPProjectionTasks.count < policy.mipWorkerLimit else { return }
         petMIPProjectionTasks[key] = Task { [weak self, volume, axis, key, policy] in
+            let rotation = key.axis == 2 ? 0 : Double(key.rotationTenths) / 10
             let projection = await Task.detached(priority: policy.backgroundTaskPriority) {
-                PETMIPProjection.compute(volume: volume, axis: axis)
+                PETMIPProjection.compute(volume: volume, axis: axis, horizontalRotationDegrees: rotation)
             }.value
             guard !Task.isCancelled, let self else { return }
             self.petMIPProjectionTasks[key] = nil

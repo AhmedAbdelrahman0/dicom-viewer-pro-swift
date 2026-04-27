@@ -31,6 +31,25 @@ final class DictationReportTests: XCTestCase {
         XCTAssertEqual(original.schemaVersion, decoded.schemaVersion)
     }
 
+    func testReportMetadataDecodesLegacySnapshotsWithoutStudyBindingFields() throws {
+        let data = Data("""
+        {
+          "patientID": "MRN-1",
+          "patientName": "Legacy Patient",
+          "studyDescription": "FDG PET/CT",
+          "modality": "PT",
+          "accessionNumber": "ACC-1",
+          "reportingClinician": "Dr Legacy"
+        }
+        """.utf8)
+        let metadata = try JSONDecoder().decode(ReportMetadata.self, from: data)
+        XCTAssertEqual(metadata.patientID, "MRN-1")
+        XCTAssertEqual(metadata.patientName, "Legacy Patient")
+        XCTAssertEqual(metadata.studyKey, "")
+        XCTAssertEqual(metadata.studyUID, "")
+        XCTAssertTrue(metadata.sourceVolumeIdentities.isEmpty)
+    }
+
     // MARK: - Mutator
 
     func testAppendSentenceLandsInTargetSection() {
@@ -275,6 +294,46 @@ final class DictationReportTests: XCTestCase {
         XCTAssertNil(DictationSession.parseSectionCommand("section unknown-section"))
     }
 
+    // MARK: - DictationSession final utterance routing
+
+    @MainActor
+    func testFinalUtteranceHandlerCanConsumeAssistantVoiceCommand() throws {
+        let tmp = try makeTempDir()
+        let store = RadiologyReportStore(storageDirectory: tmp)
+        let session = DictationSession()
+        session.reportStore = store
+
+        var capturedText: String?
+        var capturedConfidence: Double?
+        session.finalUtteranceHandler = { text, confidence in
+            capturedText = text
+            capturedConfidence = confidence
+            return true
+        }
+
+        session.acceptRecognizedFinal("Apply lung window.", confidence: 0.87)
+
+        XCTAssertEqual(capturedText, "Apply lung window.")
+        XCTAssertEqual(try XCTUnwrap(capturedConfidence), 0.87, accuracy: 0.001)
+        XCTAssertEqual(session.finalTranscript, "Apply lung window.")
+        XCTAssertTrue(store.report.sections.first { $0.kind == .findings }!.sentences.isEmpty)
+    }
+
+    @MainActor
+    func testFinalUtteranceFallsBackToReportWhenHandlerDeclines() throws {
+        let tmp = try makeTempDir()
+        let store = RadiologyReportStore(storageDirectory: tmp)
+        let session = DictationSession()
+        session.reportStore = store
+        session.finalUtteranceHandler = { _, _ in false }
+
+        session.acceptRecognizedFinal("There is no FDG avid disease.", confidence: 0.91)
+
+        let findings = store.report.sections.first { $0.kind == .findings }!
+        XCTAssertEqual(findings.sentences.first?.text, "There is no FDG avid disease.")
+        XCTAssertEqual(try XCTUnwrap(findings.sentences.first?.confidence), 0.91, accuracy: 0.001)
+    }
+
     // MARK: - ReportFormatter
 
     func testFormatPlainTextSkipsEmptySections() {
@@ -393,6 +452,51 @@ final class DictationReportTests: XCTestCase {
         XCTAssertEqual(store.report.revisions.last?.kind, .signOff)
     }
 
+    @MainActor
+    func testStoreBindsDraftToCurrentStudyAndReloadsIt() throws {
+        let tmp = try makeTempDir()
+        let volume = makeReportVolume(studyUID: "1.2.3", patientID: "P-1", patientName: "Study Patient")
+        let key = StudySessionStore.studyKey(for: [volume])
+
+        let store = RadiologyReportStore(storageDirectory: tmp)
+        store.bindToStudy(volumes: [volume], preferExisting: true)
+        XCTAssertEqual(store.report.metadata.studyKey, key)
+        XCTAssertEqual(store.report.metadata.studyUID, "1.2.3")
+        XCTAssertEqual(store.report.metadata.patientName, "Study Patient")
+        store.appendSentence(
+            ReportSentence(text: "No hypermetabolic disease.", provenance: .dictated),
+            to: .findings
+        )
+        XCTAssertNotNil(store.save())
+
+        let reloaded = RadiologyReportStore(storageDirectory: tmp)
+        reloaded.bindToStudy(volumes: [volume], preferExisting: true)
+        XCTAssertEqual(reloaded.report.metadata.studyKey, key)
+        XCTAssertEqual(reloaded.reports(attachedTo: key).count, 1)
+        let findings = reloaded.report.sections.first { $0.kind == .findings }!
+        XCTAssertEqual(findings.sentences.first?.text, "No hypermetabolic disease.")
+    }
+
+    @MainActor
+    func testFinaliseReportPersistsStudyAttachmentAndSignoff() throws {
+        let tmp = try makeTempDir()
+        let volume = makeReportVolume(studyUID: "9.8.7", patientID: "P-2", patientName: "Final Patient")
+        let key = StudySessionStore.studyKey(for: [volume])
+        let store = RadiologyReportStore(storageDirectory: tmp)
+        store.bindToStudy(volumes: [volume], preferExisting: false)
+        store.appendSentence(
+            ReportSentence(text: "Solitary FDG avid lesion.", provenance: .dictated),
+            to: .findings
+        )
+        let url = try XCTUnwrap(store.finaliseReport(by: "Dr Tracer", volumes: [volume]))
+
+        let reloaded = RadiologyReportStore(storageDirectory: tmp)
+        reloaded.load(from: url)
+        XCTAssertEqual(reloaded.report.metadata.studyKey, key)
+        XCTAssertEqual(reloaded.report.signOff?.clinician, "Dr Tracer")
+        XCTAssertTrue(reloaded.reports(attachedTo: key).first?.isFinalised == true)
+    }
+
     // MARK: - Test helpers
 
     private func makeTempDir() throws -> URL {
@@ -403,5 +507,23 @@ final class DictationReportTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
         return url
+    }
+
+    private func makeReportVolume(studyUID: String,
+                                  patientID: String,
+                                  patientName: String) -> ImageVolume {
+        ImageVolume(
+            pixels: [0],
+            depth: 1,
+            height: 1,
+            width: 1,
+            modality: "PT",
+            seriesUID: "\(studyUID).1",
+            studyUID: studyUID,
+            patientID: patientID,
+            patientName: patientName,
+            seriesDescription: "PET WB",
+            studyDescription: "FDG PET/CT"
+        )
     }
 }

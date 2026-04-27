@@ -66,7 +66,8 @@ public final class RemoteExecutor: @unchecked Sendable {
     /// exported before the command.
     @discardableResult
     public func run(_ command: String,
-                    timeoutSeconds: TimeInterval? = nil) throws -> RunResult {
+                    timeoutSeconds: TimeInterval? = nil,
+                    logSink: @escaping @Sendable (String) -> Void = { _ in }) throws -> RunResult {
         guard config.isConfigured else { throw Error.notConfigured }
 
         var prefix = ""
@@ -89,7 +90,8 @@ public final class RemoteExecutor: @unchecked Sendable {
         ])
         return try runLocalBinary(path: "/usr/bin/ssh",
                                   arguments: args,
-                                  timeoutSeconds: timeoutSeconds)
+                                  timeoutSeconds: timeoutSeconds,
+                                  logSink: logSink)
     }
 
     /// Upload a single file to `remotePath` on the DGX. Creates the
@@ -181,7 +183,8 @@ public final class RemoteExecutor: @unchecked Sendable {
 
     private func runLocalBinary(path: String,
                                 arguments: [String],
-                                timeoutSeconds: TimeInterval? = nil) throws -> RunResult {
+                                timeoutSeconds: TimeInterval? = nil,
+                                logSink: @escaping @Sendable (String) -> Void = { _ in }) throws -> RunResult {
         guard FileManager.default.isExecutableFile(atPath: path) else {
             throw Error.binaryMissing(path)
         }
@@ -197,10 +200,20 @@ public final class RemoteExecutor: @unchecked Sendable {
         let stdoutBuffer = ProcessOutputBuffer()
         let stderrBuffer = ProcessOutputBuffer()
         stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
-            stdoutBuffer.append(handle.availableData)
+            let chunk = handle.availableData
+            guard !chunk.isEmpty else { return }
+            stdoutBuffer.append(chunk)
+            if let text = String(data: chunk, encoding: .utf8), !text.isEmpty {
+                logSink(text)
+            }
         }
         stderrPipe.fileHandleForReading.readabilityHandler = { handle in
-            stderrBuffer.append(handle.availableData)
+            let chunk = handle.availableData
+            guard !chunk.isEmpty else { return }
+            stderrBuffer.append(chunk)
+            if let text = String(data: chunk, encoding: .utf8), !text.isEmpty {
+                logSink(text)
+            }
         }
 
         try process.run()

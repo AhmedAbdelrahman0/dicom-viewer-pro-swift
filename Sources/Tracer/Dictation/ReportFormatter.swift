@@ -143,6 +143,7 @@ public enum ReportFormatter {
         if !m.patientID.isEmpty   { line.append("ID: \(m.patientID)") }
         if let d = m.studyDate    { line.append("Study Date: \(formatDate(d))") }
         if !m.modality.isEmpty    { line.append("Modality: \(m.modality)") }
+        if !m.studyUID.isEmpty    { line.append("Study UID: \(m.studyUID)") }
         if !m.accessionNumber.isEmpty { line.append("Accession: \(m.accessionNumber)") }
         if !line.isEmpty {
             out.append(line.joined(separator: " · "))

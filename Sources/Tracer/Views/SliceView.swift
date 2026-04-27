@@ -20,7 +20,7 @@ public struct SliceView: View {
     @State private var dragStartPan: CGSize?
     @State private var gestureStartZoom: CGFloat?
     @State private var viewportBeforeInteraction: ViewportTransformState?
-    @State private var windowLevelBeforeInteraction: (window: Double, level: Double)?
+    @State private var windowLevelBeforeInteraction: DisplayWindowLevelSnapshot?
     @State private var labelUndoDepthBeforeInteraction: Int?
     @State private var measurementPoints: [CGPoint] = []
     @State private var activeMeasurement: Annotation?
@@ -204,6 +204,18 @@ public struct SliceView: View {
 
             Spacer()
 
+            if displayMode == .petOnly, vm.hangingGrid.paneCount <= 16 {
+                petOnlyColorPicker
+
+                HoverIconButton(
+                    systemImage: "circle.lefthalf.filled",
+                    tooltip: "Invert PET-only image\nReverses PET-only color mapping without changing fused or MIP panes.",
+                    isActive: vm.invertPETImages
+                ) {
+                    vm.setInvertPETImages(!vm.invertPETImages)
+                }
+            }
+
             HoverIconButton(
                 systemImage: "circle.righthalf.filled",
                 tooltip: "Invert Colors (all views)\n"
@@ -226,6 +238,22 @@ public struct SliceView: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(TracerTheme.headerBackground)
+    }
+
+    private var petOnlyColorPicker: some View {
+        Picker("", selection: Binding(
+            get: { vm.petOnlyColormap },
+            set: { vm.setPETOnlyColormap($0) }
+        )) {
+            ForEach(Colormap.allCases) { color in
+                Text(color.displayName).tag(color)
+            }
+        }
+        .labelsHidden()
+        .pickerStyle(.menu)
+        .frame(width: 92)
+        .controlSize(.mini)
+        .help("PET-only colormap. This is independent from fused PET and MIP coloring.")
     }
 
     private var sliceScrubber: some View {
@@ -348,7 +376,10 @@ public struct SliceView: View {
     }
 
     private func windowLevelInfo(for volume: ImageVolume) -> String {
-        if Modality.normalize(volume.modality) == .PT || displayMode == .petOnly {
+        if displayMode == .petOnly || Modality.normalize(volume.modality) == .PT {
+            if displayMode == .petOnly {
+                return String(format: "SUV %.1f–%.1f", vm.petOnlyRangeMin, vm.petOnlyRangeMax)
+            }
             return String(format: "SUV %.1f–%.1f", vm.petOverlayRangeMin, vm.petOverlayRangeMax)
         }
         return "W: \(Int(vm.window))  L: \(Int(vm.level))"
@@ -402,6 +433,53 @@ public struct SliceView: View {
         let suv: Double?
         let world: SIMD3<Double>
         let className: String?
+    }
+
+    private enum MeasurementDeleteTarget: Identifiable {
+        case annotation(Annotation)
+        case suvROI(SUVROIMeasurement)
+        case intensityROI(IntensityROIMeasurement)
+
+        var id: String {
+            switch self {
+            case .annotation(let annotation): return "ann-\(annotation.id.uuidString)"
+            case .suvROI(let roi): return "suv-\(roi.id.uuidString)"
+            case .intensityROI(let roi): return "intensity-\(roi.id.uuidString)"
+            }
+        }
+
+        var label: String {
+            switch self {
+            case .annotation(let annotation):
+                let text = annotation.displayText.isEmpty ? annotation.type.rawValue.capitalized : annotation.displayText
+                return "Delete measurement \(text)"
+            case .suvROI(let roi):
+                return "Delete SUV ROI \(String(format: "%.2f", roi.suvMax))"
+            case .intensityROI(let roi):
+                let prefix = Modality.normalize(roi.modality) == .CT ? "HU" : "Intensity"
+                return "Delete \(prefix) ROI"
+            }
+        }
+
+        var systemImage: String {
+            switch self {
+            case .annotation: return "trash"
+            case .suvROI: return "flame.slash"
+            case .intensityROI: return "scope"
+            }
+        }
+
+        @MainActor
+        func delete(from vm: ViewerViewModel) {
+            switch self {
+            case .annotation(let annotation):
+                vm.deleteAnnotation(id: annotation.id)
+            case .suvROI(let roi):
+                vm.deleteSphericalSUVROI(id: roi.id)
+            case .intensityROI(let roi):
+                vm.deleteSphericalIntensityROI(id: roi.id)
+            }
+        }
     }
 
     private func sampleVoxel(at location: CGPoint, in viewSize: CGSize) -> HoverSample? {
@@ -504,6 +582,7 @@ public struct SliceView: View {
     @ViewBuilder
     private func contextMenuItems() -> some View {
         if let sample = hoverSample {
+            let deleteTargets = measurementDeleteTargets(for: sample)
             Section("Cursor") {
                 Text(String(format: "Voxel (%d, %d, %d)",
                             sample.voxelX, sample.voxelY, sample.voxelZ))
@@ -521,6 +600,18 @@ public struct SliceView: View {
                 Button("Copy world position (mm)") {
                     copyToPasteboard(String(format: "%.2f, %.2f, %.2f mm",
                                             sample.world.x, sample.world.y, sample.world.z))
+                }
+            }
+
+            if !deleteTargets.isEmpty {
+                Section("Selection") {
+                    ForEach(deleteTargets) { target in
+                        Button(role: .destructive) {
+                            target.delete(from: vm)
+                        } label: {
+                            Label(target.label, systemImage: target.systemImage)
+                        }
+                    }
                 }
             }
         }
@@ -575,6 +666,110 @@ public struct SliceView: View {
         #elseif canImport(UIKit)
         UIPasteboard.general.string = text
         #endif
+    }
+
+    private func measurementDeleteTargets(for sample: HoverSample) -> [MeasurementDeleteTarget] {
+        guard let displayVolume = vm.volumeForDisplayMode(displayMode) else { return [] }
+        var targets: [MeasurementDeleteTarget] = []
+        let rawPoint = rawImagePoint(for: sample)
+        if let annotation = nearestAnnotation(to: rawPoint) {
+            targets.append(.annotation(annotation))
+        }
+        if let pet = vm.activePETQuantificationVolume,
+           let roi = vm.suvROIMeasurements
+            .filter({ $0.sourceVolumeIdentity == pet.sessionIdentity })
+            .min(by: { simd_distance(sample.world, $0.centerWorld) < simd_distance(sample.world, $1.centerWorld) }),
+           simd_distance(sample.world, roi.centerWorld) <= roi.radiusMM {
+            targets.append(.suvROI(roi))
+        }
+        if let roi = vm.intensityROIMeasurements
+            .filter({ $0.sourceVolumeIdentity == displayVolume.sessionIdentity })
+            .min(by: { simd_distance(sample.world, $0.centerWorld) < simd_distance(sample.world, $1.centerWorld) }),
+           simd_distance(sample.world, roi.centerWorld) <= roi.radiusMM {
+            targets.append(.intensityROI(roi))
+        }
+        return targets
+    }
+
+    private func rawImagePoint(for sample: HoverSample) -> CGPoint {
+        switch axis {
+        case 0:
+            return CGPoint(x: sample.voxelY, y: sample.voxelZ)
+        case 1:
+            return CGPoint(x: sample.voxelX, y: sample.voxelZ)
+        default:
+            return CGPoint(x: sample.voxelX, y: sample.voxelY)
+        }
+    }
+
+    private func nearestAnnotation(to point: CGPoint) -> Annotation? {
+        let tolerance = max(4, 8 / max(zoom, 0.25))
+        let candidates = vm.annotations.filter { $0.axis == axis && $0.sliceIndex == displayedSliceIndex }
+        return candidates
+            .map { ($0, annotationHitDistance($0, to: point)) }
+            .filter { $0.1 <= tolerance }
+            .min { $0.1 < $1.1 }?
+            .0
+    }
+
+    private func annotationHitDistance(_ annotation: Annotation, to point: CGPoint) -> CGFloat {
+        switch annotation.type {
+        case .distance:
+            guard annotation.points.count >= 2 else { return .greatestFiniteMagnitude }
+            return distanceFrom(point, toSegmentA: annotation.points[0], b: annotation.points[1])
+        case .angle:
+            guard annotation.points.count >= 3 else { return .greatestFiniteMagnitude }
+            return min(
+                distanceFrom(point, toSegmentA: annotation.points[0], b: annotation.points[1]),
+                distanceFrom(point, toSegmentA: annotation.points[1], b: annotation.points[2])
+            )
+        case .area:
+            guard annotation.points.count >= 3 else { return .greatestFiniteMagnitude }
+            if polygon(annotation.points, contains: point) { return 0 }
+            return closedSegments(annotation.points)
+                .map { distanceFrom(point, toSegmentA: $0.0, b: $0.1) }
+                .min() ?? .greatestFiniteMagnitude
+        case .ellipse, .text:
+            return annotation.points
+                .map { hypot(point.x - $0.x, point.y - $0.y) }
+                .min() ?? .greatestFiniteMagnitude
+        }
+    }
+
+    private func closedSegments(_ points: [CGPoint]) -> [(CGPoint, CGPoint)] {
+        guard points.count >= 2 else { return [] }
+        return points.indices.map { (points[$0], points[($0 + 1) % points.count]) }
+    }
+
+    private func distanceFrom(_ point: CGPoint, toSegmentA a: CGPoint, b: CGPoint) -> CGFloat {
+        let vx = b.x - a.x
+        let vy = b.y - a.y
+        let wx = point.x - a.x
+        let wy = point.y - a.y
+        let denom = vx * vx + vy * vy
+        guard denom > 0 else { return hypot(point.x - a.x, point.y - a.y) }
+        let t = max(0, min(1, (wx * vx + wy * vy) / denom))
+        let projected = CGPoint(x: a.x + t * vx, y: a.y + t * vy)
+        return hypot(point.x - projected.x, point.y - projected.y)
+    }
+
+    private func polygon(_ points: [CGPoint], contains point: CGPoint) -> Bool {
+        guard points.count >= 3 else { return false }
+        var inside = false
+        var j = points.count - 1
+        for i in points.indices {
+            let pi = points[i]
+            let pj = points[j]
+            let crosses = (pi.y > point.y) != (pj.y > point.y)
+            if crosses {
+                let xAtY = (pj.x - pi.x) * (point.y - pi.y) / (pj.y - pi.y) + pi.x
+                if point.x < xAtY {
+                    inside.toggle()
+                }
+            }
+            j = i
+        }
+        return inside
     }
 
     private func hoverBadge(_ sample: HoverSample) -> some View {
@@ -718,13 +913,17 @@ public struct SliceView: View {
                 switch vm.activeTool {
                 case .wl:
                     if windowLevelBeforeInteraction == nil {
-                        windowLevelBeforeInteraction = (vm.window, vm.level)
+                        windowLevelBeforeInteraction = vm.windowLevelSnapshot(for: displayMode,
+                                                                              volume: vm.volumeForDisplayMode(displayMode))
                     }
                     if let start = dragStart {
                         let dx = value.location.x - start.x
                         let dy = value.location.y - start.y
                         dragStart = value.location
-                        vm.adjustWindowLevel(dw: Double(dx) * 2, dl: -Double(dy) * 2)
+                        vm.adjustWindowLevel(dw: Double(dx) * 2,
+                                             dl: -Double(dy) * 2,
+                                             mode: displayMode,
+                                             volume: vm.volumeForDisplayMode(displayMode))
                     }
                 case .pan:
                     if dragStartPan == nil {
@@ -784,8 +983,10 @@ public struct SliceView: View {
                                             paneKey: viewportKey)
                 }
                 if let before = windowLevelBeforeInteraction {
+                    let after = vm.windowLevelSnapshot(for: displayMode,
+                                                       volume: vm.volumeForDisplayMode(displayMode))
                     vm.recordWindowLevelChange(before: before,
-                                               after: (vm.window, vm.level))
+                                               after: after)
                 }
                 viewportBeforeInteraction = nil
                 windowLevelBeforeInteraction = nil
@@ -1003,9 +1204,7 @@ public struct SliceView: View {
         if vm.activeTool == .suvSphere {
             let center = CGPoint(x: pixel.0, y: pixel.1)
             let world = worldPoint(for: center, volume: volume)
-            let shouldMeasureSUV = Modality.normalize(volume.modality) == .PT
-                || (displayMode == .fused && vm.activePETQuantificationVolume != nil)
-            if shouldMeasureSUV {
+            if shouldPlaceSUVROI(in: volume) {
                 _ = vm.addSphericalSUVROI(at: world)
             } else {
                 _ = vm.addSphericalIntensityROI(at: world, in: volume)
@@ -1072,6 +1271,19 @@ public struct SliceView: View {
         case .angle:    return .angle
         case .area:     return .area
         default:        return nil
+        }
+    }
+
+    private func shouldPlaceSUVROI(in volume: ImageVolume) -> Bool {
+        switch displayMode {
+        case .ctOnly, .mrT1, .mrT2, .mrFLAIR, .mrDWI, .mrADC, .mrPost, .mrOther:
+            return false
+        case .petOnly:
+            return true
+        case .fused:
+            return vm.activePETQuantificationVolume != nil
+        case .primary:
+            return Modality.normalize(volume.modality) == .PT
         }
     }
 

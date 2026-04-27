@@ -214,6 +214,18 @@ public final class PETEngineViewModel: ObservableObject {
         let modelRestChannels = restChannels.map {
             makePETModelInputChannel($0, viewer: viewer)
         }
+
+        if selectedEngine == .lesionTracer, nnunet.mode == .dgxRemote {
+            return await runRemoteLesionTracerDGX(
+                ctVolume: modelChannel0,
+                petSUVVolume: modelRestChannels.first,
+                viewer: viewer,
+                nnunet: nnunet,
+                labeling: labeling,
+                entry: entry
+            )
+        }
+
         guard let labelMap = await nnunet.run(
             on: modelChannel0,
             auxiliaryChannels: modelRestChannels,
@@ -244,8 +256,135 @@ public final class PETEngineViewModel: ObservableObject {
             }
         }
 
+        viewer.recordSegmentationRun(labelMap: labelMap,
+                                     name: "\(entry.displayName) \(segmentationProfile.displayName)",
+                                     engine: selectedEngine.displayName,
+                                     backend: nnunet.mode.displayName,
+                                     modelID: entry.datasetID,
+                                     metadata: [
+                                        "segmentationProfile": segmentationProfile.rawValue,
+                                        "suvAttention": segmentationProfile.applySUVAttention ? "true" : "false",
+                                        "suvAttentionThreshold": String(format: "%.3f", suvAttentionThreshold),
+                                        "minimumLesionVolumeML": String(format: "%.3f", minimumLesionVolumeML)
+                                     ])
+        viewer.saveCurrentStudySession(named: entry.displayName)
         statusMessage = "✓ \(entry.displayName): \(labelMap.classes.count) classes produced\(postprocessSummary)."
         return statusMessage
+    }
+
+    private func runRemoteLesionTracerDGX(ctVolume: ImageVolume,
+                                          petSUVVolume: ImageVolume?,
+                                          viewer: ViewerViewModel,
+                                          nnunet: NNUnetViewModel,
+                                          labeling: LabelingViewModel,
+                                          entry: NNUnetCatalog.Entry) async -> String {
+        if let message = nnunet.dgxReadinessMessage {
+            statusMessage = message
+            return statusMessage
+        }
+        guard let petSUVVolume,
+              Modality.normalize(ctVolume.modality) == .CT,
+              Modality.normalize(petSUVVolume.modality) == .PT else {
+            statusMessage = "LesionTracer DGX needs CT as channel 0 and SUV-scaled PET as channel 1. Load/fuse the paired PET/CT volumes first."
+            return statusMessage
+        }
+
+        let operationID = "lesiontracer-dgx-\(UUID().uuidString)"
+        JobManager.shared.start(JobUpdate(
+            operationID: operationID,
+            kind: .petEngine,
+            title: "LesionTracer DGX",
+            stage: "Staging",
+            detail: "Preparing CT + PET SUV channels",
+            progress: 0.05,
+            systemImage: "flame.fill",
+            canCancel: false
+        ))
+        nnunet.log = ""
+
+        let runner = RemoteLesionTracerRunner(configuration: .init(
+            dgx: nnunet.dgxConfig,
+            folds: segmentationProfile.useFullEnsemble ? ["0", "1", "2", "3", "4"] : ["0"],
+            disableTestTimeAugmentation: segmentationProfile.disableTTA
+        ))
+        statusMessage = "Running LesionTracer on \(nnunet.dgxConfig.sshDestination) via reusable Docker worker..."
+        nnunet.statusMessage = statusMessage
+        let minimumSUV = suvAttentionThreshold
+        let minimumVolumeML = minimumLesionVolumeML
+
+        do {
+            let result = try await Task.detached(priority: ResourcePolicy.load().backgroundTaskPriority) {
+                try await runner.runInference(
+                    ctVolume: ctVolume,
+                    petSUVVolume: petSUVVolume,
+                    minimumSUV: minimumSUV,
+                    minimumVolumeML: minimumVolumeML,
+                    logSink: { line in
+                        Task { @MainActor in
+                            let clean = line.trimmingCharacters(in: .newlines)
+                            guard !clean.isEmpty else { return }
+                            nnunet.log.append(clean)
+                            nnunet.log.append("\n")
+                            JobManager.shared.heartbeat(operationID: operationID,
+                                                        detail: clean)
+                        }
+                    }
+                )
+            }.value
+
+            for (idx, cls) in result.labelMap.classes.enumerated() {
+                if let name = entry.classes[cls.labelID] {
+                    result.labelMap.classes[idx].name = name
+                }
+            }
+            labeling.labelMaps.append(result.labelMap)
+            labeling.activeLabelMap = result.labelMap
+            if let first = result.labelMap.classes.first {
+                labeling.activeClassID = first.labelID
+            }
+            viewer.recordSegmentationRun(labelMap: result.labelMap,
+                                         name: "\(entry.displayName) DGX \(segmentationProfile.displayName)",
+                                         engine: selectedEngine.displayName,
+                                         backend: "DGX Docker",
+                                         modelID: entry.datasetID,
+                                         metadata: [
+                                            "segmentationProfile": segmentationProfile.rawValue,
+                                            "folds": segmentationProfile.useFullEnsemble ? "0,1,2,3,4" : "0",
+                                            "disableTTA": segmentationProfile.disableTTA ? "true" : "false",
+                                            "minimumSUV": String(format: "%.3f", minimumSUV),
+                                            "minimumLesionVolumeML": String(format: "%.3f", minimumVolumeML)
+                                         ])
+            viewer.saveCurrentStudySession(named: "LesionTracer DGX")
+
+            let elapsed = String(format: "%.1f", result.durationSeconds)
+            let postprocess = result.postprocess.map {
+                " · kept \($0.keptComponents), removed \($0.removedComponents)"
+            } ?? ""
+            statusMessage = "✓ \(entry.displayName) · DGX Docker · \(elapsed)s · \(result.labelMap.classes.count) classes\(postprocess)"
+            nnunet.statusMessage = statusMessage
+            JobManager.shared.succeed(operationID: operationID, detail: statusMessage)
+            return statusMessage
+        } catch let err as RemoteLesionTracerRunner.Error {
+            statusMessage = err.errorDescription ?? "LesionTracer DGX failed"
+            nnunet.statusMessage = statusMessage
+            JobManager.shared.fail(operationID: operationID,
+                                   error: JobErrorInfo(err,
+                                                       code: "lesiontracer_dgx_failed",
+                                                       recoverySuggestion: "Check Settings -> DGX Spark, remote Segmentator paths, and Docker image availability.",
+                                                       isRetryable: true),
+                                   detail: statusMessage)
+            return statusMessage
+        } catch {
+            statusMessage = "LesionTracer DGX failed: \(error.localizedDescription)"
+            nnunet.statusMessage = statusMessage
+            JobManager.shared.fail(operationID: operationID,
+                                   error: JobErrorInfo(error,
+                                                       code: "lesiontracer_dgx_failed",
+                                                       recoverySuggestion: "Check Settings -> DGX Spark and the Job Center log.",
+                                                       isRetryable: true),
+                                   detail: statusMessage)
+            return statusMessage
+        }
     }
 
     // MARK: - MedSAM2
@@ -290,6 +429,18 @@ public final class PETEngineViewModel: ObservableObject {
                 spec: spec
             )
             statusMessage = "✓ MedSAM2: \(result.voxelsChanged) voxels painted on axial \(sliceIndex)."
+            viewer.recordSegmentationRun(labelMap: map,
+                                         name: "MedSAM2 refinement",
+                                         engine: selectedEngine.displayName,
+                                         backend: "CoreML",
+                                         modelID: URL(fileURLWithPath: trimmed).lastPathComponent,
+                                         metadata: [
+                                            "axis": "\(axisIndex)",
+                                            "sliceIndex": "\(sliceIndex)",
+                                            "box": medSAMBoxString,
+                                            "voxelsChanged": "\(result.voxelsChanged)"
+                                         ])
+            viewer.saveCurrentStudySession(named: "MedSAM2")
         } catch {
             statusMessage = "MedSAM2 error: \(error.localizedDescription)"
         }
@@ -361,6 +512,16 @@ public final class PETEngineViewModel: ObservableObject {
             if labeling.activeClassID == 0, let firstClass = petMask.classes.first {
                 labeling.activeClassID = firstClass.labelID
             }
+            viewer.recordSegmentationRun(labelMap: petMask,
+                                         name: "Physiological uptake filtered",
+                                         engine: selectedEngine.displayName,
+                                         backend: nnunet.mode.displayName,
+                                         modelID: "TotalSegmentatorCT",
+                                         metadata: [
+                                            "voxelsSuppressed": "\(result.voxelsSuppressed)",
+                                            "classesSuppressed": result.classesSuppressed.joined(separator: ",")
+                                         ])
+            viewer.saveCurrentStudySession(named: "PET uptake filtered")
             statusMessage = "✓ Suppressed \(result.voxelsSuppressed) voxels across \(result.classesSuppressed.count) organs (\(result.classesSuppressed.joined(separator: ", "))"
         } catch {
             labeling.activeLabelMap = petMask

@@ -149,7 +149,7 @@ final class DictationFoundationTests: XCTestCase {
 
     func testDictationEngineKindAllCases() {
         let ids = DictationEngineKind.allCases.map(\.rawValue)
-        XCTAssertEqual(Set(ids), Set(["appleSpeech", "whisperKit", "remoteDGXWhisper"]))
+        XCTAssertEqual(Set(ids), Set(["appleSpeech", "whisperKit", "googleMedASR", "remoteDGXWhisper"]))
     }
 
     func testDictationEngineKindDisplayNamesAreNonEmpty() {
@@ -165,7 +165,7 @@ final class DictationFoundationTests: XCTestCase {
     }
 
     func testDictationEngineKindCodableRoundTrip() throws {
-        let original: [DictationEngineKind] = [.appleSpeech, .whisperKit, .remoteDGXWhisper]
+        let original: [DictationEngineKind] = [.appleSpeech, .whisperKit, .googleMedASR, .remoteDGXWhisper]
         let data = try JSONEncoder().encode(original)
         let decoded = try JSONDecoder().decode([DictationEngineKind].self, from: data)
         XCTAssertEqual(decoded, original)
@@ -198,6 +198,91 @@ final class DictationFoundationTests: XCTestCase {
         XCTAssertEqual(engine.radiologyHints, ["custom-term"])
     }
 
+    // MARK: - GoogleMedASRDictationEngine surface
+
+    func testGoogleMedASRConfigurationBuildsEnvPythonArguments() {
+        let config = GoogleMedASRConfiguration(
+            pythonExecutablePath: "/usr/bin/env",
+            modelIdentifier: "google/medasr",
+            device: "cpu"
+        )
+        XCTAssertEqual(
+            config.workerArguments(scriptPath: "/tmp/transcribe.py",
+                                   inputPath: "/tmp/in.wav",
+                                   outputPath: "/tmp/out.json"),
+            [
+                "python3", "/tmp/transcribe.py",
+                "--input", "/tmp/in.wav",
+                "--output-json", "/tmp/out.json",
+                "--model", "google/medasr",
+                "--device", "cpu",
+                "--backend", "direct",
+                "--dtype", "auto"
+            ]
+        )
+    }
+
+    func testGoogleMedASRParsesEnvironmentLines() {
+        let env = GoogleMedASRConfiguration.parseEnvironmentLines("""
+        HF_TOKEN=abc def
+        # comment
+        TRANSFORMERS_CACHE=/tmp/hf
+        malformed
+        """)
+        XCTAssertEqual(env["HF_TOKEN"], "abc def")
+        XCTAssertEqual(env["TRANSFORMERS_CACHE"], "/tmp/hf")
+        XCTAssertNil(env["malformed"])
+    }
+
+    func testPCM16WAVEncoderWritesCanonicalHeader() throws {
+        let data = PCM16WAVEncoder.data(samples: [0, 1, -1], sampleRate: 16_000)
+        XCTAssertEqual(String(data: data[0..<4], encoding: .ascii), "RIFF")
+        XCTAssertEqual(String(data: data[8..<12], encoding: .ascii), "WAVE")
+        XCTAssertEqual(String(data: data[12..<16], encoding: .ascii), "fmt ")
+        XCTAssertEqual(String(data: data[36..<40], encoding: .ascii), "data")
+        XCTAssertEqual(data.count, 44 + 6)
+    }
+
+    func testGoogleMedASREngineFinalizesBufferedAudioThroughWorker() async throws {
+        let tmp = try makeTempDir()
+        let script = tmp.appendingPathComponent("transcribe_medasr.py")
+        try "#!/usr/bin/env python3\n".data(using: .utf8)!.write(to: script)
+        let stdout = #"{"text":"No FDG avid disease.","confidence":0.82}"#
+            .data(using: .utf8)!
+        let worker = FakeWorkerProcess(result: WorkerProcessResult(exitCode: 0,
+                                                                    timedOut: false,
+                                                                    stdoutData: stdout,
+                                                                    stderrData: Data()))
+        let engine = GoogleMedASRDictationEngine(
+            configuration: GoogleMedASRConfiguration(scriptPath: script.path,
+                                                     modelIdentifier: "google/medasr",
+                                                     device: "cpu",
+                                                     timeoutSeconds: 5),
+            workerFactory: { worker }
+        )
+        let collector = Task { () -> [DictationEvent] in
+            var events: [DictationEvent] = []
+            for await event in engine.events {
+                events.append(event)
+                if event == .idle { break }
+            }
+            return events
+        }
+
+        try await engine.start()
+        await engine.feed([0.1, -0.1, 0.0])
+        await engine.finish()
+
+        let events = await collector.value
+        XCTAssertTrue(events.contains(.final("No FDG avid disease.", confidence: 0.82)))
+        XCTAssertTrue(events.contains(.idle))
+        let request = try XCTUnwrap(worker.lastRequest)
+        XCTAssertEqual(request.executablePath, "/usr/bin/env")
+        XCTAssertTrue(request.arguments.contains("python3"))
+        XCTAssertTrue(request.arguments.contains(script.path))
+        XCTAssertTrue(request.arguments.contains("--input"))
+    }
+
     // MARK: - PCMChunk
 
     func testPCMChunkEquatable() {
@@ -221,6 +306,33 @@ final class DictationFoundationTests: XCTestCase {
 }
 
 // MARK: - Test helpers
+
+private func makeTempDir() throws -> URL {
+    let url = FileManager.default.temporaryDirectory
+        .appendingPathComponent("dictation-foundation-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    return url
+}
+
+private final class FakeWorkerProcess: WorkerProcess, @unchecked Sendable {
+    private let lock = NSLock()
+    private let result: WorkerProcessResult
+    private(set) var lastRequest: WorkerProcessRequest?
+
+    init(result: WorkerProcessResult) {
+        self.result = result
+    }
+
+    func run(_ request: WorkerProcessRequest,
+             logSink: @escaping @Sendable (String) -> Void) async throws -> WorkerProcessResult {
+        lock.withLock {
+            lastRequest = request
+        }
+        return result
+    }
+
+    func cancel() {}
+}
 
 private extension Double {
     /// `Float` cast as an instance method so we can inline the conversion in

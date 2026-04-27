@@ -23,9 +23,15 @@ jobs:
           - worker: nnunet
             image: tracer-nnunet-worker
             context: workers/nnunet
+          - worker: lesiontracer
+            image: tracer-lesiontracer-worker
+            context: workers/lesiontracer
           - worker: monai
             image: tracer-monai-worker
             context: workers/monai
+          - worker: medasr
+            image: tracer-medasr-worker
+            context: workers/medasr
 
     steps:
       - name: Checkout

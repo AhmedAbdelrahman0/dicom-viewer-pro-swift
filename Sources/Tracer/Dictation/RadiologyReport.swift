@@ -84,34 +84,74 @@ public struct RadiologyReport: Codable, Equatable, Sendable, Identifiable {
 /// active DICOM volume when the user opens dictation; mutable so the user
 /// can fix typos before sign-off.
 public struct ReportMetadata: Codable, Equatable, Sendable {
+    public var studyKey: String
+    public var studyUID: String
     public var patientID: String
     public var patientName: String
     public var studyDate: Date?
     public var studyDescription: String
     public var modality: String
     public var accessionNumber: String
+    public var sourceVolumeIdentities: [String]
     public var reportingClinician: String
     public var createdAt: Date
     public var updatedAt: Date
 
-    public init(patientID: String = "",
+    public init(studyKey: String = "",
+                studyUID: String = "",
+                patientID: String = "",
                 patientName: String = "",
                 studyDate: Date? = nil,
                 studyDescription: String = "",
                 modality: String = "",
                 accessionNumber: String = "",
+                sourceVolumeIdentities: [String] = [],
                 reportingClinician: String = "",
                 createdAt: Date = Date(),
                 updatedAt: Date = Date()) {
+        self.studyKey = studyKey
+        self.studyUID = studyUID
         self.patientID = patientID
         self.patientName = patientName
         self.studyDate = studyDate
         self.studyDescription = studyDescription
         self.modality = modality
         self.accessionNumber = accessionNumber
+        self.sourceVolumeIdentities = sourceVolumeIdentities
         self.reportingClinician = reportingClinician
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case studyKey
+        case studyUID
+        case patientID
+        case patientName
+        case studyDate
+        case studyDescription
+        case modality
+        case accessionNumber
+        case sourceVolumeIdentities
+        case reportingClinician
+        case createdAt
+        case updatedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        studyKey = try container.decodeIfPresent(String.self, forKey: .studyKey) ?? ""
+        studyUID = try container.decodeIfPresent(String.self, forKey: .studyUID) ?? ""
+        patientID = try container.decodeIfPresent(String.self, forKey: .patientID) ?? ""
+        patientName = try container.decodeIfPresent(String.self, forKey: .patientName) ?? ""
+        studyDate = try container.decodeIfPresent(Date.self, forKey: .studyDate)
+        studyDescription = try container.decodeIfPresent(String.self, forKey: .studyDescription) ?? ""
+        modality = try container.decodeIfPresent(String.self, forKey: .modality) ?? ""
+        accessionNumber = try container.decodeIfPresent(String.self, forKey: .accessionNumber) ?? ""
+        sourceVolumeIdentities = try container.decodeIfPresent([String].self, forKey: .sourceVolumeIdentities) ?? []
+        reportingClinician = try container.decodeIfPresent(String.self, forKey: .reportingClinician) ?? ""
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
     }
 }
 

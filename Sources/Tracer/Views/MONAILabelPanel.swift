@@ -128,12 +128,22 @@ public struct MONAILabelPanel: View {
                     .foregroundColor(.secondary)
             }
 
-            Button {
-                Task {
-                    guard let vol = viewer.currentVolume else { return }
-                    _ = await monai.runInference(on: vol, in: labeling)
-                }
-            } label: {
+                Button {
+                    Task {
+                        guard let vol = viewer.currentVolume else { return }
+                        if let labelMap = await monai.runInference(on: vol, in: labeling) {
+                            viewer.recordSegmentationRun(
+                                labelMap: labelMap,
+                                name: "MONAI · \(monai.selectedModel)",
+                                engine: "MONAI Label",
+                                backend: monai.serverURL,
+                                modelID: monai.selectedModel,
+                                metadata: ["serverURL": monai.serverURL]
+                            )
+                            viewer.saveCurrentStudySession(named: "MONAI Label")
+                        }
+                    }
+                } label: {
                 Label("Run on current volume", systemImage: "play.fill")
             }
             .disabled(monai.isBusy

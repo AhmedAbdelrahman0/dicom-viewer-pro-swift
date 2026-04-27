@@ -14,8 +14,8 @@ import CoreGraphics
 ///   5. `cancel()` aborts everything; throws away any pending text.
 ///
 /// The session is the **only** dictation state SwiftUI sees. The engine
-/// is swappable (`AppleSpeechDictationEngine` today, `WhisperKit` when
-/// we add it) but the panel binds to `DictationSession` regardless.
+/// is swappable (`AppleSpeechDictationEngine`, `GoogleMedASRDictationEngine`,
+/// future WhisperKit) but the panel binds to `DictationSession` regardless.
 @MainActor
 public final class DictationSession: ObservableObject {
 
@@ -29,6 +29,10 @@ public final class DictationSession: ObservableObject {
     @Published public private(set) var finalTranscript: String = ""
     /// Live RMS level for a VU meter. 0 = silence, ~0.5 = loud speech.
     @Published public private(set) var inputLevel: Float = 0
+    /// True after the user stops recording while the recognizer is still
+    /// flushing its final result. Keeps rapid stop/start cycles from
+    /// starting a new recognition task before the previous one idles.
+    @Published public private(set) var isFinishing: Bool = false
     /// User-facing error / status message. Cleared on next `start()`.
     @Published public var statusMessage: String = ""
     /// Engine description for the UI badge.
@@ -60,6 +64,10 @@ public final class DictationSession: ObservableObject {
     public private(set) var pixelToText: PixelToTextSuggester = StubPixelToTextSuggester()
     public var imageProvider: (@Sendable () -> (image: CGImage,
                                                 context: PixelToTextContext)?)? = nil
+    /// Optional hook for consumers that want final speech routed somewhere
+    /// other than the report store. Returning true means the utterance was
+    /// consumed and should not be appended to the radiology report.
+    public var finalUtteranceHandler: ((String, Double?) -> Bool)?
 
     private var captureTask: Task<Void, Never>?
     private var eventTask: Task<Void, Never>?
@@ -93,6 +101,10 @@ public final class DictationSession: ObservableObject {
     /// pumps PCM chunks through it. Errors land in `statusMessage`.
     public func start() async {
         guard !isRecording else { return }
+        guard !isFinishing else {
+            statusMessage = "Finishing the previous utterance — try again in a moment."
+            return
+        }
         statusMessage = ""
         partialTranscript = ""
         // Don't clear finalTranscript — successive push-to-talk presses
@@ -109,6 +121,7 @@ public final class DictationSession: ObservableObject {
         do {
             try await engine.start()
         } catch {
+            isFinishing = false
             statusMessage = error.localizedDescription
             return
         }
@@ -117,6 +130,7 @@ public final class DictationSession: ObservableObject {
             try capture.start()
         } catch {
             await engine.cancel()
+            isFinishing = false
             statusMessage = error.localizedDescription
             return
         }
@@ -132,6 +146,7 @@ public final class DictationSession: ObservableObject {
     public func stop() async {
         guard isRecording else { return }
         isRecording = false
+        isFinishing = true
         capture.stop()
         await engine.finish()
     }
@@ -142,6 +157,7 @@ public final class DictationSession: ObservableObject {
             isRecording = false
             capture.stop()
         }
+        isFinishing = false
         captureTask?.cancel()
         captureTask = nil
         eventTask?.cancel()
@@ -192,24 +208,33 @@ public final class DictationSession: ObservableObject {
         case .partial(let text, _):
             partialTranscript = text
         case .final(let text, let confidence):
-            // Engines vary on whether they re-emit the whole utterance
-            // or just the delta. Apple Speech sends the cumulative
-            // utterance — we replace the partial then append it as a
-            // sentence to the final buffer.
-            partialTranscript = ""
-            if !finalTranscript.isEmpty,
-               !finalTranscript.hasSuffix(" "),
-               !text.hasPrefix(" ") {
-                finalTranscript.append(" ")
-            }
-            finalTranscript.append(text)
-            routeFinal(text: text, confidence: confidence)
+            acceptRecognizedFinal(text, confidence: confidence)
         case .idle:
             partialTranscript = ""
             inputLevel = 0
+            isFinishing = false
         case .error(let message):
             statusMessage = message
+            isFinishing = false
         }
+    }
+
+    public func acceptRecognizedFinal(_ text: String, confidence: Double? = nil) {
+        // Engines vary on whether they re-emit the whole utterance
+        // or just the delta. Apple Speech sends the cumulative
+        // utterance — we replace the partial then append it as a
+        // sentence to the final buffer.
+        partialTranscript = ""
+        if !finalTranscript.isEmpty,
+           !finalTranscript.hasSuffix(" "),
+           !text.hasPrefix(" ") {
+            finalTranscript.append(" ")
+        }
+        finalTranscript.append(text)
+        if finalUtteranceHandler?(text, confidence) == true {
+            return
+        }
+        routeFinal(text: text, confidence: confidence)
     }
 
     /// Route a finalised utterance through the command interpreter and
@@ -226,6 +251,16 @@ public final class DictationSession: ObservableObject {
         guard !trimmed.isEmpty else { return }
 
         let command = DictationCommandInterpreter.interpret(trimmed)
+        if store.report.isFinalised {
+            switch command {
+            case .switchSection, .saveReport, .newReport, .signOff:
+                break
+            case .passthrough, .deleteLastSentence, .acceptLastSuggestion,
+                 .rejectLastSuggestion, .draftImpression, .describeView:
+                statusMessage = "Report is final — reopen it before adding or editing text."
+                return
+            }
+        }
         switch command {
         case .switchSection(let kind):
             activeSection = kind
@@ -252,7 +287,7 @@ public final class DictationSession: ObservableObject {
         case .saveReport:
             store.save()
         case .signOff(let clinician):
-            store.signOff(by: clinician)
+            store.finaliseReport(by: clinician, volumes: [])
             statusMessage = "Signed off as \(clinician)."
         case .newReport:
             store.resetToBlank()

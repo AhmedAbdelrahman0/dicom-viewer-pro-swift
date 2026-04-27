@@ -89,6 +89,7 @@ public struct ContentView: View {
         .environmentObject(vm)
         .environmentObject(monai)
         .environmentObject(nnunet)
+        .environmentObject(pet)
         .environmentObject(activity)
         .environmentObject(jobs)
         // Engine panels open as right-side inspector drawers on regular-
@@ -199,6 +200,7 @@ public struct ContentView: View {
             isCompact: useCompactEnginePresentation,
             isPresented: $showDictationPanel,
             session: dictation,
+            viewer: vm,
             close: { showDictationPanel = false }
         ))
         .fileImporter(
@@ -520,6 +522,17 @@ public struct ContentView: View {
         }
         .keyboardShortcut("a", modifiers: [.command, .shift])
 
+        HoverIconButton(
+            systemImage: dictation.isRecording ? "waveform.circle.fill" : "waveform.and.mic",
+            tooltip: dictation.isRecording
+                ? "Dictation Recording\nStop or manage the active reporting session."
+                : "Dictation Report  (⌘⇧V)\nOpen study-linked reporting: start dictation, draft, finalize, and attach the report to the active study.",
+            isActive: showDictationPanel || dictation.isRecording
+        ) {
+            showInspector(.dictation)
+        }
+        .keyboardShortcut("v", modifiers: [.command, .shift])
+
         // One menu for every AI engine — replaces three separate toolbar
         // buttons that were crowding the top bar. Each entry opens its
         // own sheet / drawer and carries a keyboard shortcut so power
@@ -610,7 +623,6 @@ public struct ContentView: View {
                 Label("Dictation — push-to-talk reporting + AI",
                       systemImage: "waveform.and.mic")
             }
-            .keyboardShortcut("v", modifiers: [.command, .shift])
         } label: {
             Label("AI Engines", systemImage: "cpu")
                 .font(.system(size: 12, weight: .medium))
@@ -652,38 +664,73 @@ public struct ContentView: View {
 
     private var petDisplayMenu: some View {
         Menu {
-            Picker("Fusion PET Color", selection: Binding(
-                get: { vm.overlayColormap },
-                set: { vm.setFusionColormap($0) }
-            )) {
-                ForEach(Colormap.allCases) { color in
-                    Text(color.displayName).tag(color)
+            Section("Colormaps") {
+                Picker("Fusion PET Color", selection: Binding(
+                    get: { vm.overlayColormap },
+                    set: { vm.setFusionColormap($0) }
+                )) {
+                    ForEach(Colormap.allCases) { color in
+                        Text(color.displayName).tag(color)
+                    }
+                }
+                Picker("PET-only Color", selection: Binding(
+                    get: { vm.petOnlyColormap },
+                    set: { vm.setPETOnlyColormap($0) }
+                )) {
+                    ForEach(Colormap.allCases) { color in
+                        Text(color.displayName).tag(color)
+                    }
+                }
+                Picker("MIP PET Color", selection: Binding(
+                    get: { vm.mipColormap },
+                    set: { vm.setPETMIPColormap($0) }
+                )) {
+                    ForEach(Colormap.allCases) { color in
+                        Text(color.displayName).tag(color)
+                    }
                 }
             }
-            Picker("MIP PET Color", selection: Binding(
-                get: { vm.mipColormap },
-                set: { vm.setPETMIPColormap($0) }
-            )) {
-                ForEach(Colormap.allCases) { color in
-                    Text(color.displayName).tag(color)
+            Section("Inversion") {
+                Toggle("Invert PET images", isOn: Binding(
+                    get: { vm.invertPETImages },
+                    set: { vm.setInvertPETImages($0) }
+                ))
+                Toggle("Invert CT images", isOn: Binding(
+                    get: { vm.invertCTImages },
+                    set: { vm.setInvertCTImages($0) }
+                ))
+                Toggle("Invert MIP", isOn: Binding(
+                    get: { vm.invertPETMIP },
+                    set: { vm.setInvertPETMIP($0) }
+                ))
+            }
+            Section("Fusion SUV Range") {
+                Button("SUV 0–5") { vm.setPETOverlayRange(min: 0, max: 5) }
+                Button("SUV 0–10") { vm.setPETOverlayRange(min: 0, max: 10) }
+                Button("SUV 0–15") { vm.setPETOverlayRange(min: 0, max: 15) }
+                Button("SUV 2.5–15") { vm.setPETOverlayRange(min: 2.5, max: 15) }
+                Button {
+                    if let pet = vm.activePETQuantificationVolume {
+                        let range = vm.petSUVDisplayRange(for: pet)
+                        vm.setPETOverlayRange(min: max(0, range.min), max: max(1, range.max))
+                    }
+                } label: {
+                    Label("Auto Fusion SUV Range", systemImage: "wand.and.stars")
                 }
             }
-            Toggle("Invert MIP", isOn: Binding(
-                get: { vm.invertPETMIP },
-                set: { vm.setInvertPETMIP($0) }
-            ))
-            Divider()
-            Button("SUV 0–5") { vm.setPETOverlayRange(min: 0, max: 5) }
-            Button("SUV 0–10") { vm.setPETOverlayRange(min: 0, max: 10) }
-            Button("SUV 0–15") { vm.setPETOverlayRange(min: 0, max: 15) }
-            Button("SUV 2.5–15") { vm.setPETOverlayRange(min: 2.5, max: 15) }
-            Button {
-                if let pet = vm.activePETQuantificationVolume {
-                    let range = vm.petSUVDisplayRange(for: pet)
-                    vm.setPETOverlayRange(min: max(0, range.min), max: max(1, range.max))
+            Section("PET-only SUV Range") {
+                Button("SUV 0–5") { vm.setPETOnlyRange(min: 0, max: 5) }
+                Button("SUV 0–10") { vm.setPETOnlyRange(min: 0, max: 10) }
+                Button("SUV 0–15") { vm.setPETOnlyRange(min: 0, max: 15) }
+                Button("SUV 2.5–15") { vm.setPETOnlyRange(min: 2.5, max: 15) }
+                Button {
+                    if let pet = vm.activePETQuantificationVolume {
+                        let range = vm.petSUVDisplayRange(for: pet)
+                        vm.setPETOnlyRange(min: max(0, range.min), max: max(1, range.max))
+                    }
+                } label: {
+                    Label("Auto PET-only SUV Range", systemImage: "wand.and.stars")
                 }
-            } label: {
-                Label("Auto SUV Range", systemImage: "wand.and.stars")
             }
         } label: {
             Label("PET Color", systemImage: "paintpalette")
@@ -691,7 +738,7 @@ public struct ContentView: View {
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .help("PET Coloring\nFusion and PET-only panes can use heat maps while MIP uses a separate black/white or custom map.")
+        .help("PET Coloring\nFusion overlay, PET-only panes, and MIP now have independent color and inversion controls.")
     }
 
     private var hangingLayoutMenu: some View {
@@ -758,6 +805,30 @@ public struct ContentView: View {
                 vm.setActiveLabelingTool(.suvGradient)
             } label: {
                 Label("PET Gradient Seed Tool", systemImage: "waveform.path.ecg")
+            }
+            Section("Spherical ROI") {
+                Text(String(format: "Radius %.1f mm", vm.suvSphereRadiusMM))
+                Button {
+                    vm.setActiveViewerTool(.suvSphere)
+                } label: {
+                    Label("Place SUV / HU Sphere", systemImage: "scope")
+                }
+                Button {
+                    vm.setSUVSphereRadiusMM(vm.suvSphereRadiusMM - 0.5)
+                } label: {
+                    Label("Smaller Sphere", systemImage: "minus.magnifyingglass")
+                }
+                Button {
+                    vm.setSUVSphereRadiusMM(vm.suvSphereRadiusMM + 0.5)
+                } label: {
+                    Label("Larger Sphere", systemImage: "plus.magnifyingglass")
+                }
+                Button {
+                    vm.setSUVSphereRadiusMM(6.2)
+                } label: {
+                    Label("1 mL Sphere", systemImage: "circle.dotted")
+                }
+                Text("PET/fusion reports SUV. CT/MR reports HU/raw.")
             }
             Divider()
             ForEach(HUThresholdPreset.presets) { preset in
@@ -1767,6 +1838,7 @@ private struct DictationInspectorModifier: ViewModifier {
     let isCompact: Bool
     @Binding var isPresented: Bool
     @ObservedObject var session: DictationSession
+    @ObservedObject var viewer: ViewerViewModel
     let close: () -> Void
 
     func body(content: Content) -> some View {
@@ -1775,7 +1847,7 @@ private struct DictationInspectorModifier: ViewModifier {
             isPresented: $isPresented,
             inspectorWidth: (min: 460, ideal: 520, max: 680)
         ) {
-            DictationPanel(session: session)
+            DictationPanel(session: session, viewer: viewer)
                 .overlay(alignment: .topTrailing) {
                     Button {
                         close()
@@ -1901,9 +1973,11 @@ private struct PETMIPPane: View {
         VStack(spacing: 0) {
             header
             GeometryReader { geo in
+                let mipImage = vm.makePETMIPImage(for: plane.axis)
+                let labelImage = vm.makePETMIPLabelImage(for: plane.axis)
                 ZStack {
                     TracerTheme.viewportBackground
-                    if let cg = vm.makePETMIPImage(for: plane.axis) {
+                    if let cg = mipImage {
                         let imgW = CGFloat(cg.width)
                         let imgH = CGFloat(cg.height)
                         let fit = min(geo.size.width / imgW, geo.size.height / imgH) * zoom
@@ -1912,6 +1986,14 @@ private struct PETMIPPane: View {
                             .interpolation(.medium)
                             .frame(width: imgW * fit, height: imgH * fit)
                             .offset(pan)
+
+                        if let labelImage {
+                            Image(decorative: labelImage, scale: 1.0)
+                                .resizable()
+                                .interpolation(.none)
+                                .frame(width: imgW * fit, height: imgH * fit)
+                                .offset(pan)
+                        }
 
                         orientationMarkers
                             .padding(12)
@@ -1948,10 +2030,14 @@ private struct PETMIPPane: View {
                 .clipped()
                 .contentShape(Rectangle())
                 .gesture(magnificationGesture())
-                .gesture(dragGesture())
+                .gesture(dragGesture(
+                    imageSize: mipImage.map { CGSize(width: CGFloat($0.width), height: CGFloat($0.height)) },
+                    viewSize: geo.size
+                ))
                 .onTapGesture(count: 2) {
                     vm.resetViewportTransform(for: index)
                 }
+                .help("Drag the PET MIP to navigate the linked MPR crosshair. Use Pan or Zoom tools for viewport movement.")
             }
             .background(TracerTheme.viewportBackground)
             .overlay(Rectangle().stroke(TracerTheme.hairline, lineWidth: 1))
@@ -1995,6 +2081,8 @@ private struct PETMIPPane: View {
 
             if vm.hangingGrid.paneCount <= 16 {
                 mipColorPicker
+                mipRotationMenu
+                mipRotationSlider
 
                 HoverIconButton(
                     systemImage: "circle.righthalf.filled",
@@ -2080,6 +2168,48 @@ private struct PETMIPPane: View {
         .help("PET MIP colormap. This is independent from fused PET coloring.")
     }
 
+    private var mipRotationMenu: some View {
+        Menu {
+            Text(String(format: "Horizontal rotation %.0f°", vm.petMIPRotationDegrees))
+            Divider()
+            Button("Rotate -15°") {
+                vm.setPETMIPRotationDegrees(vm.petMIPRotationDegrees - 15)
+            }
+            Button("Rotate -5°") {
+                vm.setPETMIPRotationDegrees(vm.petMIPRotationDegrees - 5)
+            }
+            Button("Reset 0°") {
+                vm.setPETMIPRotationDegrees(0)
+            }
+            Button("Rotate +5°") {
+                vm.setPETMIPRotationDegrees(vm.petMIPRotationDegrees + 5)
+            }
+            Button("Rotate +15°") {
+                vm.setPETMIPRotationDegrees(vm.petMIPRotationDegrees + 15)
+            }
+            Divider()
+            Button("AP MIP") { vm.setPETMIPRotationDegrees(0) }
+            Button("Left lateral MIP") { vm.setPETMIPRotationDegrees(90) }
+            Button("Right lateral MIP") { vm.setPETMIPRotationDegrees(-90) }
+        } label: {
+            Label(String(format: "%.0f°", vm.petMIPRotationDegrees), systemImage: "arrow.triangle.2.circlepath")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+        }
+        .menuStyle(.borderlessButton)
+        .controlSize(.mini)
+        .help("Rotate PET MIP around the horizontal axial plane. This creates AP/lateral MIP views for navigation.")
+    }
+
+    private var mipRotationSlider: some View {
+        Slider(value: Binding(
+            get: { vm.petMIPRotationDegrees },
+            set: { vm.previewPETMIPRotationDegrees($0) }
+        ), in: -180...180, step: 5)
+        .frame(width: 84)
+        .controlSize(.mini)
+        .help("Horizontal MIP rotation. Drag to rotate AP/lateral projections.")
+    }
+
     private var mipBadge: some View {
         HStack(spacing: 6) {
             Image(systemName: "cube.transparent")
@@ -2090,6 +2220,10 @@ private struct PETMIPPane: View {
                 .foregroundColor(.secondary)
             if vm.invertPETMIP {
                 Text("inverted")
+                    .foregroundColor(.secondary)
+            }
+            if abs(vm.petMIPRotationDegrees) >= 0.5 {
+                Text(String(format: "%.0f°", vm.petMIPRotationDegrees))
                     .foregroundColor(.secondary)
             }
         }
@@ -2156,7 +2290,7 @@ private struct PETMIPPane: View {
             }
     }
 
-    private func dragGesture() -> some Gesture {
+    private func dragGesture(imageSize: CGSize?, viewSize: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
                 switch vm.activeTool {
@@ -2179,7 +2313,8 @@ private struct PETMIPPane: View {
                     let factor = 1.0 + Double(-value.translation.height) * 0.005
                     setZoom(CGFloat(max(0.25, min(10.0, Double(start) * factor))))
                 default:
-                    break
+                    guard let imageSize else { return }
+                    navigateMIP(at: value.location, imageSize: imageSize, viewSize: viewSize)
                 }
             }
             .onEnded { _ in
@@ -2192,6 +2327,28 @@ private struct PETMIPPane: View {
                 dragStartPan = nil
                 gestureStartZoom = nil
             }
+    }
+
+    private func navigateMIP(at point: CGPoint, imageSize: CGSize, viewSize: CGSize) {
+        guard let pixel = mipImagePixel(at: point, imageSize: imageSize, viewSize: viewSize) else { return }
+        vm.navigateUsingPETMIP(axis: plane.axis, displayPixelX: pixel.x, displayPixelY: pixel.y)
+    }
+
+    private func mipImagePixel(at point: CGPoint,
+                               imageSize: CGSize,
+                               viewSize: CGSize) -> (x: Int, y: Int)? {
+        guard imageSize.width > 0, imageSize.height > 0 else { return nil }
+        let fit = min(viewSize.width / imageSize.width, viewSize.height / imageSize.height) * zoom
+        guard fit > 0 else { return nil }
+        let displayW = imageSize.width * fit
+        let displayH = imageSize.height * fit
+        let originX = (viewSize.width - displayW) / 2 + pan.width
+        let originY = (viewSize.height - displayH) / 2 + pan.height
+        let localX = (point.x - originX) / fit
+        let localY = (point.y - originY) / fit
+        guard localX >= 0, localX < imageSize.width,
+              localY >= 0, localY < imageSize.height else { return nil }
+        return (Int(localX.rounded(.down)), Int(localY.rounded(.down)))
     }
 }
 

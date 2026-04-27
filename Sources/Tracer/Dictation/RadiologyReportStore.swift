@@ -121,6 +121,86 @@ public final class RadiologyReportStore: ObservableObject {
         statusMessage = "Started a new report."
     }
 
+    /// Prepare the report store for the currently loaded study. If the
+    /// study already has a saved report, load the newest one; otherwise
+    /// create a blank draft seeded with patient/study metadata.
+    public func bindToStudy(volumes: [ImageVolume], preferExisting: Bool = true) {
+        guard !volumes.isEmpty else {
+            statusMessage = "Open a study before starting dictation."
+            return
+        }
+        let key = Self.studyKey(for: volumes)
+        if report.metadata.studyKey == key {
+            refreshStudyMetadata(from: volumes, preservingCreatedAt: true)
+            return
+        }
+        if shouldAutosaveBeforeStudySwitch {
+            _ = save()
+        }
+        if preferExisting,
+           let entry = reports(attachedTo: key).first {
+            load(from: entry.url)
+            statusMessage = "Loaded \(entry.isFinalised ? "final" : "draft") report for this study."
+            return
+        }
+        report = RadiologyReport(metadata: Self.metadata(for: volumes, studyKey: key))
+        statusMessage = "Started a draft report attached to this study."
+    }
+
+    /// Force a fresh draft for the active study without deleting older
+    /// reports. This supports second reads/addenda as separate documents.
+    public func newDraft(for volumes: [ImageVolume]) {
+        guard !volumes.isEmpty else {
+            statusMessage = "Open a study before starting a new draft."
+            return
+        }
+        report = RadiologyReport(metadata: Self.metadata(for: volumes))
+        _ = attachToStudy(volumes: volumes)
+        statusMessage = "Started a new study-linked draft."
+    }
+
+    /// Attach the current report to the active study and save it. Returns
+    /// the persisted JSON URL when successful.
+    @discardableResult
+    public func attachToStudy(volumes: [ImageVolume]) -> URL? {
+        guard !volumes.isEmpty else {
+            statusMessage = "Open a study before attaching a report."
+            return nil
+        }
+        refreshStudyMetadata(from: volumes, preservingCreatedAt: true)
+        let url = save()
+        if url != nil { statusMessage = "Report attached to study and saved." }
+        return url
+    }
+
+    /// Finalise/sign the current report, attach it to the study if needed,
+    /// and persist the final JSON snapshot.
+    @discardableResult
+    public func finaliseReport(by clinician: String, volumes: [ImageVolume]) -> URL? {
+        let signer = clinician.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !signer.isEmpty else {
+            statusMessage = "Enter a reporting clinician before finalising."
+            return nil
+        }
+        if !volumes.isEmpty {
+            refreshStudyMetadata(from: volumes, preservingCreatedAt: true)
+        }
+        setMetadata { metadata in
+            metadata.reportingClinician = signer
+        }
+        signOff(by: signer)
+        let url = save()
+        if url != nil { statusMessage = "Final report signed by \(signer)." }
+        return url
+    }
+
+    public func reopenFinalReport(by clinician: String) {
+        let signer = clinician.trimmingCharacters(in: .whitespacesAndNewlines)
+        rescindSignOff(by: signer.isEmpty ? "Tracer Operator" : signer)
+        _ = save()
+        statusMessage = "Report reopened for addendum/draft edits."
+    }
+
     // MARK: - Persistence
 
     /// Save the current report to disk. Returns the file URL on success.
@@ -163,18 +243,37 @@ public final class RadiologyReportStore: ObservableObject {
         load(from: entry.url)
     }
 
+    public func reports(attachedTo studyKey: String) -> [RecentReportEntry] {
+        let trimmed = studyKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        return ((try? scanRecent(limit: .max)) ?? [])
+            .filter { $0.studyKey == trimmed }
+    }
+
     // MARK: - Recent index
 
     public struct RecentReportEntry: Identifiable, Equatable, Sendable {
         public let id: UUID
         public let url: URL
+        public let studyKey: String
         public let patientName: String
+        public let studyDescription: String
+        public let isFinalised: Bool
         public let modifiedAt: Date
 
-        public init(id: UUID, url: URL, patientName: String, modifiedAt: Date) {
+        public init(id: UUID,
+                    url: URL,
+                    studyKey: String = "",
+                    patientName: String,
+                    studyDescription: String = "",
+                    isFinalised: Bool = false,
+                    modifiedAt: Date) {
             self.id = id
             self.url = url
+            self.studyKey = studyKey
             self.patientName = patientName
+            self.studyDescription = studyDescription
+            self.isFinalised = isFinalised
             self.modifiedAt = modifiedAt
         }
     }
@@ -203,7 +302,10 @@ public final class RadiologyReportStore: ObservableObject {
             entries.append(RecentReportEntry(
                 id: snap.id,
                 url: url,
+                studyKey: snap.metadata.studyKey,
                 patientName: snap.metadata.patientName,
+                studyDescription: snap.metadata.studyDescription,
+                isFinalised: snap.signOff != nil,
                 modifiedAt: mod
             ))
         }
@@ -217,6 +319,67 @@ public final class RadiologyReportStore: ObservableObject {
     private struct ReportHeader: Codable {
         let id: UUID
         let metadata: ReportMetadata
+        let signOff: ReportSignOff?
+    }
+
+    // MARK: - Study binding
+
+    public static func studyKey(for volumes: [ImageVolume]) -> String {
+        StudySessionStore.studyKey(for: volumes)
+    }
+
+    public static func metadata(for volumes: [ImageVolume],
+                                studyKey explicitStudyKey: String? = nil) -> ReportMetadata {
+        let sorted = volumes.sorted {
+            $0.sessionIdentity.localizedStandardCompare($1.sessionIdentity) == .orderedAscending
+        }
+        let anchor = sorted.first
+        let modalities = sorted
+            .map { Modality.normalize($0.modality).rawValue }
+            .filter { !$0.isEmpty }
+        let modalitySummary = Array(Set(modalities)).sorted().joined(separator: "/")
+        return ReportMetadata(
+            studyKey: explicitStudyKey ?? studyKey(for: sorted),
+            studyUID: anchor?.studyUID ?? "",
+            patientID: anchor?.patientID ?? "",
+            patientName: anchor?.patientName ?? "",
+            studyDescription: anchor?.studyDescription ?? "",
+            modality: modalitySummary.isEmpty ? (anchor?.modality ?? "") : modalitySummary,
+            sourceVolumeIdentities: sorted.map(\.sessionIdentity),
+            createdAt: Date(),
+            updatedAt: Date()
+        )
+    }
+
+    private func refreshStudyMetadata(from volumes: [ImageVolume],
+                                      preservingCreatedAt: Bool) {
+        let currentCreatedAt = report.metadata.createdAt
+        let currentClinician = report.metadata.reportingClinician
+        let metadata = Self.metadata(for: volumes)
+        setMetadata { existing in
+            existing.studyKey = metadata.studyKey
+            existing.studyUID = metadata.studyUID
+            existing.patientID = metadata.patientID
+            existing.patientName = metadata.patientName
+            existing.studyDescription = metadata.studyDescription
+            existing.modality = metadata.modality
+            existing.sourceVolumeIdentities = metadata.sourceVolumeIdentities
+            if preservingCreatedAt {
+                existing.createdAt = currentCreatedAt
+            }
+            if !currentClinician.isEmpty && existing.reportingClinician.isEmpty {
+                existing.reportingClinician = currentClinician
+            }
+        }
+    }
+
+    private var shouldAutosaveBeforeStudySwitch: Bool {
+        let key = report.metadata.studyKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return false }
+        if report.signOff != nil { return true }
+        return report.sections.contains { section in
+            !section.sentences.isEmpty
+        }
     }
 
     // MARK: - Defaults

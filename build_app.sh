@@ -55,6 +55,15 @@ else
     echo "⚠ Icon not found at $ICON_SRC — app will use generic icon"
 fi
 
+# 4b. Copy lightweight worker scripts used by optional local model engines.
+# Heavy weights are downloaded/configured outside the app; these scripts are
+# just stable launch contracts for WorkerProcess.
+if [ -d "workers/medasr" ]; then
+    mkdir -p "$RESOURCES/Workers/medasr"
+    cp "workers/medasr/transcribe_medasr.py" "$RESOURCES/Workers/medasr/"
+    chmod +x "$RESOURCES/Workers/medasr/transcribe_medasr.py" 2>/dev/null || true
+fi
+
 # 5. Create Info.plist
 cat > "$CONTENTS/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
