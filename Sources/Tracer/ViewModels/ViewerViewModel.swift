@@ -3090,12 +3090,25 @@ public final class ViewerViewModel: ObservableObject {
         let mode = petMRRegistrationMode
         let alreadyAligned = hasMatchingGrid(mr, pet)
         let useGeometryOnly = alreadyAligned && mode == .geometry
-        let registrationModeForInitializer: PETMRRegistrationMode = mode == .geometry ? .geometry : .rigidAnatomical
-        let registration = PETMRRegistrationEngine.estimatePETToMR(
-            pet: pet,
-            mr: mr,
-            mode: useGeometryOnly ? .geometry : registrationModeForInitializer
-        )
+        let externalDeformableConfigured = mode == .rigidThenDeformable && petMRDeformableRegistration.isExternalConfigured
+        let registrationModeForInitializer: PETMRRegistrationMode
+        if useGeometryOnly {
+            registrationModeForInitializer = .geometry
+        } else if mode == .rigidThenDeformable && !externalDeformableConfigured {
+            registrationModeForInitializer = .rigidThenDeformable
+        } else {
+            registrationModeForInitializer = .rigidAnatomical
+        }
+        if !useGeometryOnly {
+            statusMessage = "Pixel-matching PET to MRI..."
+        }
+        let registration = await Task.detached(priority: .userInitiated) {
+            PETMRRegistrationEngine.estimatePETToMR(
+                pet: pet,
+                mr: mr,
+                mode: registrationModeForInitializer
+            )
+        }.value
 
         var resampled: ImageVolume?
         var registrationNote = registration.note
@@ -3108,8 +3121,7 @@ public final class ViewerViewModel: ObservableObject {
                 movingOnFixedGrid: pet,
                 label: "Scanner geometry"
             )
-        } else if mode == .rigidThenDeformable,
-                  petMRDeformableRegistration.isExternalConfigured {
+        } else if externalDeformableConfigured {
             let prealigned = await Task.detached(priority: .userInitiated) {
                 VolumeResampler.resample(source: pet,
                                          target: mr,
@@ -3136,29 +3148,20 @@ public final class ViewerViewModel: ObservableObject {
                 registrationNote = "\(registration.note). External deformable registration failed; using rigid prealignment. \(error.localizedDescription)"
             }
         } else if mode == .rigidThenDeformable {
-            let prealigned = await Task.detached(priority: .userInitiated) {
+            resampled = await Task.detached(priority: .userInitiated) {
                 VolumeResampler.resample(source: pet,
                                          target: mr,
                                          transform: registration.fixedToMoving,
                                          mode: .linear)
             }.value
-            qualityBefore = RegistrationQualityAssurance.evaluate(
-                fixed: mr,
-                movingOnFixedGrid: prealigned,
-                label: "Rigid prealignment"
-            )
-            let deformable = PETMRRegistrationEngine.estimatePETToMR(
-                pet: pet,
-                mr: mr,
-                mode: .rigidThenDeformable
-            )
-            resampled = await Task.detached(priority: .userInitiated) {
-                VolumeResampler.resample(source: pet,
-                                         target: mr,
-                                         transform: deformable.fixedToMoving,
-                                         mode: .linear)
-            }.value
-            registrationNote = "\(deformable.note). Configure ANTs/SynthMorph/VoxelMorph for dense deformable refinement."
+            if let resampled {
+                qualityBefore = RegistrationQualityAssurance.evaluate(
+                    fixed: mr,
+                    movingOnFixedGrid: resampled,
+                    label: "Pixel-matched body warp"
+                )
+            }
+            registrationNote = "\(registration.note). Configure ANTs/SynthMorph/VoxelMorph for dense deformable refinement."
         } else {
             resampled = await Task.detached(priority: .userInitiated) {
                 VolumeResampler.resample(source: pet,

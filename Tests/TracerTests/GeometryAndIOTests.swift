@@ -187,7 +187,7 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertGreaterThan(result.displacementMM, 12)
     }
 
-    func testPETMRBodyWarpFitsLargePETEnvelopeIntoMRGrid() {
+    func testPETMRBodyWarpCropsLargePETFOVOntoMRGrid() {
         func blockVolume(modality: String,
                          description: String,
                          size: Int,
@@ -212,7 +212,7 @@ final class GeometryAndIOTests: XCTestCase {
         }
 
         let mr = blockVolume(modality: "MR", description: "Regional T1", size: 16, bodyRange: 4..<12, value: 10)
-        let pet = blockVolume(modality: "PT", description: "Whole-body FDG PET", size: 24, bodyRange: 2..<22, value: 5)
+        let pet = blockVolume(modality: "PT", description: "Large-FOV FDG PET", size: 24, bodyRange: 8..<16, value: 5)
 
         let registration = PETMRRegistrationEngine.estimatePETToMR(
             pet: pet,
@@ -309,7 +309,7 @@ final class GeometryAndIOTests: XCTestCase {
 
         let vm = ViewerViewModel()
         let mr = blockVolume(modality: "MR", description: "Regional T1", size: 16, bodyRange: 4..<12, value: 10)
-        let pet = blockVolume(modality: "PT", description: "Whole-body FDG PET", size: 24, bodyRange: 2..<22, value: 5)
+        let pet = blockVolume(modality: "PT", description: "Large-FOV FDG PET", size: 24, bodyRange: 8..<16, value: 5)
         vm.loadedVolumes = [mr, pet]
         vm.displayVolume(mr)
         vm.petMRRegistrationMode = .rigidThenDeformable
@@ -326,7 +326,7 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(displayed.depth, mr.depth)
         XCTAssertGreaterThan(displayed.intensity(z: 8, y: 8, x: 8), 4.5)
         XCTAssertEqual(displayed.intensity(z: 8, y: 8, x: 14), 0, accuracy: 1e-5)
-        XCTAssertTrue(pair.registrationNote.localizedCaseInsensitiveContains("body"))
+        XCTAssertTrue(pair.registrationNote.localizedCaseInsensitiveContains("pixel"))
     }
 
     func testPETMRDeformableRunnerLoadsWarpedOutputFromWrapper() async throws {
