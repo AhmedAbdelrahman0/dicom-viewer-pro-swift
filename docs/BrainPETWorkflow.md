@@ -50,3 +50,48 @@ matches by normalized region name.
 Clinical use requires local validation of the atlas, reference region,
 resolution smoothing, tracer timing, scanner harmonization, and threshold
 selection.
+
+## GAAIN Spark reference build
+
+The Brain PET panel includes a **GAAIN reference builder** disclosure group.
+Use **Scan GAAIN** after downloading the public GAAIN Centiloid archives into:
+
+```text
+~/Library/Application Support/Tracer/NormalDatabases/InternetDownloads/GAAIN-Centiloid
+```
+
+Use **Export Spark Job** to create:
+
+```text
+~/Library/Application Support/Tracer/ReferenceBuilds/GAAIN-Centiloid
+```
+
+The package contains:
+
+- `gaain_reference_build_plan.json`: a reproducible tracer-by-tracer compute
+  plan for PiB, florbetapir/Amyvid, florbetaben, flutemetamol, NAV4694, and FDG
+  assets when present.
+- `gaain_reference_build.py`: a self-contained Python worker for local or DGX
+  Spark execution.
+- `run_gaain_reference_build.sh`: a direct launch script.
+
+The first compute stage extracts archives, inventories NIfTI imaging, applies
+standard VOIs when PET and VOI grids already match, and writes Tracer-compatible
+normal CSVs plus per-tracer QC files. If a PET scan needs registration,
+deformable alignment, DICOM conversion, or missing dependencies, the worker
+records that as QC rather than silently producing a bad normal database.
+
+If DGX Spark is enabled in Settings, **Run on Spark** performs the remote
+workflow directly from Tracer:
+
+1. Exports the local package.
+2. Uploads package files to the configured Spark workdir.
+3. Syncs any missing GAAIN archives into
+   `~/tracer-remote/gaain-centiloid-data` by default.
+4. Runs the Python worker on Spark and streams logs to the Job Center.
+5. Pulls `results.tgz` back into
+   `~/Library/Application Support/Tracer/ReferenceBuilds/GAAIN-Centiloid/remote-results`.
+
+The first run can upload roughly 20 GB if Spark does not already have the
+archives. Later runs skip files whose remote byte counts match the local
+manifest.

@@ -159,12 +159,11 @@ public final class RemoteExecutor: @unchecked Sendable {
     /// Remove a file or directory on the remote host. Swallows "not found"
     /// errors because cleanup is always best-effort.
     public func remove(_ remotePath: String) {
-        _ = try? run("rm -rf -- \(Self.shellEscape(remotePath))")
+        _ = try? run("rm -rf -- \(Self.shellPath(remotePath))")
     }
 
     public func ensureRemoteDirectory(_ path: String) throws {
-        let expanded = path.hasPrefix("~") ? "~" + path.dropFirst() : path
-        _ = try run("mkdir -p -- \(Self.shellEscape(expanded))")
+        _ = try run("mkdir -p -- \(Self.shellPath(path))")
     }
 
     // MARK: - SSH health
@@ -243,6 +242,19 @@ public final class RemoteExecutor: @unchecked Sendable {
     /// does — suitable for anything we're passing to the remote `sh -c`.
     public static func shellEscape(_ s: String) -> String {
         "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    /// Shell-safe path expression that still lets a leading `~` resolve on
+    /// the remote machine. Plain `shellEscape("~/x")` would create a literal
+    /// directory named `~`, which is painful for default remote workdirs.
+    public static func shellPath(_ s: String) -> String {
+        if s == "~" {
+            return "$HOME"
+        }
+        if s.hasPrefix("~/") {
+            return "$HOME/" + shellEscape(String(s.dropFirst(2)))
+        }
+        return shellEscape(s)
     }
 
     public static func shellExportCommand(_ assignment: String) -> String? {

@@ -50,6 +50,7 @@ public enum JobKind: String, Codable, CaseIterable, Identifiable, Sendable {
     case dosimetry
     case modelDownload
     case modelVerification
+    case brainPETReference
     case unknown
 
     public var id: String { rawValue }

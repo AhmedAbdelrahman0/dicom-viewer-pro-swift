@@ -6,6 +6,10 @@ struct BrainPETPanel: View {
     @State private var tracer: BrainPETTracer = .fdg
     @State private var tauThreshold: Double = 1.34
     @State private var showNormalDatabaseImporter = false
+    @State private var gaainSummary: GAAINReferenceDatasetSummary?
+    @State private var gaainPackage: GAAINReferenceBuildPackage?
+    @State private var gaainStatus: String = ""
+    @State private var isGAAINRemoteRunning = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -16,6 +20,7 @@ struct BrainPETPanel: View {
             } else {
                 emptyState
             }
+            gaainReferenceBuilder
             normalSources
         }
     }
@@ -233,6 +238,87 @@ struct BrainPETPanel: View {
         }
     }
 
+    private var gaainReferenceBuilder: some View {
+        DisclosureGroup {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Button {
+                        scanGAAINReferenceData()
+                    } label: {
+                        Label("Scan GAAIN", systemImage: "externaldrive.badge.magnifyingglass")
+                            .frame(maxWidth: .infinity)
+                    }
+
+                    Button {
+                        exportGAAINBuildPackage()
+                    } label: {
+                        Label("Export Spark Job", systemImage: "shippingbox.and.arrow.backward")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .disabled(gaainSummary == nil)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Button {
+                    Task { await launchGAAINOnSpark() }
+                } label: {
+                    Label(isGAAINRemoteRunning ? "Running on Spark" : "Run on Spark",
+                          systemImage: isGAAINRemoteRunning ? "hourglass" : "bolt.horizontal.circle")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(isGAAINRemoteRunning)
+
+                if let summary = gaainSummary {
+                    VStack(alignment: .leading, spacing: 5) {
+                        metric("Files", "\(summary.completeFileCount)/\(summary.files.count)")
+                        metric("Downloaded", formatBytes(summary.totalActualBytes))
+                        ForEach(summary.tracerSummaries.prefix(6)) { tracerSummary in
+                            HStack {
+                                Text(tracerSummary.tracer.displayName)
+                                    .font(.caption2)
+                                    .lineLimit(1)
+                                Spacer()
+                                Text("\(tracerSummary.completeFileCount)")
+                                    .font(.caption2.monospaced())
+                                Text(formatBytes(tracerSummary.actualBytes))
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .padding(8)
+                    .background(TracerTheme.viewportBackground.opacity(0.55))
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                }
+
+                if let package = gaainPackage {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label("Spark package ready", systemImage: "checkmark.seal")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                        Text(package.rootURL.path)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .lineLimit(3)
+                    }
+                } else if !gaainStatus.isEmpty {
+                    Text(gaainStatus)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(.top, 6)
+        } label: {
+            Label("GAAIN reference builder", systemImage: "cpu")
+                .font(.system(size: 12, weight: .semibold))
+        }
+    }
+
     private func metric(_ title: String, _ value: String) -> some View {
         HStack(alignment: .firstTextBaseline) {
             Text(title)
@@ -243,6 +329,136 @@ struct BrainPETPanel: View {
                 .font(.caption2.monospaced())
                 .lineLimit(1)
         }
+    }
+
+    private func scanGAAINReferenceData() {
+        do {
+            let summary = try GAAINReferencePipeline.discover()
+            gaainSummary = summary
+            gaainPackage = nil
+            gaainStatus = "Found \(summary.completeFileCount)/\(summary.files.count) public GAAIN files."
+        } catch {
+            gaainSummary = nil
+            gaainPackage = nil
+            gaainStatus = "GAAIN scan failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func exportGAAINBuildPackage() {
+        let operationID = "brain-pet-gaain-reference-package"
+        JobManager.shared.start(JobUpdate(
+            operationID: operationID,
+            kind: .brainPETReference,
+            title: "GAAIN reference package",
+            stage: "Exporting",
+            detail: "Writing Spark/DGX build plan",
+            progress: 0.2,
+            systemImage: "brain.head.profile",
+            canCancel: false
+        ))
+        do {
+            let package = try GAAINReferencePipeline.writeBuildPackage()
+            gaainSummary = package.summary
+            gaainPackage = package
+            gaainStatus = "Spark package ready at \(package.rootURL.path)"
+            JobManager.shared.succeed(operationID: operationID,
+                                      detail: "GAAIN package exported with \(package.plan.jobs.count) tracer job(s)")
+        } catch {
+            gaainPackage = nil
+            gaainStatus = "GAAIN package export failed: \(error.localizedDescription)"
+            JobManager.shared.fail(operationID: operationID,
+                                   error: JobErrorInfo(error,
+                                                       code: "gaain_reference_package_failed",
+                                                       recoverySuggestion: "Confirm the GAAIN downloads and manifest exist in Tracer's app-support folder.",
+                                                       isRetryable: true))
+        }
+    }
+
+    private func launchGAAINOnSpark() async {
+        guard !isGAAINRemoteRunning else { return }
+        let operationID = "brain-pet-gaain-reference-spark"
+        let cfg = DGXSparkConfig.load()
+        guard cfg.enabled, cfg.isConfigured else {
+            gaainStatus = "Enable and configure DGX Spark in Settings before launching the GAAIN build."
+            JobManager.shared.start(JobUpdate(
+                operationID: operationID,
+                kind: .brainPETReference,
+                title: "GAAIN Spark build",
+                stage: "Configuration",
+                detail: gaainStatus,
+                progress: nil,
+                systemImage: "exclamationmark.triangle",
+                canCancel: false
+            ))
+            JobManager.shared.fail(operationID: operationID,
+                                   error: JobErrorInfo(code: "dgx_not_configured",
+                                                       message: gaainStatus,
+                                                       recoverySuggestion: "Open Settings -> DGX Spark, set the host/user/workdir, and enable DGX Spark.",
+                                                       isRetryable: true))
+            return
+        }
+
+        isGAAINRemoteRunning = true
+        gaainStatus = "Preparing GAAIN Spark build..."
+        JobManager.shared.start(JobUpdate(
+            operationID: operationID,
+            kind: .brainPETReference,
+            title: "GAAIN Spark build",
+            stage: "Preparing",
+            detail: "Exporting local build package",
+            progress: nil,
+            systemImage: "brain.head.profile",
+            canCancel: false
+        ))
+        defer { isGAAINRemoteRunning = false }
+
+        do {
+            let package = try GAAINReferencePipeline.writeBuildPackage()
+            gaainSummary = package.summary
+            gaainPackage = package
+            JobManager.shared.update(operationID: operationID,
+                                     stage: "Spark",
+                                     detail: "Uploading package and launching worker")
+
+            let sink: @Sendable (String) -> Void = { text in
+                let detail = text
+                    .split(whereSeparator: \.isNewline)
+                    .last
+                    .map(String.init)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let detail, !detail.isEmpty else { return }
+                Task { @MainActor in
+                    JobManager.shared.heartbeat(operationID: operationID,
+                                                detail: detail)
+                }
+            }
+            let result = try await Task.detached(priority: .utility) {
+                let runner = RemoteGAAINReferenceBuilder(configuration: .init(dgx: cfg))
+                return try runner.run(package: package, logSink: sink)
+            }.value
+
+            gaainStatus = "Spark build complete: \(result.artifactPaths.count) artifact(s) pulled to \(result.localOutputRoot.path)"
+            JobManager.shared.succeed(operationID: operationID,
+                                      detail: gaainStatus)
+        } catch {
+            gaainStatus = "GAAIN Spark build failed: \(error.localizedDescription)"
+            JobManager.shared.fail(operationID: operationID,
+                                   error: JobErrorInfo(error,
+                                                       code: "gaain_spark_build_failed",
+                                                       recoverySuggestion: "Check Settings -> DGX Spark, Python/nibabel/numpy availability on Spark, remote disk space, and the Job Center log.",
+                                                       isRetryable: true))
+        }
+    }
+
+    private func formatBytes(_ bytes: Int64) -> String {
+        let units = ["B", "KB", "MB", "GB", "TB"]
+        var value = Double(bytes)
+        var index = 0
+        while value >= 1024, index < units.count - 1 {
+            value /= 1024
+            index += 1
+        }
+        return String(format: "%.1f %@", value, units[index])
     }
 
     private func icon(for family: BrainPETAnalysisFamily) -> String {
