@@ -76,6 +76,61 @@ final class LocalPETCTDatasetSmokeTests: XCTestCase {
         XCTAssertGreaterThan(thresholdCount, 0, "SUV thresholding should find uptake in this FDG study.")
     }
 
+    @MainActor
+    func testViewerWorkflowLoadsOncologyCaseAndMeasuresROIs() async throws {
+        let root = try smokeDirectory()
+        let sessionRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Tracer-OncologyCase-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessionRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: sessionRoot) }
+
+        let vm = ViewerViewModel(studySessionStore: StudySessionStore(rootURL: sessionRoot))
+        vm.suvSettings.mode = .storedSUV
+
+        await vm.loadNIfTI(url: root.appendingPathComponent("CTres.nii.gz"), autoFuse: false)
+        await vm.loadNIfTI(url: root.appendingPathComponent("SUV.nii.gz"), autoFuse: true)
+
+        let ct = try XCTUnwrap(vm.loadedCTVolumes.first, "CTres should load through the viewer path.")
+        let pet = try XCTUnwrap(vm.loadedPETVolumes.first, "SUV PET should load through the viewer path.")
+        if vm.fusion == nil {
+            await vm.fusePETCT(base: ct, overlay: pet)
+        }
+        let fusion = try XCTUnwrap(vm.fusion, "PET/CT fusion should be configured for the oncology case.")
+        XCTAssertTrue(fusion.isPETCT)
+        XCTAssertTrue(ImageVolumeGeometry.gridsMatch(fusion.baseVolume, fusion.displayedOverlay),
+                      "Displayed PET overlay must be on the CT grid for fused measurement/review.")
+
+        let labelImport = try vm.labeling.loadLabel(
+            from: root.appendingPathComponent("SEG.nii.gz"),
+            parentVolume: pet
+        )
+        let labelMap = labelImport.labelMap
+        let classID = try XCTUnwrap(labelMap.classes.first?.labelID)
+        let stats = try XCTUnwrap(vm.activePETRegionStats(for: labelMap, classID: classID))
+        XCTAssertGreaterThan(stats.suvMax ?? 0, 0)
+        XCTAssertGreaterThan(stats.suvMean ?? 0, 0)
+
+        let maxIndex = try XCTUnwrap(pet.pixels.indices.max(by: { pet.pixels[$0] < pet.pixels[$1] }))
+        let sliceSize = pet.width * pet.height
+        let z = maxIndex / sliceSize
+        let y = (maxIndex % sliceSize) / pet.width
+        let x = maxIndex % pet.width
+        let suvROI = try XCTUnwrap(vm.addSphericalSUVROI(
+            at: pet.worldPoint(z: z, y: y, x: x),
+            radiusMM: 10
+        ))
+        XCTAssertGreaterThan(suvROI.suvMax, 0)
+        XCTAssertEqual(vm.suvROIMeasurements.count, 1)
+
+        let huROI = try XCTUnwrap(vm.addSphericalIntensityROI(
+            at: ct.worldPoint(z: ct.depth / 2, y: ct.height / 2, x: ct.width / 2),
+            in: ct,
+            radiusMM: 10
+        ))
+        XCTAssertEqual(huROI.unit, "HU")
+        XCTAssertEqual(vm.intensityROIMeasurements.count, 1)
+    }
+
     private func load(_ filename: String, in root: URL, hint: String) throws -> ImageVolume {
         let url = root.appendingPathComponent(filename)
         XCTAssertTrue(FileManager.default.fileExists(atPath: url.path), "Missing \(filename)")
