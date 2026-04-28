@@ -272,6 +272,165 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(mappedPETCenter.z, mrCenter.z, accuracy: 1.5)
     }
 
+    func testPETMRPostResampleVisualFitUsesBrainUptakeEnvelope() {
+        func blockVolume(modality: String,
+                         description: String,
+                         size: Int,
+                         bodyRange: Range<Int>,
+                         value: Float) -> ImageVolume {
+            var pixels = [Float](repeating: 0, count: size * size * size)
+            for z in bodyRange {
+                for y in bodyRange {
+                    for x in bodyRange {
+                        pixels[z * size * size + y * size + x] = value
+                    }
+                }
+            }
+            return ImageVolume(
+                pixels: pixels,
+                depth: size,
+                height: size,
+                width: size,
+                spacing: (5, 5, 5),
+                modality: modality,
+                seriesDescription: description
+            )
+        }
+
+        let mr = blockVolume(modality: "MR", description: "Brain T1", size: 32, bodyRange: 10..<22, value: 10)
+        let pet = blockVolume(modality: "PT", description: "Oversized FDG brain PET", size: 32, bodyRange: 7..<25, value: 5)
+
+        let correction = PETMRRegistrationEngine.postResampleVisualFit(movingOnFixedGrid: pet, fixed: mr)
+
+        XCTAssertNotNil(correction)
+        XCTAssertLessThan(correction?.scale ?? 1, 0.75)
+        XCTAssertTrue(correction?.note.contains("brain uptake") ?? false)
+    }
+
+    func testPETMRPostResampleVisualFitFitsOversizedBrainAxisInsideMRI() {
+        func rectangularVolume(modality: String,
+                               description: String,
+                               size: Int,
+                               xRange: Range<Int>,
+                               yRange: Range<Int>,
+                               zRange: Range<Int>,
+                               value: Float) -> ImageVolume {
+            var pixels = [Float](repeating: 0, count: size * size * size)
+            for z in zRange {
+                for y in yRange {
+                    for x in xRange {
+                        pixels[z * size * size + y * size + x] = value
+                    }
+                }
+            }
+            return ImageVolume(
+                pixels: pixels,
+                depth: size,
+                height: size,
+                width: size,
+                spacing: (5, 5, 5),
+                modality: modality,
+                seriesDescription: description
+            )
+        }
+
+        let mr = rectangularVolume(modality: "MR",
+                                   description: "Brain T1",
+                                   size: 40,
+                                   xRange: 12..<28,
+                                   yRange: 10..<30,
+                                   zRange: 10..<30,
+                                   value: 10)
+        let pet = rectangularVolume(modality: "PT",
+                                    description: "Wide FDG brain PET",
+                                    size: 40,
+                                    xRange: 11..<29,
+                                    yRange: 8..<32,
+                                    zRange: 12..<28,
+                                    value: 5)
+
+        let correction = PETMRRegistrationEngine.postResampleVisualFit(movingOnFixedGrid: pet, fixed: mr)
+
+        guard let correction else {
+            XCTFail("Expected a brain PET/MR visual-fit correction")
+            return
+        }
+        XCTAssertLessThan(correction.scale, 0.86)
+        XCTAssertGreaterThan(correction.scale, 0.80)
+        let matrix = correction.sourceToDisplay.matrix
+        XCTAssertNotEqual(matrix[0, 0], matrix[2, 2], accuracy: 1e-6)
+        XCTAssertTrue(correction.note.contains("brain uptake"))
+    }
+
+    func testPETMRSegmentationPolishImprovesLocalShiftOnMRGrid() {
+        func blockVolume(modality: String,
+                         description: String,
+                         size: Int,
+                         xRange: Range<Int>,
+                         yRange: Range<Int>,
+                         zRange: Range<Int>,
+                         value: Float) -> ImageVolume {
+            var pixels = [Float](repeating: 0, count: size * size * size)
+            for z in zRange {
+                for y in yRange {
+                    for x in xRange {
+                        pixels[z * size * size + y * size + x] = value
+                    }
+                }
+            }
+            return ImageVolume(
+                pixels: pixels,
+                depth: size,
+                height: size,
+                width: size,
+                spacing: (5, 5, 5),
+                modality: modality,
+                seriesDescription: description
+            )
+        }
+
+        let mr = blockVolume(modality: "MR",
+                             description: "Brain T1",
+                             size: 32,
+                             xRange: 10..<22,
+                             yRange: 10..<22,
+                             zRange: 10..<22,
+                             value: 10)
+        let petShifted = blockVolume(modality: "PT",
+                                     description: "FDG PET shifted on MR grid",
+                                     size: 32,
+                                     xRange: 11..<23,
+                                     yRange: 10..<22,
+                                     zRange: 10..<22,
+                                     value: 5)
+
+        let correction = PETMRRegistrationEngine.postResampleSegmentationPolish(
+            movingOnFixedGrid: petShifted,
+            fixed: mr
+        )
+
+        guard let correction else {
+            XCTFail("Expected a bounded segmentation polish correction")
+            return
+        }
+        XCTAssertLessThan(correction.translationMM.x, -3)
+        XCTAssertTrue(correction.note.contains("segmentation polish"))
+
+        let corrected = VolumeResampler.resample(source: petShifted,
+                                                 target: mr,
+                                                 transform: correction.sourceToDisplay.inverse,
+                                                 mode: .linear)
+        let before = RegistrationQualityAssurance.evaluate(fixed: mr,
+                                                           movingOnFixedGrid: petShifted,
+                                                           label: "Before")
+        let after = RegistrationQualityAssurance.evaluate(fixed: mr,
+                                                          movingOnFixedGrid: corrected,
+                                                          label: "After")
+        XCTAssertLessThan(after.centroidResidualMM ?? .infinity,
+                          before.centroidResidualMM ?? -.infinity)
+        XCTAssertGreaterThan(after.maskDice ?? 0, before.maskDice ?? 0)
+    }
+
     func testPETMRRegistrationSearchesInPlaneRotation() {
         func lShapeVolume(modality: String, rotated: Bool, value: Float) -> ImageVolume {
             let size = 32
@@ -454,6 +613,55 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertTrue(result.stdout.contains("fake deformable complete"))
     }
 
+    func testPETMRExternalRunnerStagesShearedMRGridForITKTools() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PETMRShearedExternalRunner-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let wrapper = try makeFakeDeformableWrapper(in: root)
+        let shearedDirection = simd_double3x3(
+            SIMD3<Double>(1, 0, 0),
+            SIMD3<Double>(0.06, 0.998, 0.0),
+            SIMD3<Double>(-0.04, 0.01, 0.999)
+        )
+        let fixed = ImageVolume(
+            pixels: [Float](repeating: 10, count: 12 * 12 * 12),
+            depth: 12,
+            height: 12,
+            width: 12,
+            spacing: (1, 1, 1),
+            direction: shearedDirection,
+            modality: "MR",
+            seriesDescription: "Sheared T1"
+        )
+        let moving = ImageVolume(
+            pixels: [Float](repeating: 2, count: 12 * 12 * 12),
+            depth: 12,
+            height: 12,
+            width: 12,
+            spacing: (1, 1, 1),
+            direction: shearedDirection,
+            modality: "PT",
+            seriesDescription: "Prealigned PET"
+        )
+        let config = PETMRDeformableRegistrationConfiguration(
+            backend: .customScript,
+            executablePath: wrapper.path,
+            timeoutSeconds: 30
+        )
+
+        let result = try await PETMRDeformableRegistrationRunner.register(
+            fixed: fixed,
+            movingPrealigned: moving,
+            configuration: config
+        )
+
+        XCTAssertTrue(ImageVolumeGeometry.gridsMatch(fixed, result.warpedMoving))
+        XCTAssertTrue(result.note.contains("orthonormal external staging"))
+        XCTAssertEqual(result.warpedMoving.direction[1].x, fixed.direction[1].x, accuracy: 1e-6)
+    }
+
     @MainActor
     func testPETMRFusionRoutesThroughConfiguredDeformableBackend() async throws {
         let root = FileManager.default.temporaryDirectory
@@ -530,6 +738,45 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertGreaterThan(comparison.centroidImprovementMM ?? 0, 50)
         XCTAssertEqual(comparison.grade, .pass)
         XCTAssertGreaterThan(after.normalizedMutualInformation ?? 0, before.normalizedMutualInformation ?? 0)
+    }
+
+    func testRegistrationQAAllowsBrainFitInsideOverlapDropWhenCentroidAndNMIImprove() {
+        let before = RegistrationQualitySnapshot(
+            label: "Body warp",
+            grade: .pass,
+            normalizedMutualInformation: 1.12,
+            pearsonCorrelation: nil,
+            maskDice: 0.73,
+            centroidResidualMM: 21.0,
+            fixedMaskFraction: 0.20,
+            movingMaskFraction: 0.19,
+            sampleCount: 1000,
+            warnings: []
+        )
+        let after = RegistrationQualitySnapshot(
+            label: "Brain fit",
+            grade: .pass,
+            normalizedMutualInformation: 1.15,
+            pearsonCorrelation: nil,
+            maskDice: 0.67,
+            centroidResidualMM: 17.0,
+            fixedMaskFraction: 0.20,
+            movingMaskFraction: 0.15,
+            sampleCount: 1000,
+            warnings: []
+        )
+
+        let generic = RegistrationQualityAssurance.compare(before: before, after: after)
+        let brainFit = RegistrationQualityAssurance.compare(
+            before: before,
+            after: after,
+            allowBrainPETMRFitInside: true
+        )
+
+        XCTAssertEqual(generic.grade, .caution)
+        XCTAssertTrue(generic.warnings.contains { $0.contains("envelope overlap worsened") })
+        XCTAssertEqual(brainFit.grade, .pass)
+        XCTAssertFalse(brainFit.warnings.contains { $0.contains("envelope overlap worsened") })
     }
 
     func testVolumeWorldVoxelRoundTripUsesDirection() {

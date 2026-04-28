@@ -145,12 +145,37 @@ public struct RegistrationQualitySnapshot: Equatable, Sendable {
     public let grade: RegistrationQualityGrade
     public let normalizedMutualInformation: Double?
     public let pearsonCorrelation: Double?
+    public let edgeAlignment: Double?
     public let maskDice: Double?
     public let centroidResidualMM: Double?
     public let fixedMaskFraction: Double
     public let movingMaskFraction: Double
     public let sampleCount: Int
     public let warnings: [String]
+
+    public init(label: String,
+                grade: RegistrationQualityGrade,
+                normalizedMutualInformation: Double?,
+                pearsonCorrelation: Double?,
+                edgeAlignment: Double? = nil,
+                maskDice: Double?,
+                centroidResidualMM: Double?,
+                fixedMaskFraction: Double,
+                movingMaskFraction: Double,
+                sampleCount: Int,
+                warnings: [String]) {
+        self.label = label
+        self.grade = grade
+        self.normalizedMutualInformation = normalizedMutualInformation
+        self.pearsonCorrelation = pearsonCorrelation
+        self.edgeAlignment = edgeAlignment
+        self.maskDice = maskDice
+        self.centroidResidualMM = centroidResidualMM
+        self.fixedMaskFraction = fixedMaskFraction
+        self.movingMaskFraction = movingMaskFraction
+        self.sampleCount = sampleCount
+        self.warnings = warnings
+    }
 }
 
 public struct RegistrationQualityComparison: Equatable, Sendable {
@@ -194,6 +219,9 @@ public struct RegistrationQualityComparison: Equatable, Sendable {
         }
         if let residual = after.centroidResidualMM {
             parts.append(String(format: "centroid %.1f mm", residual))
+        }
+        if let edge = after.edgeAlignment {
+            parts.append(String(format: "edge %.2f", edge))
         }
         if parts.isEmpty {
             parts.append("QA needs richer image signal")
@@ -243,6 +271,10 @@ public enum RegistrationQualityAssurance {
         var intersection = 0
         var fixedCentroid = SIMD3<Double>(0, 0, 0)
         var movingCentroid = SIMD3<Double>(0, 0, 0)
+        var edgeCount = 0
+        var sumFixedEdge2 = 0.0
+        var sumMovingEdge2 = 0.0
+        var sumEdgeProduct = 0.0
 
         let width = fixed.width
         let height = fixed.height
@@ -284,6 +316,17 @@ public enum RegistrationQualityAssurance {
                     if fixedInside && movingInside {
                         intersection += 1
                     }
+
+                    if fixedInside || movingInside,
+                       let fixedEdge = gradientMagnitude(fixed, x: x, y: y, z: z),
+                       let movingEdge = gradientMagnitude(movingOnFixedGrid, x: x, y: y, z: z) {
+                        let f = log1p(fixedEdge)
+                        let m = log1p(movingEdge)
+                        sumFixedEdge2 += f * f
+                        sumMovingEdge2 += m * m
+                        sumEdgeProduct += f * m
+                        edgeCount += 1
+                    }
                 }
             }
         }
@@ -300,6 +343,14 @@ public enum RegistrationQualityAssurance {
             maskDice = 2.0 * Double(intersection) / Double(fixedMaskCount + movingMaskCount)
         } else {
             maskDice = nil
+        }
+        let edgeAlignment: Double?
+        if edgeCount >= 32,
+           sumFixedEdge2 > 1e-8,
+           sumMovingEdge2 > 1e-8 {
+            edgeAlignment = (sumEdgeProduct / sqrt(sumFixedEdge2 * sumMovingEdge2)).clamped(to: 0...1)
+        } else {
+            edgeAlignment = nil
         }
 
         let centroidResidual: Double?
@@ -339,12 +390,20 @@ public enum RegistrationQualityAssurance {
             warnings.append("NMI unavailable because one image is nearly constant")
             grade = maxGrade(grade, .caution)
         }
+        if let edgeAlignment,
+           edgeAlignment < 0.04,
+           Modality.normalize(fixed.modality) == .MR,
+           Modality.normalize(movingOnFixedGrid.modality) == .PT {
+            warnings.append(String(format: "weak local edge agreement %.2f", edgeAlignment))
+            grade = maxGrade(grade, .caution)
+        }
 
         return RegistrationQualitySnapshot(
             label: label,
             grade: grade,
             normalizedMutualInformation: nmi,
             pearsonCorrelation: pearson,
+            edgeAlignment: edgeAlignment,
             maskDice: maskDice,
             centroidResidualMM: centroidResidual,
             fixedMaskFraction: fixedFraction,
@@ -356,7 +415,8 @@ public enum RegistrationQualityAssurance {
 
     public static func compare(before: RegistrationQualitySnapshot,
                                after: RegistrationQualitySnapshot,
-                               deformation: DeformationFieldQuality? = nil) -> RegistrationQualityComparison {
+                               deformation: DeformationFieldQuality? = nil,
+                               allowBrainPETMRFitInside: Bool = false) -> RegistrationQualityComparison {
         var warnings = after.warnings
         var grade = after.grade
 
@@ -369,13 +429,25 @@ public enum RegistrationQualityAssurance {
         if let beforeDice = before.maskDice,
            let afterDice = after.maskDice,
            afterDice + 0.03 < beforeDice {
-            warnings.append(String(format: "envelope overlap worsened from %.2f to %.2f", beforeDice, afterDice))
-            grade = maxGrade(grade, .caution)
+            let nmiStableOrImproved = (after.normalizedMutualInformation ?? -.infinity) + 0.01 >= (before.normalizedMutualInformation ?? .infinity)
+            let centroidAcceptable = (after.centroidResidualMM ?? .infinity) <= 25
+            let substantialOverlap = afterDice >= 0.50
+            if !(allowBrainPETMRFitInside && nmiStableOrImproved && centroidAcceptable && substantialOverlap) {
+                warnings.append(String(format: "envelope overlap worsened from %.2f to %.2f", beforeDice, afterDice))
+                grade = maxGrade(grade, .caution)
+            }
         }
         if let beforeResidual = before.centroidResidualMM,
            let afterResidual = after.centroidResidualMM,
            afterResidual > beforeResidual + 15 {
             warnings.append(String(format: "centroid residual worsened by %.1f mm", afterResidual - beforeResidual))
+            grade = maxGrade(grade, .caution)
+        }
+        if let beforeEdge = before.edgeAlignment,
+           let afterEdge = after.edgeAlignment,
+           beforeEdge > 0.08,
+           afterEdge + 0.04 < beforeEdge {
+            warnings.append(String(format: "edge agreement worsened from %.2f to %.2f", beforeEdge, afterEdge))
             grade = maxGrade(grade, .caution)
         }
         if let deformation {
@@ -446,6 +518,25 @@ public enum RegistrationQualityAssurance {
         let denom = sqrt(max(0, fixedVariance) * max(0, movingVariance))
         guard denom > 1e-8 else { return nil }
         return (covariance / denom).clamped(to: -1...1)
+    }
+
+    private static func gradientMagnitude(_ volume: ImageVolume,
+                                          x: Int,
+                                          y: Int,
+                                          z: Int) -> Double? {
+        guard x > 0, x < volume.width - 1,
+              y > 0, y < volume.height - 1,
+              z > 0, z < volume.depth - 1 else {
+            return nil
+        }
+        let dx = Double(volume.intensity(z: z, y: y, x: x + 1) -
+                        volume.intensity(z: z, y: y, x: x - 1)) / max(0.001, 2 * volume.spacing.x)
+        let dy = Double(volume.intensity(z: z, y: y + 1, x: x) -
+                        volume.intensity(z: z, y: y - 1, x: x)) / max(0.001, 2 * volume.spacing.y)
+        let dz = Double(volume.intensity(z: z + 1, y: y, x: x) -
+                        volume.intensity(z: z - 1, y: y, x: x)) / max(0.001, 2 * volume.spacing.z)
+        let magnitude = sqrt(dx * dx + dy * dy + dz * dz)
+        return magnitude.isFinite ? magnitude : nil
     }
 
     private static func maskKind(for modality: Modality) -> RegistrationQAMask {

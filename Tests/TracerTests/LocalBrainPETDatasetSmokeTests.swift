@@ -118,6 +118,56 @@ final class LocalBrainPETDatasetSmokeTests: XCTestCase {
         XCTAssertTrue(vm.level.isFinite)
     }
 
+    func testSimpleITKPETMRPrecisionPathRunsOnLocalBrainCase() async throws {
+        guard simpleITKAvailable() else {
+            throw XCTSkip("Python SimpleITK is not installed.")
+        }
+        let root = try smokeDirectory()
+        let subjectID = ProcessInfo.processInfo.environment["TRACER_BRAIN_PET_SUBJECT"] ?? "sub-control01"
+        let petURL = root
+            .appendingPathComponent(subjectID, isDirectory: true)
+            .appendingPathComponent("pet", isDirectory: true)
+            .appendingPathComponent("\(subjectID)_pet.nii.gz")
+        let mriURL = root
+            .appendingPathComponent(subjectID, isDirectory: true)
+            .appendingPathComponent("anat", isDirectory: true)
+            .appendingPathComponent("\(subjectID)_T1w.nii.gz")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: petURL.path), "Missing brain PET file: \(petURL.path)")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: mriURL.path), "Missing brain MRI file: \(mriURL.path)")
+
+        let pet = try NIfTILoader.load(petURL, modalityHint: "PT")
+        let mri = try NIfTILoader.load(mriURL, modalityHint: "MR")
+        let registration = PETMRRegistrationEngine.estimatePETToMR(
+            pet: pet,
+            mr: mri,
+            mode: .rigidAnatomical
+        )
+        let prealigned = VolumeResampler.resample(
+            source: pet,
+            target: mri,
+            transform: registration.fixedToMoving,
+            mode: .linear
+        )
+        let config = PETMRDeformableRegistrationConfiguration(
+            backend: .simpleITKMI,
+            executablePath: "python3",
+            extraArguments: "--sampling 0.03 --iterations 20 --bins 32",
+            timeoutSeconds: 120,
+            metricPreset: .multimodalMI
+        )
+
+        let result = try await PETMRDeformableRegistrationRunner.register(
+            fixed: mri,
+            movingPrealigned: prealigned,
+            configuration: config
+        )
+
+        XCTAssertTrue(ImageVolumeGeometry.gridsMatch(mri, result.warpedMoving))
+        XCTAssertTrue(result.note.contains("SimpleITK MI"))
+        XCTAssertFalse(result.stderr.localizedCaseInsensitiveContains("registration failed"), result.stderr)
+        XCTAssertFalse(result.warpedMoving.pixels.allSatisfy { !$0.isFinite || abs($0) < 1e-8 })
+    }
+
     private func makeCoarseBrainSmokeAtlas(for volume: ImageVolume) throws -> LabelMap {
         let atlas = LabelMap(
             parentSeriesUID: volume.seriesUID,
@@ -260,5 +310,18 @@ final class LocalBrainPETDatasetSmokeTests: XCTestCase {
         let clampedLower = max(minIndex, min(maxIndex, lower))
         let clampedUpper = max(clampedLower + 1, min(maxIndex + 1, upper))
         return clampedLower..<clampedUpper
+    }
+
+    private func simpleITKAvailable() -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["python3", "-c", "import SimpleITK"]
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            return false
+        }
     }
 }

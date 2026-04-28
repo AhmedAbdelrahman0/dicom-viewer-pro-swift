@@ -485,7 +485,7 @@ public final class ViewerViewModel: ObservableObject {
     @Published public var petOnlyLevel: Double = 3
     @Published public var petMIPWindow: Double = 6
     @Published public var petMIPLevel: Double = 3
-    @Published public var petMRRegistrationMode: PETMRRegistrationMode = .rigidThenDeformable
+    @Published public var petMRRegistrationMode: PETMRRegistrationMode = .automaticBestFit
     @Published public var petMRDeformableRegistration = PETMRDeformableRegistrationConfiguration()
     @Published public var hangingGrid: HangingGridLayout = .defaultPETCT
     @Published public var suvSettings = SUVCalculationSettings()
@@ -3081,6 +3081,345 @@ public final class ViewerViewModel: ObservableObject {
         }
     }
 
+    private struct PETMRFusionCandidate {
+        let volume: ImageVolume
+        let note: String
+        let deformationQuality: DeformationFieldQuality?
+        let quality: RegistrationQualitySnapshot
+        let allowBrainFitInside: Bool
+        let label: String
+    }
+
+    private struct PETMRFusionCandidateInput {
+        let volume: ImageVolume
+        let note: String
+        let deformationQuality: DeformationFieldQuality?
+        let label: String
+        let allowBrainFitInside: Bool
+    }
+
+    private func petMRFusionCandidateScore(_ quality: RegistrationQualitySnapshot) -> Double {
+        let nmi = quality.normalizedMutualInformation ?? 0
+        let nmiScore = max(0, min(1, (nmi - 0.90) / 0.40))
+        let overlapScore = max(0, min(1, quality.maskDice ?? 0))
+        let centroid = quality.centroidResidualMM ?? 120
+        let centroidScore = max(0, min(1, 1 - centroid / 70))
+        let edgeScore = max(0, min(1, (quality.edgeAlignment ?? 0) / 0.35))
+        var score = 0.40 * overlapScore + 0.25 * nmiScore + 0.20 * centroidScore + 0.15 * edgeScore
+        switch quality.grade {
+        case .pass:
+            break
+        case .unknown:
+            score -= 0.04
+        case .caution:
+            score -= 0.08
+        case .fail:
+            score -= 0.25
+        }
+        score -= min(0.18, Double(quality.warnings.count) * 0.04)
+        return score
+    }
+
+    private func isScannerGeometryPETMRCandidate(_ candidate: PETMRFusionCandidate) -> Bool {
+        candidate.label.caseInsensitiveCompare("Scanner geometry") == .orderedSame
+    }
+
+    private func petMRAutomaticComplexityPenalty(_ candidate: PETMRFusionCandidate) -> Double {
+        let label = candidate.label.lowercased()
+        let note = candidate.note.lowercased()
+        var penalty = 0.0
+        if !isScannerGeometryPETMRCandidate(candidate) {
+            penalty += 0.03
+        }
+        if label.contains("similarity") || note.contains("similarity pixel fit") {
+            penalty += 0.03
+        }
+        if label.contains("body warp") || note.contains("body-envelope") {
+            penalty += 0.05
+        }
+        if label.contains("visual fit") || note.contains("brain uptake fit") {
+            penalty += 0.05
+        }
+        if label.contains("segmentation polish") || note.contains("segmentation polish") {
+            penalty += 0.03
+        }
+        if label.contains("simpleitk") || note.contains("simpleitk") {
+            penalty += 0.03
+        }
+        if candidate.deformationQuality != nil {
+            penalty += 0.04
+        }
+        if candidate.quality.grade == .fail {
+            penalty += 0.30
+        }
+        return min(0.22, penalty)
+    }
+
+    private func petMRAutomaticCandidateScore(_ candidate: PETMRFusionCandidate) -> Double {
+        petMRFusionCandidateScore(candidate.quality) - petMRAutomaticComplexityPenalty(candidate)
+    }
+
+    private func bestPETMRFusionCandidate(_ candidates: [PETMRFusionCandidate]) -> PETMRFusionCandidate? {
+        candidates.max { lhs, rhs in
+            let lhsScore = petMRFusionCandidateScore(lhs.quality)
+            let rhsScore = petMRFusionCandidateScore(rhs.quality)
+            if abs(lhsScore - rhsScore) > 0.01 {
+                return lhsScore < rhsScore
+            }
+            let lhsCentroid = lhs.quality.centroidResidualMM ?? .greatestFiniteMagnitude
+            let rhsCentroid = rhs.quality.centroidResidualMM ?? .greatestFiniteMagnitude
+            if abs(lhsCentroid - rhsCentroid) > 1 {
+                return lhsCentroid > rhsCentroid
+            }
+            if (lhs.deformationQuality == nil) != (rhs.deformationQuality == nil) {
+                return lhs.deformationQuality == nil
+            }
+            return (lhs.quality.maskDice ?? 0) < (rhs.quality.maskDice ?? 0)
+        }
+    }
+
+    private func petMRAutomaticMateriallyImproves(_ candidate: PETMRFusionCandidate,
+                                                  over geometry: PETMRFusionCandidate) -> Bool {
+        let geometryScore = petMRFusionCandidateScore(geometry.quality)
+        let candidateScore = petMRFusionCandidateScore(candidate.quality)
+        let nmiGain = (candidate.quality.normalizedMutualInformation ?? -.infinity) -
+            (geometry.quality.normalizedMutualInformation ?? .infinity)
+        let diceGain = (candidate.quality.maskDice ?? -.infinity) -
+            (geometry.quality.maskDice ?? .infinity)
+        let centroidGain = (geometry.quality.centroidResidualMM ?? .infinity) -
+            (candidate.quality.centroidResidualMM ?? .infinity)
+        let edgeGain: Double?
+        if let candidateEdge = candidate.quality.edgeAlignment,
+           let geometryEdge = geometry.quality.edgeAlignment {
+            edgeGain = candidateEdge - geometryEdge
+        } else {
+            edgeGain = nil
+        }
+
+        if candidate.quality.grade == .fail {
+            return false
+        }
+
+        if geometry.quality.grade == .pass,
+           (geometry.quality.centroidResidualMM ?? .infinity) <= 25,
+           (geometry.quality.maskDice ?? 0) >= 0.45 {
+            let precisionEdgeGain = edgeGain ?? 0
+            let isPrecisionRefinement =
+                candidate.label.localizedCaseInsensitiveContains("SimpleITK") ||
+                candidate.note.localizedCaseInsensitiveContains("SimpleITK") ||
+                candidate.label.localizedCaseInsensitiveContains("segmentation polish") ||
+                candidate.note.localizedCaseInsensitiveContains("segmentation polish")
+            if isPrecisionRefinement,
+               candidateScore >= geometryScore + 0.025,
+               nmiGain >= -0.01,
+               diceGain >= -0.04,
+               centroidGain >= -2,
+               (precisionEdgeGain >= 0.035 || centroidGain >= 2.0) {
+                return true
+            }
+            return candidateScore >= geometryScore + 0.10 &&
+                nmiGain >= 0.04 &&
+                centroidGain >= 6 &&
+                (edgeGain ?? 0) >= -0.03 &&
+                diceGain >= -0.04
+        }
+
+        return candidateScore >= geometryScore + 0.08 ||
+            (nmiGain >= 0.05 && centroidGain >= 10)
+    }
+
+    private func bestPETMRAutomaticCandidate(_ candidates: [PETMRFusionCandidate])
+        -> (candidate: PETMRFusionCandidate, selectionNote: String?)? {
+        guard !candidates.isEmpty else { return nil }
+
+        let adjustedBest = candidates.max { lhs, rhs in
+            let lhsScore = petMRAutomaticCandidateScore(lhs)
+            let rhsScore = petMRAutomaticCandidateScore(rhs)
+            if abs(lhsScore - rhsScore) > 0.01 {
+                return lhsScore < rhsScore
+            }
+            let lhsRaw = petMRFusionCandidateScore(lhs.quality)
+            let rhsRaw = petMRFusionCandidateScore(rhs.quality)
+            if abs(lhsRaw - rhsRaw) > 0.01 {
+                return lhsRaw < rhsRaw
+            }
+            let lhsCentroid = lhs.quality.centroidResidualMM ?? .greatestFiniteMagnitude
+            let rhsCentroid = rhs.quality.centroidResidualMM ?? .greatestFiniteMagnitude
+            if abs(lhsCentroid - rhsCentroid) > 1 {
+                return lhsCentroid > rhsCentroid
+            }
+            return petMRAutomaticComplexityPenalty(lhs) > petMRAutomaticComplexityPenalty(rhs)
+        }
+
+        guard let best = adjustedBest else { return nil }
+        guard let geometry = candidates.first(where: isScannerGeometryPETMRCandidate) else {
+            return (best, nil)
+        }
+        guard !isScannerGeometryPETMRCandidate(best) else {
+            return (best, "Scanner/world geometry retained as the lowest-complexity passing fit.")
+        }
+        if petMRAutomaticMateriallyImproves(best, over: geometry) {
+            return (best, nil)
+        }
+        return (
+            geometry,
+            "Scanner/world geometry retained because higher-complexity candidates did not materially improve masked MI and PET/MR centroid QA."
+        )
+    }
+
+    private func evaluatePETMRFusionCandidateInputs(_ inputs: [PETMRFusionCandidateInput],
+                                                    fixed mr: ImageVolume) async -> [PETMRFusionCandidate] {
+        var candidates: [PETMRFusionCandidate] = []
+        candidates.reserveCapacity(inputs.count * 2)
+        for input in inputs {
+            let quality = RegistrationQualityAssurance.evaluate(
+                fixed: mr,
+                movingOnFixedGrid: input.volume,
+                label: input.label
+            )
+            candidates.append(PETMRFusionCandidate(
+                volume: input.volume,
+                note: input.note,
+                deformationQuality: input.deformationQuality,
+                quality: quality,
+                allowBrainFitInside: input.allowBrainFitInside,
+                label: input.label
+            ))
+
+            if let polish = PETMRRegistrationEngine.postResampleSegmentationPolish(movingOnFixedGrid: input.volume,
+                                                                                   fixed: mr) {
+                let polished = await Task.detached(priority: .userInitiated) {
+                    VolumeResampler.resample(source: input.volume,
+                                             target: mr,
+                                             transform: polish.sourceToDisplay.inverse,
+                                             mode: .linear)
+                }.value
+                let polishedLabel = "\(input.label) + segmentation polish"
+                let polishedQuality = RegistrationQualityAssurance.evaluate(
+                    fixed: mr,
+                    movingOnFixedGrid: polished,
+                    label: polishedLabel
+                )
+                candidates.append(PETMRFusionCandidate(
+                    volume: polished,
+                    note: "\(input.note). \(polish.note)",
+                    deformationQuality: input.deformationQuality,
+                    quality: polishedQuality,
+                    allowBrainFitInside: true,
+                    label: polishedLabel
+                ))
+            }
+
+            if let correction = PETMRRegistrationEngine.postResampleVisualFit(movingOnFixedGrid: input.volume,
+                                                                              fixed: mr) {
+                let corrected = await Task.detached(priority: .userInitiated) {
+                    VolumeResampler.resample(source: input.volume,
+                                             target: mr,
+                                             transform: correction.sourceToDisplay.inverse,
+                                             mode: .linear)
+                }.value
+                let correctedLabel = "\(input.label) + visual fit"
+                let correctedQuality = RegistrationQualityAssurance.evaluate(
+                    fixed: mr,
+                    movingOnFixedGrid: corrected,
+                    label: correctedLabel
+                )
+                candidates.append(PETMRFusionCandidate(
+                    volume: corrected,
+                    note: "\(input.note). \(correction.note)",
+                    deformationQuality: input.deformationQuality,
+                    quality: correctedQuality,
+                    allowBrainFitInside: true,
+                    label: correctedLabel
+                ))
+
+                if let polish = PETMRRegistrationEngine.postResampleSegmentationPolish(movingOnFixedGrid: corrected,
+                                                                                       fixed: mr) {
+                    let polished = await Task.detached(priority: .userInitiated) {
+                        VolumeResampler.resample(source: corrected,
+                                                 target: mr,
+                                                 transform: polish.sourceToDisplay.inverse,
+                                                 mode: .linear)
+                    }.value
+                    let polishedLabel = "\(correctedLabel) + segmentation polish"
+                    let polishedQuality = RegistrationQualityAssurance.evaluate(
+                        fixed: mr,
+                        movingOnFixedGrid: polished,
+                        label: polishedLabel
+                    )
+                    candidates.append(PETMRFusionCandidate(
+                        volume: polished,
+                        note: "\(input.note). \(correction.note). \(polish.note)",
+                        deformationQuality: input.deformationQuality,
+                        quality: polishedQuality,
+                        allowBrainFitInside: true,
+                        label: polishedLabel
+                    ))
+                }
+            }
+        }
+        return candidates
+    }
+
+    private func automaticPETMRExternalConfigurations() -> [PETMRDeformableRegistrationConfiguration] {
+        var configs: [PETMRDeformableRegistrationConfiguration] = []
+        let selectedSimpleITK = petMRDeformableRegistration.backend == .simpleITKMI
+        var simpleITK = PETMRDeformableRegistrationConfiguration(
+            backend: .simpleITKMI,
+            executablePath: selectedSimpleITK ? petMRDeformableRegistration.executablePath : "",
+            timeoutSeconds: min(max(petMRDeformableRegistration.timeoutSeconds, 120), 300),
+            metricPreset: selectedSimpleITK ? petMRDeformableRegistration.metricPreset : .multimodalMI
+        )
+        let selectedExtraArguments = petMRDeformableRegistration.extraArguments
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        simpleITK.extraArguments = selectedSimpleITK && !selectedExtraArguments.isEmpty
+            ? selectedExtraArguments
+            : "--sampling 0.05 --iterations 120 --bins 64"
+        if simpleITK.isExternalConfigured {
+            configs.append(simpleITK)
+        }
+        if petMRDeformableRegistration.isExternalConfigured,
+           petMRDeformableRegistration.backend != .simpleITKMI {
+            configs.append(petMRDeformableRegistration)
+        }
+        return configs
+    }
+
+    private func topPETMRFusionCandidates(_ candidates: [PETMRFusionCandidate],
+                                          limit: Int) -> [PETMRFusionCandidate] {
+        Array(candidates.sorted {
+            let lhs = petMRFusionCandidateScore($0.quality)
+            let rhs = petMRFusionCandidateScore($1.quality)
+            if abs(lhs - rhs) > 0.01 { return lhs > rhs }
+            return ($0.quality.centroidResidualMM ?? .greatestFiniteMagnitude) <
+                ($1.quality.centroidResidualMM ?? .greatestFiniteMagnitude)
+        }.prefix(limit))
+    }
+
+    private func concisePETMRAutoNote(best: PETMRFusionCandidate,
+                                      candidateCount: Int,
+                                      failedEngines: [String],
+                                      selectionNote: String?) -> String {
+        var note = String(format: "Auto PET/MR selected %@ from %d candidates (score %.2f).",
+                          best.label,
+                          candidateCount,
+                          petMRFusionCandidateScore(best.quality))
+        if let selectionNote {
+            note += " \(selectionNote)"
+        }
+        if !failedEngines.isEmpty {
+            note += " Skipped/failed: \(failedEngines.joined(separator: "; "))."
+        }
+        if best.note.localizedCaseInsensitiveContains("SimpleITK") {
+            note += " SimpleITK contributed to the selected fit."
+        } else if best.note.localizedCaseInsensitiveContains("segmentation polish") {
+            note += " Local segmentation polish contributed to the selected fit."
+        } else if best.note.localizedCaseInsensitiveContains("brain uptake fit") {
+            note += " Brain uptake visual fit contributed to the selected fit."
+        }
+        return note
+    }
+
     public func fusePETMR(base: ImageVolume, overlay: ImageVolume) async {
         isLoading = true
         statusMessage = "Fusing PET/MR..."
@@ -3096,6 +3435,10 @@ public final class ViewerViewModel: ObservableObject {
         }
 
         let mode = petMRRegistrationMode
+        if mode == .automaticBestFit {
+            await fusePETMRAutomatic(mr: mr, pet: pet)
+            return
+        }
         let alreadyAligned = hasMatchingGrid(mr, pet)
         let useGeometryOnly = alreadyAligned && mode == .geometry
         let externalDeformableConfigured = mode == .rigidThenDeformable && petMRDeformableRegistration.isExternalConfigured
@@ -3122,6 +3465,8 @@ public final class ViewerViewModel: ObservableObject {
         var registrationNote = registration.note
         var qualityBefore: RegistrationQualitySnapshot?
         var deformationQuality: DeformationFieldQuality?
+        var selectedQuality: RegistrationQualitySnapshot?
+        var candidateInputs: [PETMRFusionCandidateInput] = []
         if useGeometryOnly {
             resampled = nil
             qualityBefore = RegistrationQualityAssurance.evaluate(
@@ -3141,6 +3486,13 @@ public final class ViewerViewModel: ObservableObject {
                 movingOnFixedGrid: prealigned,
                 label: "Rigid prealignment"
             )
+            candidateInputs.append(PETMRFusionCandidateInput(
+                volume: prealigned,
+                note: "\(registration.note). Rigid prealignment retained as QA fallback.",
+                deformationQuality: nil,
+                label: "Rigid prealignment",
+                allowBrainFitInside: false
+            ))
             do {
                 statusMessage = "Running \(petMRDeformableRegistration.backend.displayName) PET/MR deformable registration..."
                 let deformable = try await PETMRDeformableRegistrationRunner.register(
@@ -3151,6 +3503,13 @@ public final class ViewerViewModel: ObservableObject {
                 resampled = deformable.warpedMoving
                 deformationQuality = deformable.deformationQuality
                 registrationNote = "\(registration.note). \(deformable.note)"
+                candidateInputs.append(PETMRFusionCandidateInput(
+                    volume: deformable.warpedMoving,
+                    note: registrationNote,
+                    deformationQuality: deformable.deformationQuality,
+                    label: "\(petMRDeformableRegistration.backend.displayName) result",
+                    allowBrainFitInside: false
+                ))
             } catch {
                 resampled = prealigned
                 registrationNote = "\(registration.note). External deformable registration failed; using rigid prealignment. \(error.localizedDescription)"
@@ -3170,6 +3529,15 @@ public final class ViewerViewModel: ObservableObject {
                 )
             }
             registrationNote = "\(registration.note). Configure ANTs/SynthMorph/VoxelMorph for dense deformable refinement."
+            if let resampled {
+                candidateInputs.append(PETMRFusionCandidateInput(
+                    volume: resampled,
+                    note: registrationNote,
+                    deformationQuality: nil,
+                    label: "Pixel-matched body warp",
+                    allowBrainFitInside: false
+                ))
+            }
         } else {
             resampled = await Task.detached(priority: .userInitiated) {
                 VolumeResampler.resample(source: pet,
@@ -3184,12 +3552,47 @@ public final class ViewerViewModel: ObservableObject {
                     label: registrationModeForInitializer.displayName
                 )
             }
+            if let resampled {
+                candidateInputs.append(PETMRFusionCandidateInput(
+                    volume: resampled,
+                    note: registrationNote,
+                    deformationQuality: nil,
+                    label: registrationModeForInitializer.displayName,
+                    allowBrainFitInside: false
+                ))
+            }
+        }
+
+        if candidateInputs.isEmpty, let resampled {
+            candidateInputs.append(PETMRFusionCandidateInput(
+                volume: resampled,
+                note: registrationNote,
+                deformationQuality: deformationQuality,
+                label: "Fusion result",
+                allowBrainFitInside: false
+            ))
+        }
+
+        if !candidateInputs.isEmpty {
+            let candidates = await evaluatePETMRFusionCandidateInputs(candidateInputs, fixed: mr)
+
+            if let best = bestPETMRFusionCandidate(candidates) {
+                resampled = best.volume
+                registrationNote = best.note
+                deformationQuality = best.deformationQuality
+                selectedQuality = best.quality
+                if candidates.count > 1 {
+                    registrationNote += String(format: ". QA selected %@ (score %.2f)",
+                                               best.label,
+                                               petMRFusionCandidateScore(best.quality))
+                }
+            }
         }
 
         let pair = configureFusion(base: mr, overlay: pet, resampledOverlay: resampled)
         pair.registrationNote = registrationNote
         let qaMoving = resampled ?? pet
-        let qualityAfter = RegistrationQualityAssurance.evaluate(
+        let qualityAfter = selectedQuality ?? RegistrationQualityAssurance.evaluate(
             fixed: mr,
             movingOnFixedGrid: qaMoving,
             label: "Fusion result"
@@ -3197,12 +3600,112 @@ public final class ViewerViewModel: ObservableObject {
         pair.registrationQuality = RegistrationQualityAssurance.compare(
             before: qualityBefore ?? qualityAfter,
             after: qualityAfter,
-            deformation: deformationQuality
+            deformation: deformationQuality,
+            allowBrainPETMRFitInside: registrationNote.localizedCaseInsensitiveContains("brain uptake fit")
         )
         pair.objectWillChange.send()
         applyHangingProtocol(grid: .threeByTwo, panes: HangingPaneConfiguration.defaultPETMR)
         let qaLabel = pair.registrationQuality?.grade.displayName ?? RegistrationQualityGrade.unknown.displayName
         statusMessage = "PET/MR fused: \(registrationNote). QA \(qaLabel)"
+    }
+
+    private func fusePETMRAutomatic(mr: ImageVolume, pet: ImageVolume) async {
+        statusMessage = "Auto-registering PET/MR: testing geometry, rigid, body-fit, visual-fit, and segmentation-polish candidates..."
+        var inputs: [PETMRFusionCandidateInput] = []
+
+        let geometryVolume = hasMatchingGrid(mr, pet)
+            ? pet
+            : await Task.detached(priority: .userInitiated) {
+                VolumeResampler.resample(overlay: pet, toMatch: mr, mode: .linear)
+            }.value
+        let geometryQuality = RegistrationQualityAssurance.evaluate(
+            fixed: mr,
+            movingOnFixedGrid: geometryVolume,
+            label: "Scanner geometry"
+        )
+        inputs.append(PETMRFusionCandidateInput(
+            volume: geometryVolume,
+            note: "Scanner/world geometry PET/MR candidate.",
+            deformationQuality: nil,
+            label: "Scanner geometry",
+            allowBrainFitInside: false
+        ))
+
+        for candidateMode in [PETMRRegistrationMode.rigidAnatomical, .rigidThenDeformable] {
+            statusMessage = "Auto-registering PET/MR: testing \(candidateMode.displayName)..."
+            let registration = await Task.detached(priority: .userInitiated) {
+                PETMRRegistrationEngine.estimatePETToMR(
+                    pet: pet,
+                    mr: mr,
+                    mode: candidateMode
+                )
+            }.value
+            let resampled = await Task.detached(priority: .userInitiated) {
+                VolumeResampler.resample(source: pet,
+                                         target: mr,
+                                         transform: registration.fixedToMoving,
+                                         mode: .linear)
+            }.value
+            inputs.append(PETMRFusionCandidateInput(
+                volume: resampled,
+                note: registration.note,
+                deformationQuality: nil,
+                label: candidateMode.displayName,
+                allowBrainFitInside: false
+            ))
+        }
+
+        var candidates = await evaluatePETMRFusionCandidateInputs(inputs, fixed: mr)
+        var failedEngines: [String] = []
+        let externalConfigs = automaticPETMRExternalConfigurations()
+        if !externalConfigs.isEmpty {
+            let seeds = topPETMRFusionCandidates(candidates, limit: 3)
+            for config in externalConfigs {
+                for seed in seeds {
+                    statusMessage = "Auto-registering PET/MR: refining \(seed.label) with \(config.backend.displayName)..."
+                    do {
+                        let deformable = try await PETMRDeformableRegistrationRunner.register(
+                            fixed: mr,
+                            movingPrealigned: seed.volume,
+                            configuration: config
+                        )
+                        let externalInputs = [PETMRFusionCandidateInput(
+                            volume: deformable.warpedMoving,
+                            note: "\(seed.note). \(config.backend.displayName) refined \(seed.label). \(deformable.note)",
+                            deformationQuality: deformable.deformationQuality,
+                            label: "\(config.backend.displayName) on \(seed.label)",
+                            allowBrainFitInside: seed.allowBrainFitInside
+                        )]
+                        candidates += await evaluatePETMRFusionCandidateInputs(externalInputs, fixed: mr)
+                    } catch {
+                        failedEngines.append("\(config.backend.displayName) on \(seed.label): \(error.localizedDescription)")
+                    }
+                }
+            }
+        }
+
+        guard let selection = bestPETMRAutomaticCandidate(candidates) else {
+            configureFusion(base: mr, overlay: pet, resampledOverlay: nil)
+            statusMessage = "PET/MR auto registration failed: no candidate could be scored"
+            return
+        }
+        let best = selection.candidate
+
+        let pair = configureFusion(base: mr, overlay: pet, resampledOverlay: best.volume)
+        pair.registrationNote = concisePETMRAutoNote(best: best,
+                                                     candidateCount: candidates.count,
+                                                     failedEngines: failedEngines,
+                                                     selectionNote: selection.selectionNote)
+        pair.registrationQuality = RegistrationQualityAssurance.compare(
+            before: geometryQuality,
+            after: best.quality,
+            deformation: best.deformationQuality,
+            allowBrainPETMRFitInside: best.allowBrainFitInside
+        )
+        pair.objectWillChange.send()
+        applyHangingProtocol(grid: .threeByTwo, panes: HangingPaneConfiguration.defaultPETMR)
+        let qaLabel = pair.registrationQuality?.grade.displayName ?? RegistrationQualityGrade.unknown.displayName
+        statusMessage = "PET/MR auto registration selected \(best.label). QA \(qaLabel)"
     }
 
     private func openIndexedDICOMSeries(_ entry: PACSIndexedSeriesSnapshot,

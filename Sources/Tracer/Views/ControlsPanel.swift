@@ -369,6 +369,7 @@ private struct FusionTab: View {
     @State private var selectedCTID: UUID?
     @State private var selectedMRID: UUID?
     @State private var selectedPETID: UUID?
+    @State private var showAdvancedPETMRRegistration = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -562,7 +563,7 @@ private struct FusionTab: View {
                 qaMetric("NMI Δ", value: signedMetric(quality.nmiDelta, digits: 3))
                 qaMetric("Overlap Δ", value: signedMetric(quality.diceDelta, digits: 2))
                 qaMetric("Centroid", value: mmMetric(quality.after.centroidResidualMM))
-                qaMetric("Samples", value: "\(quality.after.sampleCount)")
+                qaMetric("Edge", value: quality.after.edgeAlignment.map { String(format: "%.2f", $0) } ?? "n/a")
             }
 
             if let deformation = quality.deformation {
@@ -949,14 +950,27 @@ private struct FusionTab: View {
                 }
                 .help(vm.petMRRegistrationMode.helpText)
 
-                petMRDeformablePanel
+                if vm.petMRRegistrationMode == .automaticBestFit {
+                    Text("Auto starts with scanner geometry, tests rigid/body-fit/brain visual-fit, adds local segmentation polish, then keeps the lowest-complexity fit unless QA improves materially.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    DisclosureGroup("Advanced registration engines", isExpanded: $showAdvancedPETMRRegistration) {
+                        petMRDeformablePanel
+                            .padding(.top, 6)
+                    }
+                    .font(.system(size: 11, weight: .semibold))
+                } else {
+                    petMRDeformablePanel
+                }
 
                 Button {
                     guard let mr = selectedMRVolume,
                           let pet = selectedPETVolume else { return }
                     Task { await vm.fusePETMR(base: mr, overlay: pet) }
                 } label: {
-                    Label("Fuse Selected PET/MR", systemImage: "brain.head.profile")
+                    Label(vm.petMRRegistrationMode == .automaticBestFit ? "Auto Register PET/MR" : "Fuse Selected PET/MR",
+                          systemImage: "brain.head.profile")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -999,9 +1013,11 @@ private struct FusionTab: View {
                 TextField("Executable / wrapper", text: deformableExecutableBinding)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 11, design: .monospaced))
-                    .help("Absolute path, or a command name available on PATH. ANTs defaults to antsRegistration.")
+                    .help("Absolute path, or a command name available on PATH. SimpleITK defaults to python3; ANTs defaults to antsRegistration.")
 
-                if vm.petMRDeformableRegistration.backend != .antsSyN {
+                if vm.petMRDeformableRegistration.backend == .synthMorph ||
+                    vm.petMRDeformableRegistration.backend == .voxelMorph ||
+                    vm.petMRDeformableRegistration.backend == .customScript {
                     TextField("Model path", text: deformableModelBinding)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(size: 11, design: .monospaced))

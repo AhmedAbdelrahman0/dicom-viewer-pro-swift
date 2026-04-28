@@ -1,7 +1,9 @@
 import Foundation
+import simd
 
 public enum PETMRDeformableBackend: String, CaseIterable, Identifiable, Codable, Sendable {
     case internalBodyEnvelope
+    case simpleITKMI
     case antsSyN
     case synthMorph
     case voxelMorph
@@ -12,6 +14,7 @@ public enum PETMRDeformableBackend: String, CaseIterable, Identifiable, Codable,
     public var displayName: String {
         switch self {
         case .internalBodyEnvelope: return "Internal body warp"
+        case .simpleITKMI: return "SimpleITK MI"
         case .antsSyN: return "ANTs SyN"
         case .synthMorph: return "SynthMorph"
         case .voxelMorph: return "VoxelMorph"
@@ -26,6 +29,7 @@ public enum PETMRDeformableBackend: String, CaseIterable, Identifiable, Codable,
     public var defaultExecutableName: String {
         switch self {
         case .internalBodyEnvelope: return ""
+        case .simpleITKMI: return "python3"
         case .antsSyN: return "antsRegistration"
         case .synthMorph: return "mri_synthmorph"
         case .voxelMorph: return "python3"
@@ -37,6 +41,8 @@ public enum PETMRDeformableBackend: String, CaseIterable, Identifiable, Codable,
         switch self {
         case .internalBodyEnvelope:
             return "Uses Tracer's built-in body-envelope alignment. No external tools required."
+        case .simpleITKMI:
+            return "Runs a local Python SimpleITK Mattes mutual-information rigid precision-polish after PET has been prealigned to the MR grid. Add --allow-scale in extra args only when scale is intentional."
         case .antsSyN:
             return "Runs antsRegistration with rigid/affine/SyN stages and reads the warped PET NIfTI output."
         case .synthMorph:
@@ -84,7 +90,7 @@ public struct PETMRDeformableRegistrationConfiguration: Equatable, Sendable {
     public var timeoutSeconds: Double
     public var metricPreset: PETMRRegistrationMetricPreset
 
-    public init(backend: PETMRDeformableBackend = .internalBodyEnvelope,
+    public init(backend: PETMRDeformableBackend = .simpleITKMI,
                 executablePath: String = "",
                 modelPath: String = "",
                 extraArguments: String = "",
@@ -118,6 +124,9 @@ public struct PETMRDeformableRegistrationConfiguration: Equatable, Sendable {
         }
         if exe.contains("/") && !FileManager.default.isExecutableFile(atPath: exe) {
             return "\(backend.displayName) executable is not runnable: \(exe)"
+        }
+        if backend == .simpleITKMI {
+            return "SimpleITK MI will run via \(exe). Requires the Python SimpleITK package."
         }
         return "\(backend.displayName) will run via \(exe)."
     }
@@ -181,21 +190,24 @@ public enum PETMRDeformableRegistrationRunner {
         try fm.createDirectory(at: workDir, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: workDir) }
 
+        let stage = externalRegistrationStage(fixed: fixed, movingPrealigned: movingPrealigned)
+
         let fixedURL = workDir.appendingPathComponent("fixed_mr.nii")
         let movingURL = workDir.appendingPathComponent("moving_pet_prealigned.nii")
         let warpedURL = workDir.appendingPathComponent("warped_pet.nii")
-        let transformURL = workDir.appendingPathComponent("deformable_transform.nii")
+        let transformURL = workDir.appendingPathComponent("deformable_transform.tfm")
         let qaURL = workDir.appendingPathComponent("registration_qa.json")
 
-        try NIfTIWriter.writeFloat32(fixed, to: fixedURL)
-        try NIfTIWriter.writeFloat32(movingPrealigned, to: movingURL)
+        try NIfTIWriter.writeFloat32(stage.fixedForExternal, to: fixedURL)
+        try NIfTIWriter.writeFloat32(stage.movingForExternal, to: movingURL)
 
-        let command = commandLine(configuration: configuration,
-                                  fixedURL: fixedURL,
-                                  movingURL: movingURL,
-                                  warpedURL: warpedURL,
-                                  transformURL: transformURL,
-                                  workDir: workDir)
+        let command = try commandLine(configuration: configuration,
+                                      fixedURL: fixedURL,
+                                      movingURL: movingURL,
+                                      warpedURL: warpedURL,
+                                      transformURL: transformURL,
+                                      qaURL: qaURL,
+                                      workDir: workDir)
         let output = try await run(command: command,
                                    workDir: workDir,
                                    timeoutSeconds: configuration.timeoutSeconds)
@@ -212,9 +224,16 @@ public enum PETMRDeformableRegistrationRunner {
         }
         let warpedOnFixedGrid: ImageVolume
         let gridNote: String
-        if ImageVolumeGeometry.gridsMatch(fixed, warped) {
-            warpedOnFixedGrid = warped
-            gridNote = ""
+        if ImageVolumeGeometry.gridsMatch(stage.fixedForExternal, warped) {
+            if let finalTarget = stage.finalTarget {
+                warpedOnFixedGrid = VolumeResampler.resample(overlay: warped,
+                                                             toMatch: finalTarget,
+                                                             mode: .linear)
+                gridNote = "; used orthonormal external staging and resampled output back to MR geometry"
+            } else {
+                warpedOnFixedGrid = warped
+                gridNote = ""
+            }
         } else {
             warpedOnFixedGrid = VolumeResampler.resample(overlay: warped, toMatch: fixed, mode: .linear)
             gridNote = "; output grid was resampled to fixed MR geometry"
@@ -232,6 +251,101 @@ public enum PETMRDeformableRegistrationRunner {
         )
     }
 
+    private struct ExternalRegistrationStage {
+        let fixedForExternal: ImageVolume
+        let movingForExternal: ImageVolume
+        let finalTarget: ImageVolume?
+    }
+
+    private static func externalRegistrationStage(fixed: ImageVolume,
+                                                  movingPrealigned: ImageVolume) -> ExternalRegistrationStage {
+        guard let externalGrid = orthonormalRegistrationGrid(for: fixed) else {
+            return ExternalRegistrationStage(
+                fixedForExternal: fixed,
+                movingForExternal: movingPrealigned,
+                finalTarget: nil
+            )
+        }
+
+        let fixedForExternal = VolumeResampler.resample(source: fixed,
+                                                        target: externalGrid,
+                                                        mode: .linear)
+        let movingForExternal = VolumeResampler.resample(source: movingPrealigned,
+                                                         target: externalGrid,
+                                                         mode: .linear)
+        return ExternalRegistrationStage(
+            fixedForExternal: fixedForExternal,
+            movingForExternal: movingForExternal,
+            finalTarget: fixed
+        )
+    }
+
+    private static func orthonormalRegistrationGrid(for fixed: ImageVolume) -> ImageVolume? {
+        guard !directionIsOrthonormal(fixed.direction) else { return nil }
+        let direction = orthonormalizedDirection(fixed.direction)
+        return ImageVolume(
+            pixels: [Float](repeating: 0, count: fixed.width * fixed.height * fixed.depth),
+            depth: fixed.depth,
+            height: fixed.height,
+            width: fixed.width,
+            spacing: (fixed.spacing.x, fixed.spacing.y, fixed.spacing.z),
+            origin: fixed.origin,
+            direction: direction,
+            modality: fixed.modality,
+            seriesUID: fixed.seriesUID + "_external_orthonormal_grid",
+            studyUID: fixed.studyUID,
+            patientID: fixed.patientID,
+            patientName: fixed.patientName,
+            seriesDescription: fixed.seriesDescription + " (external orthonormal grid)",
+            studyDescription: fixed.studyDescription,
+            suvScaleFactor: fixed.suvScaleFactor,
+            sourceFiles: fixed.sourceFiles
+        )
+    }
+
+    private static func directionIsOrthonormal(_ direction: simd_double3x3,
+                                               tolerance: Double = 1e-4) -> Bool {
+        let columns = [direction[0], direction[1], direction[2]]
+        for column in columns where abs(simd_length(column) - 1) > tolerance {
+            return false
+        }
+        for lhs in 0..<3 {
+            for rhs in (lhs + 1)..<3 where abs(simd_dot(columns[lhs], columns[rhs])) > tolerance {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func orthonormalizedDirection(_ direction: simd_double3x3) -> simd_double3x3 {
+        let x = normalized(direction[0], fallback: SIMD3<Double>(1, 0, 0))
+        var y = direction[1] - x * simd_dot(direction[1], x)
+        y = normalized(y, fallback: orthogonalFallback(to: x))
+        var z = simd_cross(x, y)
+        z = normalized(z, fallback: direction[2])
+        if simd_dot(z, direction[2]) < 0 {
+            z = -z
+        }
+        y = simd_cross(z, x)
+        if simd_dot(y, direction[1]) < 0 {
+            y = -y
+            z = -z
+        }
+        return simd_double3x3(x, y, z)
+    }
+
+    private static func orthogonalFallback(to x: SIMD3<Double>) -> SIMD3<Double> {
+        let candidate = abs(x.x) < 0.8 ? SIMD3<Double>(1, 0, 0) : SIMD3<Double>(0, 1, 0)
+        return normalized(candidate - x * simd_dot(candidate, x), fallback: SIMD3<Double>(0, 1, 0))
+    }
+
+    private static func normalized(_ vector: SIMD3<Double>,
+                                   fallback: SIMD3<Double>) -> SIMD3<Double> {
+        let length = simd_length(vector)
+        guard length.isFinite, length > 1e-12 else { return fallback }
+        return vector / length
+    }
+
     private struct CommandLine {
         var executable: String
         var arguments: [String]
@@ -243,7 +357,8 @@ public enum PETMRDeformableRegistrationRunner {
                                     movingURL: URL,
                                     warpedURL: URL,
                                     transformURL: URL,
-                                    workDir: URL) -> CommandLine {
+                                    qaURL: URL,
+                                    workDir: URL) throws -> CommandLine {
         let exe = configuration.resolvedExecutable
         let fixed = fixedURL.path
         let moving = movingURL.path
@@ -252,6 +367,26 @@ public enum PETMRDeformableRegistrationRunner {
         let extra = shellLikeSplit(configuration.extraArguments)
 
         switch configuration.backend {
+        case .simpleITKMI:
+            let scriptURL = workDir.appendingPathComponent("simpleitk_petmr_registration.py")
+            try simpleITKRegistrationScript.write(to: scriptURL, atomically: true, encoding: .utf8)
+            var environment = ResourcePolicy.load().applyingSubprocessDefaults(to: ProcessInfo.processInfo.environment)
+            environment["ITK_NIFTI_SFORM_PERMISSIVE"] = "1"
+            environment["PYTHONUNBUFFERED"] = "1"
+            return CommandLine(
+                executable: exe,
+                arguments: [
+                    scriptURL.path,
+                    "--fixed", fixed,
+                    "--moving", moving,
+                    "--output", warped,
+                    "--transform", transform,
+                    "--qa", qaURL.path,
+                    "--metric", configuration.metricPreset.rawValue
+                ] + extra,
+                environment: environment
+            )
+
         case .antsSyN:
             let prefix = workDir.appendingPathComponent("ants_").path
             let synMetric = antsSyNMetricArguments(configuration.metricPreset, fixed: fixed, moving: moving)
@@ -320,6 +455,173 @@ public enum PETMRDeformableRegistrationRunner {
             ]
         }
     }
+
+    private static let simpleITKRegistrationScript = #"""
+import argparse
+import json
+import os
+import sys
+import time
+
+import numpy as np
+import SimpleITK as sitk
+
+
+def robust_normalize(image, positive_only=False):
+    arr = sitk.GetArrayViewFromImage(image)
+    values = arr[np.isfinite(arr)]
+    if positive_only:
+        values = values[values > 0]
+    if values.size < 32:
+        values = arr[np.isfinite(arr)]
+    if values.size == 0:
+        return sitk.RescaleIntensity(image, 0, 1)
+    lo = float(np.percentile(values, 0.5))
+    hi = float(np.percentile(values, 99.5))
+    if not np.isfinite(lo):
+        lo = float(np.nanmin(values))
+    if not np.isfinite(hi) or hi <= lo:
+        hi = float(np.nanmax(values))
+    if hi <= lo:
+        hi = lo + 1.0
+    return sitk.RescaleIntensity(sitk.Clamp(image, lowerBound=lo, upperBound=hi), 0, 1)
+
+
+def registration_mask_or_none(image, threshold=0.035):
+    mask = sitk.BinaryThreshold(image, lowerThreshold=threshold, upperThreshold=1.0, insideValue=1, outsideValue=0)
+    mask = sitk.Cast(mask, sitk.sitkUInt8)
+    voxels = int(np.count_nonzero(sitk.GetArrayViewFromImage(mask)))
+    minimum = max(128, int(np.prod(image.GetSize()) * 0.0005))
+    return mask if voxels >= minimum else None
+
+
+def configured_registration(args, initial, fixed_mask, moving_mask, sampling, seed):
+    registration = sitk.ImageRegistrationMethod()
+    if args.metric == "sameContrastCC":
+        registration.SetMetricAsCorrelation()
+    else:
+        registration.SetMetricAsMattesMutualInformation(numberOfHistogramBins=max(16, args.bins))
+    registration.SetMetricSamplingStrategy(registration.RANDOM)
+    registration.SetMetricSamplingPercentage(max(0.005, min(0.60, sampling)), seed=seed)
+    if fixed_mask is not None:
+        registration.SetMetricFixedMask(fixed_mask)
+    if moving_mask is not None:
+        registration.SetMetricMovingMask(moving_mask)
+    registration.SetInterpolator(sitk.sitkLinear)
+    registration.SetOptimizerAsGradientDescentLineSearch(
+        learningRate=1.0,
+        numberOfIterations=max(10, args.iterations),
+        convergenceMinimumValue=1e-5,
+        convergenceWindowSize=10,
+    )
+    registration.SetOptimizerScalesFromPhysicalShift()
+    registration.SetShrinkFactorsPerLevel([6, 3, 1])
+    registration.SetSmoothingSigmasPerLevel([3, 1, 0])
+    registration.SmoothingSigmasAreSpecifiedInPhysicalUnitsOn()
+    registration.SetInitialTransform(initial, inPlace=False)
+    return registration
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Tracer PET/MR SimpleITK registration worker")
+    parser.add_argument("--fixed", required=True)
+    parser.add_argument("--moving", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--transform", required=True)
+    parser.add_argument("--qa", required=True)
+    parser.add_argument("--metric", default="multimodalMI")
+    parser.add_argument("--sampling", type=float, default=0.03)
+    parser.add_argument("--iterations", type=int, default=80)
+    parser.add_argument("--bins", type=int, default=48)
+    parser.add_argument("--seed", type=int, default=13)
+    parser.add_argument("--allow-scale", action="store_true")
+    args, _ = parser.parse_known_args()
+
+    os.environ.setdefault("ITK_NIFTI_SFORM_PERMISSIVE", "1")
+    start = time.time()
+    fixed = sitk.ReadImage(args.fixed, sitk.sitkFloat32)
+    moving = sitk.ReadImage(args.moving, sitk.sitkFloat32)
+    fixed_metric = robust_normalize(fixed, positive_only=True)
+    moving_metric = robust_normalize(moving, positive_only=True)
+
+    transform_type = sitk.Similarity3DTransform() if args.allow_scale else sitk.Euler3DTransform()
+    initial = sitk.CenteredTransformInitializer(
+        fixed_metric,
+        moving_metric,
+        transform_type,
+        sitk.CenteredTransformInitializerFilter.GEOMETRY,
+    )
+
+    fixed_mask = registration_mask_or_none(fixed_metric)
+    moving_mask = registration_mask_or_none(moving_metric)
+    attempts = [
+        ("fixed-mask", fixed_mask, None, max(args.sampling, 0.08)),
+        ("unmasked-broad", None, None, max(args.sampling, 0.18)),
+        ("fixed+moving-mask", fixed_mask, moving_mask, max(args.sampling, 0.12)),
+    ]
+    warnings = []
+    registration = None
+    final_transform = None
+    winning_attempt = None
+    for attempt_index, (name, attempt_fixed_mask, attempt_moving_mask, sampling) in enumerate(attempts):
+        if attempt_fixed_mask is None and "fixed" in name:
+            warnings.append(name + " skipped: fixed mask was empty")
+            continue
+        if attempt_moving_mask is None and "moving" in name:
+            warnings.append(name + " skipped: moving mask was empty")
+            continue
+        registration = configured_registration(
+            args,
+            initial,
+            attempt_fixed_mask,
+            attempt_moving_mask,
+            sampling,
+            args.seed + attempt_index,
+        )
+        try:
+            final_transform = registration.Execute(fixed_metric, moving_metric)
+            winning_attempt = name
+            break
+        except Exception as exc:
+            message = name + " failed: " + str(exc)
+            warnings.append(message)
+            print("SimpleITK retry:", message, file=sys.stderr)
+    if final_transform is None or registration is None:
+        raise RuntimeError("all SimpleITK PET/MR registration attempts failed: " + " | ".join(warnings))
+    warped = sitk.Resample(moving, fixed, final_transform, sitk.sitkLinear, 0.0, sitk.sitkFloat32)
+    sitk.WriteImage(warped, args.output)
+    try:
+        sitk.WriteTransform(final_transform, args.transform)
+    except Exception as exc:
+        with open(args.transform, "w", encoding="utf-8") as handle:
+            handle.write(str(final_transform))
+            handle.write("\n")
+            handle.write(str(exc))
+
+    report = {
+        "notes": [
+            "SimpleITK rigid precision-polish",
+            "metric=" + args.metric,
+            "transform=" + ("Similarity3D" if args.allow_scale else "Euler3D"),
+            "maskAttempt=" + str(winning_attempt),
+            "optimizerIterations=" + str(registration.GetOptimizerIteration()),
+            "metricValue=" + str(registration.GetMetricValue()),
+            "durationSeconds=" + format(time.time() - start, ".3f"),
+        ] + warnings
+    }
+    with open(args.qa, "w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2)
+    print("SimpleITK PET/MR registration complete")
+    print("metric", registration.GetMetricValue(), "iterations", registration.GetOptimizerIteration())
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:
+        print("SimpleITK PET/MR registration failed:", exc, file=sys.stderr)
+        raise
+"""#
 
     private static func run(command: CommandLine,
                             workDir: URL,

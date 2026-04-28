@@ -2,6 +2,7 @@ import Foundation
 import simd
 
 public enum PETMRRegistrationMode: String, CaseIterable, Identifiable, Codable, Sendable {
+    case automaticBestFit
     case geometry
     case rigidAnatomical
     case rigidThenDeformable
@@ -10,6 +11,7 @@ public enum PETMRRegistrationMode: String, CaseIterable, Identifiable, Codable, 
 
     public var displayName: String {
         switch self {
+        case .automaticBestFit: return "Auto best fit"
         case .geometry: return "Geometry only"
         case .rigidAnatomical: return "Rigid rotation + pixel match"
         case .rigidThenDeformable: return "Similarity pixel fit + body warp"
@@ -18,6 +20,8 @@ public enum PETMRRegistrationMode: String, CaseIterable, Identifiable, Codable, 
 
     public var helpText: String {
         switch self {
+        case .automaticBestFit:
+            return "Use scanner geometry first, test rigid/body-fit/visual-fit, add local segmentation polish, and run available external engines such as SimpleITK, then only accept a more complex fit when PET/MR QA improves materially."
         case .geometry:
             return "Use scanner/world geometry only. Best for simultaneous PET/MR or already registered images."
         case .rigidAnatomical:
@@ -40,12 +44,22 @@ public struct PETMRRegistrationResult: Sendable {
     public let note: String
 }
 
+public struct PETMRVisualFitCorrection: Sendable {
+    public let sourceToDisplay: Transform3D
+    public let scale: Double
+    public let translationMM: SIMD3<Double>
+    public let note: String
+}
+
 public enum PETMRRegistrationEngine {
 
     public static func estimatePETToMR(pet: ImageVolume,
                                        mr: ImageVolume,
                                        mode: PETMRRegistrationMode) -> PETMRRegistrationResult {
         switch mode {
+        case .automaticBestFit:
+            return estimatePETToMR(pet: pet, mr: mr, mode: .rigidThenDeformable)
+
         case .geometry:
             return PETMRRegistrationResult(
                 movingToFixed: .identity,
@@ -162,9 +176,11 @@ public enum PETMRRegistrationEngine {
         let intensitySamples: [(world: SIMD3<Double>, value: Float)] = samples.map {
             (world: $0.world, value: $0.value)
         }
+        let movingMaskSamples = maskWorldSamples(for: moving)
         let fixedRange = finiteRange(intensitySamples.map { $0.value })
         let movingRange = moving.intensityRange
-        guard fixedRange.max > fixedRange.min,
+        guard movingMaskSamples.count >= 32,
+              fixedRange.max > fixedRange.min,
               movingRange.max > movingRange.min else {
             return SimilaritySearchResult(
                 transform: initialMovingToFixed,
@@ -189,8 +205,10 @@ public enum PETMRRegistrationEngine {
             scale: 1,
             score: registrationScore(
                 moving: moving,
+                fixed: fixed,
                 fixedSamples: samples,
                 fixedIntensitySamples: intensitySamples,
+                movingMaskSamples: movingMaskSamples,
                 fixedRange: fixedRange,
                 movingRange: movingRange,
                 movingToFixed: initialMovingToFixed
@@ -208,8 +226,10 @@ public enum PETMRRegistrationEngine {
                     for rz in coarseRZ {
                         evaluateSimilarityCandidate(
                             moving: moving,
+                            fixed: fixed,
                             fixedSamples: samples,
                             fixedIntensitySamples: intensitySamples,
+                            movingMaskSamples: movingMaskSamples,
                             fixedRange: fixedRange,
                             movingRange: movingRange,
                             movingCenter: movingCenter,
@@ -234,8 +254,10 @@ public enum PETMRRegistrationEngine {
                     for rz in fineRZ {
                         evaluateSimilarityCandidate(
                             moving: moving,
+                            fixed: fixed,
                             fixedSamples: samples,
                             fixedIntensitySamples: intensitySamples,
+                            movingMaskSamples: movingMaskSamples,
                             fixedRange: fixedRange,
                             movingRange: movingRange,
                             movingCenter: movingCenter,
@@ -260,8 +282,10 @@ public enum PETMRRegistrationEngine {
     }
 
     private static func evaluateSimilarityCandidate(moving: ImageVolume,
+                                                    fixed: ImageVolume,
                                                     fixedSamples: [RegistrationSample],
                                                     fixedIntensitySamples: [(world: SIMD3<Double>, value: Float)],
+                                                    movingMaskSamples: [SIMD3<Double>],
                                                     fixedRange: (min: Float, max: Float),
                                                     movingRange: (min: Float, max: Float),
                                                     movingCenter: SIMD3<Double>,
@@ -277,8 +301,10 @@ public enum PETMRRegistrationEngine {
         )
         let score = registrationScore(
             moving: moving,
+            fixed: fixed,
             fixedSamples: fixedSamples,
             fixedIntensitySamples: fixedIntensitySamples,
+            movingMaskSamples: movingMaskSamples,
             fixedRange: fixedRange,
             movingRange: movingRange,
             movingToFixed: candidate
@@ -329,8 +355,10 @@ public enum PETMRRegistrationEngine {
     }
 
     private static func registrationScore(moving: ImageVolume,
+                                          fixed: ImageVolume,
                                           fixedSamples: [RegistrationSample],
                                           fixedIntensitySamples: [(world: SIMD3<Double>, value: Float)],
+                                          movingMaskSamples: [SIMD3<Double>],
                                           fixedRange: (min: Float, max: Float),
                                           movingRange: (min: Float, max: Float),
                                           movingToFixed: Transform3D) -> Double {
@@ -338,6 +366,10 @@ public enum PETMRRegistrationEngine {
                                        fixedSamples: fixedSamples,
                                        movingToFixed: movingToFixed)
         guard overlap.isFinite else { return -.infinity }
+        let containment = movingContainmentScore(movingMaskSamples: movingMaskSamples,
+                                                fixed: fixed,
+                                                movingToFixed: movingToFixed)
+        guard containment.isFinite else { return -.infinity }
         let nmi = mutualInformationScore(
             moving: moving,
             fixedSamples: fixedIntensitySamples,
@@ -346,7 +378,7 @@ public enum PETMRRegistrationEngine {
             movingToFixed: movingToFixed
         )
         let boundedNMI = nmi.isFinite ? max(0, min(1.5, nmi)) : 0
-        return overlap + 0.30 * boundedNMI
+        return 0.62 * overlap + 0.28 * containment + 0.22 * boundedNMI
     }
 
     private static func maskOverlapScore(moving: ImageVolume,
@@ -376,6 +408,27 @@ public enum PETMRRegistrationEngine {
         return 0.70 * dice + 0.30 * coverage
     }
 
+    private static func movingContainmentScore(movingMaskSamples: [SIMD3<Double>],
+                                               fixed: ImageVolume,
+                                               movingToFixed: Transform3D) -> Double {
+        let fixedMask = maskKind(for: Modality.normalize(fixed.modality))
+        var inside = 0.0
+        var total = 0.0
+        for movingWorld in movingMaskSamples {
+            let fixedWorld = movingToFixed.apply(to: movingWorld)
+            let voxel = fixed.voxelCoordinates(from: fixedWorld)
+            total += 1
+            guard let fixedValue = linearSample(fixed, x: voxel.x, y: voxel.y, z: voxel.z) else {
+                continue
+            }
+            if fixedMask.includes(fixedValue, range: fixed.intensityRange) {
+                inside += 1
+            }
+        }
+        guard total >= 32 else { return -.infinity }
+        return inside / total
+    }
+
     private static func bodyEnvelopeAffine(moving: ImageVolume,
                                            fixed: ImageVolume,
                                            initialMovingToFixed: Transform3D) -> Transform3D? {
@@ -387,13 +440,13 @@ public enum PETMRRegistrationEngine {
         func safeScale(_ fixedExtent: Double, _ movingExtent: Double) -> Double {
             guard fixedExtent.isFinite, movingExtent.isFinite, movingExtent > 1 else { return 1 }
             let ratio = fixedExtent / movingExtent
-            // PET often has a larger field of view than MRI. That is not a
-            // reason to shrink anatomy. Only apply an affine scale when the
-            // body/anatomy envelopes are plausibly comparable; otherwise the
-            // PET is resampled/cropped onto the MRI grid after rigid/MI
-            // alignment.
-            guard ratio >= 0.65, ratio <= 1.55 else { return 1 }
-            return max(0.85, min(1.15, ratio))
+            // PET can have a larger acquired field of view than MRI, but the
+            // uptake/body envelope should still fit inside the MR anatomy
+            // envelope after PET/MR registration. Keep the correction bounded
+            // enough for QA while allowing brain PET/MR pairs that need a
+            // visible shrink to avoid a permanently oversized overlay.
+            guard ratio >= 0.55, ratio <= 1.70 else { return 1 }
+            return max(0.70, min(1.25, ratio))
         }
 
         let sourceCenter = movingBox.center
@@ -413,6 +466,449 @@ public enum PETMRRegistrationEngine {
         matrix[3, 2] = targetCenter.z - scale.z * sourceCenter.z
         let correction = Transform3D(matrix: matrix)
         return correction.concatenate(initialMovingToFixed)
+    }
+
+    public static func postResampleVisualFit(movingOnFixedGrid: ImageVolume,
+                                             fixed: ImageVolume) -> PETMRVisualFitCorrection? {
+        guard Modality.normalize(movingOnFixedGrid.modality) == .PT,
+              Modality.normalize(fixed.modality) == .MR,
+              hasSameGrid(movingOnFixedGrid, fixed) else {
+            return nil
+        }
+
+        if let brainFit = brainPETVisualFit(movingOnFixedGrid: movingOnFixedGrid, fixed: fixed) {
+            return brainFit
+        }
+
+        guard let movingBox = bodyBoundingBox(for: movingOnFixedGrid),
+              let fixedBox = bodyBoundingBox(for: fixed) else {
+            return nil
+        }
+        return visualFitCorrection(movingBox: movingBox,
+                                   fixedBox: fixedBox,
+                                   scaleRange: 0.70...1.20,
+                                   minimumScaleDelta: 0.04,
+                                   minimumTranslationMM: 3,
+                                   notePrefix: "Post-resample PET/MR visual envelope fit",
+                                   scaleStrategy: .median)
+    }
+
+    public static func postResampleSegmentationPolish(movingOnFixedGrid: ImageVolume,
+                                                       fixed: ImageVolume) -> PETMRVisualFitCorrection? {
+        guard Modality.normalize(movingOnFixedGrid.modality) == .PT,
+              Modality.normalize(fixed.modality) == .MR,
+              hasSameGrid(movingOnFixedGrid, fixed),
+              isLikelyBrainMR(fixed) else {
+            return nil
+        }
+
+        let samples = registrationSamples(for: fixed)
+        let intensitySamples: [(world: SIMD3<Double>, value: Float)] = samples.map {
+            (world: $0.world, value: $0.value)
+        }
+        let movingMaskSamples = maskWorldSamples(for: movingOnFixedGrid)
+        let fixedRange = finiteRange(intensitySamples.map { $0.value })
+        let movingRange = movingOnFixedGrid.intensityRange
+        guard samples.count >= 128,
+              movingMaskSamples.count >= 32,
+              fixedRange.max > fixedRange.min,
+              movingRange.max > movingRange.min else {
+            return nil
+        }
+
+        let center = geometryCenter(fixed)
+        let identityScore = segmentationPolishScore(
+            moving: movingOnFixedGrid,
+            fixed: fixed,
+            fixedSamples: samples,
+            fixedIntensitySamples: intensitySamples,
+            movingMaskSamples: movingMaskSamples,
+            fixedRange: fixedRange,
+            movingRange: movingRange,
+            movingToFixed: .identity
+        )
+        guard identityScore.isFinite else { return nil }
+
+        var best = SegmentationPolishCandidate(
+            transform: .identity,
+            translationMM: SIMD3<Double>(0, 0, 0),
+            rotationRadians: SIMD3<Double>(0, 0, 0),
+            score: identityScore
+        )
+
+        func evaluate(translation: SIMD3<Double>, rotation: SIMD3<Double>) {
+            let transform = segmentationPolishTransform(center: center,
+                                                        translationMM: translation,
+                                                        rotationRadians: rotation)
+            let score = segmentationPolishScore(
+                moving: movingOnFixedGrid,
+                fixed: fixed,
+                fixedSamples: samples,
+                fixedIntensitySamples: intensitySamples,
+                movingMaskSamples: movingMaskSamples,
+                fixedRange: fixedRange,
+                movingRange: movingRange,
+                movingToFixed: transform
+            )
+            if score > best.score + 0.0005 {
+                best = SegmentationPolishCandidate(transform: transform,
+                                                   translationMM: translation,
+                                                   rotationRadians: rotation,
+                                                   score: score)
+            }
+        }
+
+        let translationPasses: [(radius: Double, step: Double)] = [
+            (6, 3),
+            (2, 1),
+            (0.75, 0.75)
+        ]
+        for pass in translationPasses {
+            let anchor = best.translationMM
+            var dz = -pass.radius
+            while dz <= pass.radius + 0.0001 {
+                var dy = -pass.radius
+                while dy <= pass.radius + 0.0001 {
+                    var dx = -pass.radius
+                    while dx <= pass.radius + 0.0001 {
+                        evaluate(translation: anchor + SIMD3<Double>(dx, dy, dz),
+                                 rotation: best.rotationRadians)
+                        dx += pass.step
+                    }
+                    dy += pass.step
+                }
+                dz += pass.step
+            }
+        }
+
+        let rotationOffsets = degrees([-2, -1, 0, 1, 2])
+        let translationAnchor = best.translationMM
+        let rotationAnchor = best.rotationRadians
+        for rx in rotationOffsets {
+            for ry in rotationOffsets {
+                for rz in rotationOffsets {
+                    evaluate(translation: translationAnchor,
+                             rotation: rotationAnchor + SIMD3<Double>(rx, ry, rz))
+                }
+            }
+        }
+
+        let finalTranslationAnchor = best.translationMM
+        let finalRotation = best.rotationRadians
+        for offset in [
+            SIMD3<Double>(0.5, 0, 0), SIMD3<Double>(-0.5, 0, 0),
+            SIMD3<Double>(0, 0.5, 0), SIMD3<Double>(0, -0.5, 0),
+            SIMD3<Double>(0, 0, 0.5), SIMD3<Double>(0, 0, -0.5)
+        ] {
+            evaluate(translation: finalTranslationAnchor + offset, rotation: finalRotation)
+        }
+
+        let scoreGain = best.score - identityScore
+        let shiftMM = simd_length(best.translationMM)
+        let rotationDegrees = radiansToDegrees(best.rotationRadians)
+        let maxRotation = max(abs(rotationDegrees.x), max(abs(rotationDegrees.y), abs(rotationDegrees.z)))
+        guard scoreGain >= 0.018,
+              shiftMM >= 0.35 || maxRotation >= 0.30 else {
+            return nil
+        }
+
+        let note = String(
+            format: "Post-resample PET/MR segmentation polish, local edge/MI QA +%.3f, shift X %.1f / Y %.1f / Z %.1f mm, rotate X %.1f° / Y %.1f° / Z %.1f°",
+            scoreGain,
+            best.translationMM.x,
+            best.translationMM.y,
+            best.translationMM.z,
+            rotationDegrees.x,
+            rotationDegrees.y,
+            rotationDegrees.z
+        )
+        return PETMRVisualFitCorrection(sourceToDisplay: best.transform,
+                                        scale: 1,
+                                        translationMM: best.translationMM,
+                                        note: note)
+    }
+
+    private static func brainPETVisualFit(movingOnFixedGrid: ImageVolume,
+                                          fixed: ImageVolume) -> PETMRVisualFitCorrection? {
+        guard isLikelyBrainMR(fixed) else { return nil }
+        guard let movingBox = intensityBoundingBox(for: movingOnFixedGrid,
+                                                   percentile: 99,
+                                                   positiveOnly: true),
+              let fixedBox = intensityBoundingBox(for: fixed,
+                                                  percentile: 80,
+                                                  positiveOnly: true) else {
+            return nil
+        }
+        return visualFitCorrection(movingBox: movingBox,
+                                   fixedBox: fixedBox,
+                                   scaleRange: 0.65...1.15,
+                                   minimumScaleDelta: 0.03,
+                                   minimumTranslationMM: 2,
+                                   notePrefix: "Post-resample PET/MR brain uptake fit",
+                                   scaleStrategy: .axisFitInside(maxSpreadFromMedian: 0.18))
+    }
+
+    private enum VisualFitScaleStrategy {
+        case median
+        case fitInside
+        case axisFitInside(maxSpreadFromMedian: Double)
+    }
+
+    private static func visualFitCorrection(
+        movingBox: (min: SIMD3<Double>, max: SIMD3<Double>, center: SIMD3<Double>, extent: SIMD3<Double>),
+        fixedBox: (min: SIMD3<Double>, max: SIMD3<Double>, center: SIMD3<Double>, extent: SIMD3<Double>),
+        scaleRange: ClosedRange<Double>,
+        minimumScaleDelta: Double,
+        minimumTranslationMM: Double,
+        notePrefix: String,
+        scaleStrategy: VisualFitScaleStrategy
+    ) -> PETMRVisualFitCorrection? {
+        var ratios: [Double] = []
+        for axis in 0..<3 {
+            let movingExtent = movingBox.extent[axis]
+            let fixedExtent = fixedBox.extent[axis]
+            guard movingExtent.isFinite, fixedExtent.isFinite,
+                  movingExtent > 10, fixedExtent > 10 else { continue }
+            let ratio = fixedExtent / movingExtent
+            if ratio.isFinite, ratio >= 0.45, ratio <= 1.45 {
+                ratios.append(ratio)
+            }
+        }
+        guard !ratios.isEmpty else { return nil }
+        ratios.sort()
+        let rawScale: Double
+        let axisScale: SIMD3<Double>
+        switch scaleStrategy {
+        case .median:
+            rawScale = ratios[ratios.count / 2]
+            let clamped = clamp(rawScale, scaleRange.lowerBound, scaleRange.upperBound)
+            axisScale = SIMD3<Double>(repeating: clamped)
+        case .fitInside:
+            rawScale = ratios.first ?? ratios[ratios.count / 2]
+            let clamped = clamp(rawScale, scaleRange.lowerBound, scaleRange.upperBound)
+            axisScale = SIMD3<Double>(repeating: clamped)
+        case .axisFitInside(let maxSpreadFromMedian):
+            rawScale = ratios.first ?? ratios[ratios.count / 2]
+            let medianScale = clamp(ratios[ratios.count / 2], scaleRange.lowerBound, scaleRange.upperBound)
+            let lower = max(scaleRange.lowerBound, medianScale * (1 - max(0, maxSpreadFromMedian)))
+            let upper = min(scaleRange.upperBound, medianScale * (1 + max(0, maxSpreadFromMedian)))
+            axisScale = SIMD3<Double>(
+                boundedAxisScale(fixedBox.extent.x, movingBox.extent.x, fallback: medianScale, lower: lower, upper: upper),
+                boundedAxisScale(fixedBox.extent.y, movingBox.extent.y, fallback: medianScale, lower: lower, upper: upper),
+                boundedAxisScale(fixedBox.extent.z, movingBox.extent.z, fallback: medianScale, lower: lower, upper: upper)
+            )
+        }
+        let scale = min(axisScale.x, min(axisScale.y, axisScale.z))
+        let centerDelta = fixedBox.center - movingBox.center
+
+        let scaleDelta = max(abs(axisScale.x - 1), max(abs(axisScale.y - 1), abs(axisScale.z - 1)))
+        guard scaleDelta >= minimumScaleDelta || simd_length(centerDelta) >= minimumTranslationMM else {
+            return nil
+        }
+
+        let sourceToDisplay = Transform3D.translation(fixedBox.center.x,
+                                                      fixedBox.center.y,
+                                                      fixedBox.center.z)
+            .concatenate(Transform3D.scale(axisScale))
+            .concatenate(Transform3D.translation(-movingBox.center.x,
+                                                 -movingBox.center.y,
+                                                 -movingBox.center.z))
+        let scaleText: String
+        switch scaleStrategy {
+        case .axisFitInside:
+            scaleText = String(format: "scale X %.2fx / Y %.2fx / Z %.2fx",
+                               axisScale.x,
+                               axisScale.y,
+                               axisScale.z)
+        case .median, .fitInside:
+            scaleText = String(format: "scale %.2fx", scale)
+        }
+        let note = String(format: "\(notePrefix) %@, shift X %.1f / Y %.1f / Z %.1f mm",
+                          scaleText,
+                          centerDelta.x,
+                          centerDelta.y,
+                          centerDelta.z)
+        return PETMRVisualFitCorrection(sourceToDisplay: sourceToDisplay,
+                                        scale: scale,
+                                        translationMM: centerDelta,
+                                        note: note)
+    }
+
+    private static func segmentationPolishTransform(center: SIMD3<Double>,
+                                                     translationMM: SIMD3<Double>,
+                                                     rotationRadians: SIMD3<Double>) -> Transform3D {
+        let rotation = Transform3D.rotationZ(rotationRadians.z)
+            .concatenate(Transform3D.rotationY(rotationRadians.y))
+            .concatenate(Transform3D.rotationX(rotationRadians.x))
+        return Transform3D.translation(translationMM.x, translationMM.y, translationMM.z)
+            .concatenate(Transform3D.translation(center.x, center.y, center.z))
+            .concatenate(rotation)
+            .concatenate(Transform3D.translation(-center.x, -center.y, -center.z))
+    }
+
+    private static func segmentationPolishScore(moving: ImageVolume,
+                                                fixed: ImageVolume,
+                                                fixedSamples: [RegistrationSample],
+                                                fixedIntensitySamples: [(world: SIMD3<Double>, value: Float)],
+                                                movingMaskSamples: [SIMD3<Double>],
+                                                fixedRange: (min: Float, max: Float),
+                                                movingRange: (min: Float, max: Float),
+                                                movingToFixed: Transform3D) -> Double {
+        let overlap = maskOverlapScore(moving: moving,
+                                       fixedSamples: fixedSamples,
+                                       movingToFixed: movingToFixed)
+        guard overlap.isFinite else { return -.infinity }
+        let containment = movingContainmentScore(movingMaskSamples: movingMaskSamples,
+                                                fixed: fixed,
+                                                movingToFixed: movingToFixed)
+        guard containment.isFinite else { return -.infinity }
+        let nmi = mutualInformationScore(moving: moving,
+                                         fixedSamples: fixedIntensitySamples,
+                                         fixedRange: fixedRange,
+                                         movingRange: movingRange,
+                                         movingToFixed: movingToFixed)
+        let edge = edgeAgreementScore(moving: moving,
+                                      fixed: fixed,
+                                      fixedSamples: fixedSamples,
+                                      movingToFixed: movingToFixed)
+        let boundedNMI = nmi.isFinite ? max(0, min(1.5, nmi)) : 0
+        let boundedEdge = edge.isFinite ? max(0, min(1, edge)) : 0
+        return 0.36 * overlap + 0.20 * containment + 0.24 * boundedNMI + 0.20 * boundedEdge
+    }
+
+    private static func edgeAgreementScore(moving: ImageVolume,
+                                           fixed: ImageVolume,
+                                           fixedSamples: [RegistrationSample],
+                                           movingToFixed: Transform3D) -> Double {
+        let fixedToMoving = movingToFixed.inverse
+        var count = 0
+        var fixedEnergy = 0.0
+        var movingEnergy = 0.0
+        var product = 0.0
+        for sample in fixedSamples where sample.fixedInMask {
+            let fixedVoxel = fixed.voxelCoordinates(from: sample.world)
+            let movingWorld = fixedToMoving.apply(to: sample.world)
+            let movingVoxel = moving.voxelCoordinates(from: movingWorld)
+            guard let fixedEdge = gradientMagnitude(fixed,
+                                                    x: fixedVoxel.x,
+                                                    y: fixedVoxel.y,
+                                                    z: fixedVoxel.z),
+                  let movingEdge = gradientMagnitude(moving,
+                                                     x: movingVoxel.x,
+                                                     y: movingVoxel.y,
+                                                     z: movingVoxel.z) else {
+                continue
+            }
+            let f = log1p(fixedEdge)
+            let m = log1p(movingEdge)
+            fixedEnergy += f * f
+            movingEnergy += m * m
+            product += f * m
+            count += 1
+        }
+        guard count >= 64,
+              fixedEnergy > 1e-8,
+              movingEnergy > 1e-8 else {
+            return -.infinity
+        }
+        return product / sqrt(fixedEnergy * movingEnergy)
+    }
+
+    private static func gradientMagnitude(_ volume: ImageVolume,
+                                          x: Double,
+                                          y: Double,
+                                          z: Double) -> Double? {
+        let xi = Int(round(x))
+        let yi = Int(round(y))
+        let zi = Int(round(z))
+        guard xi > 0, xi < volume.width - 1,
+              yi > 0, yi < volume.height - 1,
+              zi > 0, zi < volume.depth - 1 else {
+            return nil
+        }
+        let dx = Double(volume.intensity(z: zi, y: yi, x: xi + 1) -
+                        volume.intensity(z: zi, y: yi, x: xi - 1)) / max(0.001, 2 * volume.spacing.x)
+        let dy = Double(volume.intensity(z: zi, y: yi + 1, x: xi) -
+                        volume.intensity(z: zi, y: yi - 1, x: xi)) / max(0.001, 2 * volume.spacing.y)
+        let dz = Double(volume.intensity(z: zi + 1, y: yi, x: xi) -
+                        volume.intensity(z: zi - 1, y: yi, x: xi)) / max(0.001, 2 * volume.spacing.z)
+        let magnitude = sqrt(dx * dx + dy * dy + dz * dz)
+        return magnitude.isFinite ? magnitude : nil
+    }
+
+    private static func boundedAxisScale(_ fixedExtent: Double,
+                                         _ movingExtent: Double,
+                                         fallback: Double,
+                                         lower: Double,
+                                         upper: Double) -> Double {
+        guard fixedExtent.isFinite,
+              movingExtent.isFinite,
+              movingExtent > 10,
+              fixedExtent > 10 else {
+            return fallback
+        }
+        let ratio = fixedExtent / movingExtent
+        guard ratio.isFinite else { return fallback }
+        return clamp(ratio, lower, upper)
+    }
+
+    private static func intensityBoundingBox(for volume: ImageVolume,
+                                             percentile: Double,
+                                             positiveOnly: Bool) -> (min: SIMD3<Double>, max: SIMD3<Double>, center: SIMD3<Double>, extent: SIMD3<Double>)? {
+        let thresholdStride = max(1, Int(ceil(pow(Double(max(1, volume.width * volume.height * volume.depth)) / 200_000.0, 1.0 / 3.0))))
+        var sampled: [Float] = []
+        sampled.reserveCapacity(220_000)
+        for z in Swift.stride(from: 0, to: volume.depth, by: thresholdStride) {
+            for y in Swift.stride(from: 0, to: volume.height, by: thresholdStride) {
+                for x in Swift.stride(from: 0, to: volume.width, by: thresholdStride) {
+                    let value = volume.intensity(z: z, y: y, x: x)
+                    guard value.isFinite else { continue }
+                    if positiveOnly && value <= 0 { continue }
+                    sampled.append(value)
+                }
+            }
+        }
+        guard sampled.count >= 32 else { return nil }
+        sampled.sort()
+        let boundedPercentile = max(0, min(100, percentile))
+        let percentileIndex = Int((Double(sampled.count - 1) * boundedPercentile / 100.0).rounded())
+        let threshold = sampled[max(0, min(sampled.count - 1, percentileIndex))]
+
+        let boxStride = max(1, thresholdStride / 2)
+        var found = false
+        var minPoint = SIMD3<Double>(Double.greatestFiniteMagnitude,
+                                     Double.greatestFiniteMagnitude,
+                                     Double.greatestFiniteMagnitude)
+        var maxPoint = SIMD3<Double>(-Double.greatestFiniteMagnitude,
+                                     -Double.greatestFiniteMagnitude,
+                                     -Double.greatestFiniteMagnitude)
+        for z in Swift.stride(from: 0, to: volume.depth, by: boxStride) {
+            for y in Swift.stride(from: 0, to: volume.height, by: boxStride) {
+                for x in Swift.stride(from: 0, to: volume.width, by: boxStride) {
+                    let value = volume.intensity(z: z, y: y, x: x)
+                    guard value.isFinite, value >= threshold else { continue }
+                    if positiveOnly && value <= 0 { continue }
+                    let point = volume.worldPoint(z: z, y: y, x: x)
+                    minPoint = simd_min(minPoint, point)
+                    maxPoint = simd_max(maxPoint, point)
+                    found = true
+                }
+            }
+        }
+        guard found else { return nil }
+        let center = (minPoint + maxPoint) / 2
+        return (minPoint, maxPoint, center, maxPoint - minPoint)
+    }
+
+    private static func isLikelyBrainMR(_ volume: ImageVolume) -> Bool {
+        let extent = SIMD3<Double>(
+            Double(max(1, volume.width - 1)) * volume.spacing.x,
+            Double(max(1, volume.height - 1)) * volume.spacing.y,
+            Double(max(1, volume.depth - 1)) * volume.spacing.z
+        )
+        let largest = max(extent.x, max(extent.y, extent.z))
+        let smallest = min(extent.x, min(extent.y, extent.z))
+        return largest <= 320 && smallest >= 80
     }
 
     private static func anchorCentroid(for volume: ImageVolume) -> (point: SIMD3<Double>, description: String) {
@@ -463,6 +959,18 @@ public enum PETMRRegistrationEngine {
         guard found else { return nil }
         let center = (minPoint + maxPoint) / 2
         return (minPoint, maxPoint, center, maxPoint - minPoint)
+    }
+
+    private static func hasSameGrid(_ lhs: ImageVolume, _ rhs: ImageVolume) -> Bool {
+        lhs.width == rhs.width &&
+        lhs.height == rhs.height &&
+        lhs.depth == rhs.depth &&
+        simd_length(SIMD3<Double>(lhs.spacing.x, lhs.spacing.y, lhs.spacing.z) -
+                    SIMD3<Double>(rhs.spacing.x, rhs.spacing.y, rhs.spacing.z)) < 0.001 &&
+        simd_length(lhs.originVector - rhs.originVector) < 0.001 &&
+        simd_length(lhs.direction.columns.0 - rhs.direction.columns.0) < 0.001 &&
+        simd_length(lhs.direction.columns.1 - rhs.direction.columns.1) < 0.001 &&
+        simd_length(lhs.direction.columns.2 - rhs.direction.columns.2) < 0.001
     }
 
     private static func refineTranslationByMutualInformation(moving: ImageVolume,
@@ -554,6 +1062,24 @@ public enum PETMRRegistrationEngine {
                         value: value,
                         fixedInMask: mask.includes(value, range: fixed.intensityRange)
                     ))
+                }
+            }
+        }
+        return samples
+    }
+
+    private static func maskWorldSamples(for moving: ImageVolume) -> [SIMD3<Double>] {
+        let modality = Modality.normalize(moving.modality)
+        let mask = maskKind(for: modality)
+        let step = max(1, Int(ceil(pow(Double(max(1, moving.width * moving.height * moving.depth)) / 12_000.0, 1.0 / 3.0))))
+        var samples: [SIMD3<Double>] = []
+        samples.reserveCapacity(16_000)
+        for z in Swift.stride(from: 0, to: moving.depth, by: step) {
+            for y in Swift.stride(from: 0, to: moving.height, by: step) {
+                for x in Swift.stride(from: 0, to: moving.width, by: step) {
+                    let value = moving.intensity(z: z, y: y, x: x)
+                    guard mask.includes(value, range: moving.intensityRange) else { continue }
+                    samples.append(moving.worldPoint(z: z, y: y, x: x))
                 }
             }
         }
@@ -768,6 +1294,13 @@ private struct SimilaritySearchResult {
     let scale: Double
     let score: Double?
     let didImprove: Bool
+}
+
+private struct SegmentationPolishCandidate {
+    let transform: Transform3D
+    let translationMM: SIMD3<Double>
+    let rotationRadians: SIMD3<Double>
+    let score: Double
 }
 
 private enum MaskKind {

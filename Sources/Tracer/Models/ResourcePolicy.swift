@@ -244,6 +244,27 @@ public struct ResourcePolicy: Equatable, Sendable {
 
     public func applyingSubprocessDefaults(to environment: [String: String]) -> [String: String] {
         var env = environment
+        let home = NSHomeDirectory()
+        let preferredToolDirs = [
+            "/opt/anaconda3/bin",
+            "\(home)/miniconda3/bin",
+            "\(home)/anaconda3/bin",
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "\(home)/.local/bin"
+        ].filter { FileManager.default.fileExists(atPath: $0) }
+        let fallbackSystemDirs = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+        let existingPathDirs = (env["PATH"] ?? "")
+            .split(separator: ":")
+            .map(String.init)
+            .filter { !$0.isEmpty }
+        var seen = Set<String>()
+        let mergedPath = (preferredToolDirs + existingPathDirs + fallbackSystemDirs).filter { path in
+            guard !seen.contains(path) else { return false }
+            seen.insert(path)
+            return true
+        }
+        env["PATH"] = mergedPath.joined(separator: ":")
         let threads = "\(max(1, cpuWorkerLimit))"
         for key in ["OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS"] {
             if env[key]?.isEmpty ?? true {
