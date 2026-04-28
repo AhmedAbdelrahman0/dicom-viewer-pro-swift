@@ -26,6 +26,7 @@ public struct SliceView: View {
     @State private var activeMeasurement: Annotation?
     @State private var freehandPoints: [CGPoint] = []
     @State private var dragStart: CGPoint?
+    @State private var fusionTranslationBeforeDrag: SIMD3<Double>?
     @State private var lastPaintPoint: (Int, Int)?
     #if os(macOS)
     @State private var wheelAccumulator: CGFloat = 0
@@ -667,6 +668,12 @@ public struct SliceView: View {
                 Label("Spherical SUV / HU ROI", systemImage: "scope")
             }
             Button {
+                vm.setActiveViewerTool(.fusionAlign)
+            } label: {
+                Label("Manual fusion alignment", systemImage: "arrow.up.left.and.arrow.down.right")
+            }
+            .disabled(vm.fusion == nil || displayMode != .fused)
+            Button {
                 vm.activeTool = .wl
                 vm.labeling.labelingTool = .brush
             } label: {
@@ -901,6 +908,56 @@ public struct SliceView: View {
             }
     }
 
+    private func fusionAlignmentOffset(for value: DragGesture.Value,
+                                       geo: GeometryProxy) -> SIMD3<Double>? {
+        guard displayMode == .fused,
+              let pair = vm.fusion,
+              pair.baseVolume.id == vm.volumeForDisplayMode(displayMode)?.id else {
+            return nil
+        }
+        if fusionTranslationBeforeDrag == nil {
+            fusionTranslationBeforeDrag = pair.manualTranslationMM
+        }
+        let base = pair.baseVolume
+        let (imgW, imgH): (CGFloat, CGFloat)
+        switch axis {
+        case 0:
+            imgW = CGFloat(base.height)
+            imgH = CGFloat(base.depth)
+        case 1:
+            imgW = CGFloat(base.width)
+            imgH = CGFloat(base.depth)
+        default:
+            imgW = CGFloat(base.width)
+            imgH = CGFloat(base.height)
+        }
+        let fit = min(geo.size.width / max(imgW, 1), geo.size.height / max(imgH, 1)) * zoom
+        guard fit > 0, fit.isFinite else { return nil }
+
+        var dx = Double(value.translation.width / fit)
+        var dy = Double(value.translation.height / fit)
+        let transform = vm.displayTransform(for: axis, volume: base)
+        if transform.flipHorizontal { dx = -dx }
+        if transform.flipVertical { dy = -dy }
+
+        let voxelDelta: SIMD3<Double>
+        switch axis {
+        case 0:
+            voxelDelta = SIMD3<Double>(0, dx, dy)
+        case 1:
+            voxelDelta = SIMD3<Double>(dx, 0, dy)
+        default:
+            voxelDelta = SIMD3<Double>(dx, dy, 0)
+        }
+        let scaled = SIMD3<Double>(
+            voxelDelta.x * base.spacing.x,
+            voxelDelta.y * base.spacing.y,
+            voxelDelta.z * base.spacing.z
+        )
+        let worldDelta = base.direction * scaled
+        return (fusionTranslationBeforeDrag ?? pair.manualTranslationMM) + worldDelta
+    }
+
     #if os(macOS)
     private func handleScrollWheel(_ event: SliceScrollWheelEvent) {
         let rawDelta = event.rawDeltaY
@@ -981,11 +1038,20 @@ public struct SliceView: View {
                         measurementPoints = [CGPoint(x: startPixel.0, y: startPixel.1),
                                              CGPoint(x: endPixel.0, y: endPixel.1)]
                     }
+                case .fusionAlign:
+                    if let offset = fusionAlignmentOffset(for: value, geo: geo) {
+                        vm.previewFusionManualTranslation(offset)
+                    }
                 case .angle, .area, .suvSphere:
                     break
                 }
             }
             .onEnded { value in
+                if vm.labeling.labelingTool == .none,
+                   vm.activeTool == .fusionAlign,
+                   let offset = fusionAlignmentOffset(for: value, geo: geo) {
+                    Task { await vm.applyFusionManualTranslation(offset) }
+                }
                 if vm.labeling.labelingTool != .none {
                     if vm.labeling.labelingTool == .freehand,
                        let volume = vm.volumeForDisplayMode(displayMode) {
@@ -1004,6 +1070,7 @@ public struct SliceView: View {
                     }
                 }
                 dragStart = nil
+                fusionTranslationBeforeDrag = nil
                 dragStartPan = nil
                 gestureStartZoom = nil
                 if let before = viewportBeforeInteraction {

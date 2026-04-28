@@ -5,7 +5,7 @@ import SwiftData
 import simd
 
 public enum ViewerTool: String, CaseIterable, Identifiable {
-    case wl, pan, zoom, distance, angle, area, suvSphere
+    case wl, pan, zoom, distance, angle, area, suvSphere, fusionAlign
 
     public var id: String { rawValue }
     public var displayName: String {
@@ -17,6 +17,7 @@ public enum ViewerTool: String, CaseIterable, Identifiable {
         case .angle: return "Angle"
         case .area: return "Area"
         case .suvSphere: return "Sphere ROI"
+        case .fusionAlign: return "Fusion Align"
         }
     }
     public var systemImage: String {
@@ -28,6 +29,7 @@ public enum ViewerTool: String, CaseIterable, Identifiable {
         case .angle: return "angle"
         case .area: return "skew"
         case .suvSphere: return "flame.circle"
+        case .fusionAlign: return "arrow.up.left.and.arrow.down.right"
         }
     }
 
@@ -70,6 +72,11 @@ public enum ViewerTool: String, CaseIterable, Identifiable {
                  + "Click PET or fused images for SUVmax/SUVmean.\n"
                  + "Click CT/MR panes for HU or raw intensity stats.\n"
                  + "Shortcut: S"
+        case .fusionAlign:
+            return "Manual Fusion Alignment\n"
+                 + "Drag a fused viewport to nudge the PET overlay in patient space.\n"
+                 + "Release the mouse to resample and apply the correction.\n"
+                 + "Use after choosing the MR/CT and PET series in Fusion."
         }
     }
 
@@ -83,6 +90,7 @@ public enum ViewerTool: String, CaseIterable, Identifiable {
         case .angle: return "a"
         case .area: return "r"
         case .suvSphere: return "s"
+        case .fusionAlign: return "f"
         }
     }
 }
@@ -787,6 +795,8 @@ public final class ViewerViewModel: ObservableObject {
         switch tool {
         case .suvSphere:
             statusMessage = "Spherical ROI armed: click PET/fusion for SUV or CT/MR for intensity stats"
+        case .fusionAlign:
+            statusMessage = "Fusion align armed: drag a fused viewport, release to apply PET overlay offset"
         case .distance, .angle, .area:
             statusMessage = "\(tool.displayName) armed"
         default:
@@ -1954,10 +1964,11 @@ public final class ViewerViewModel: ObservableObject {
             statusMessage = "Load a brain PET volume before running brain analysis"
             return nil
         }
-        guard let atlas = labeling.activeLabelMap else {
+        let atlas = activeBrainPETAtlas(for: pet) ?? createQuickBrainPETAtlas(for: pet, announce: false)
+        guard let atlas else {
             brainPETReport = nil
             brainPETAnatomyAwareReport = nil
-            statusMessage = "Load or create a brain atlas label map before running brain PET analysis"
+            statusMessage = "Brain PET analysis needs a PET-aligned atlas. Quick atlas creation could not find enough brain uptake."
             return nil
         }
         let configuration = BrainPETAnalysisConfiguration(
@@ -1983,6 +1994,191 @@ public final class ViewerViewModel: ObservableObject {
             brainPETAnatomyAwareReport = nil
             statusMessage = "Brain PET analysis failed: \(error.localizedDescription)"
             return nil
+        }
+    }
+
+    public func createQuickBrainPETAtlasForActivePET() -> LabelMap? {
+        guard let pet = activePETQuantificationVolume else {
+            statusMessage = "Load a brain PET volume before creating a quick atlas"
+            return nil
+        }
+        return createQuickBrainPETAtlas(for: pet, announce: true)
+    }
+
+    private func activeBrainPETAtlas(for pet: ImageVolume) -> LabelMap? {
+        if let active = labeling.activeLabelMap,
+           active.width == pet.width,
+           active.height == pet.height,
+           active.depth == pet.depth {
+            return active
+        }
+        return labeling.labelMaps.first {
+            $0.width == pet.width &&
+            $0.height == pet.height &&
+            $0.depth == pet.depth &&
+            ($0.name.localizedCaseInsensitiveContains("brain") ||
+             $0.classes.contains { $0.category == .brain })
+        }
+    }
+
+    private struct QuickBrainAtlasBounds {
+        let minZ: Int
+        let maxZ: Int
+        let minY: Int
+        let maxY: Int
+        let minX: Int
+        let maxX: Int
+    }
+
+    private func createQuickBrainPETAtlas(for pet: ImageVolume, announce: Bool) -> LabelMap? {
+        let finiteMax = pet.pixels.lazy.filter(\.isFinite).max() ?? 0
+        guard finiteMax > 0 else {
+            if announce { statusMessage = "Quick brain atlas needs positive finite PET uptake" }
+            return nil
+        }
+        let threshold = max(finiteMax * 0.05, 0.000001)
+        guard let bounds = quickBrainBounds(in: pet, threshold: threshold) else {
+            if announce { statusMessage = "Quick brain atlas could not find a brain uptake envelope" }
+            return nil
+        }
+
+        let atlas = LabelMap(
+            parentSeriesUID: pet.seriesUID,
+            depth: pet.depth,
+            height: pet.height,
+            width: pet.width,
+            name: "Quick Brain PET Atlas",
+            classes: [
+                LabelClass(labelID: 1, name: "Left temporal cortex gray", category: .brain, color: .orange, opacity: 0.35),
+                LabelClass(labelID: 2, name: "Right temporal cortex gray", category: .brain, color: .blue, opacity: 0.35),
+                LabelClass(labelID: 3, name: "Frontal cortex gray", category: .brain, color: .purple, opacity: 0.35),
+                LabelClass(labelID: 4, name: "Parietal precuneus cortex gray", category: .brain, color: .pink, opacity: 0.35),
+                LabelClass(labelID: 10, name: "Cerebellar gray", category: .brain, color: .green, opacity: 0.35),
+                LabelClass(labelID: 20, name: "White matter", category: .brain, color: .gray, opacity: 0.25)
+            ]
+        )
+        atlas.opacity = 0.28
+
+        var voxels = atlas.voxels
+        var counts: [UInt16: Int] = [:]
+        fillQuickBrainRegion(labelID: 1, pet: pet, threshold: threshold, bounds: bounds,
+                             x: 0.16..<0.43, y: 0.25..<0.72, z: 0.34..<0.72,
+                             voxels: &voxels, counts: &counts)
+        fillQuickBrainRegion(labelID: 2, pet: pet, threshold: threshold, bounds: bounds,
+                             x: 0.57..<0.84, y: 0.25..<0.72, z: 0.34..<0.72,
+                             voxels: &voxels, counts: &counts)
+        fillQuickBrainRegion(labelID: 3, pet: pet, threshold: threshold, bounds: bounds,
+                             x: 0.28..<0.72, y: 0.56..<0.90, z: 0.38..<0.78,
+                             voxels: &voxels, counts: &counts)
+        fillQuickBrainRegion(labelID: 4, pet: pet, threshold: threshold, bounds: bounds,
+                             x: 0.30..<0.70, y: 0.34..<0.62, z: 0.58..<0.92,
+                             voxels: &voxels, counts: &counts)
+        fillQuickBrainRegion(labelID: 10, pet: pet, threshold: threshold, bounds: bounds,
+                             x: 0.34..<0.66, y: 0.10..<0.45, z: 0.05..<0.32,
+                             voxels: &voxels, counts: &counts)
+        fillQuickBrainRegion(labelID: 20, pet: pet, threshold: threshold, bounds: bounds,
+                             x: 0.42..<0.58, y: 0.38..<0.64, z: 0.38..<0.66,
+                             voxels: &voxels, counts: &counts)
+
+        for labelID in [UInt16(1), 2, 3, 4, 10, 20] where counts[labelID, default: 0] == 0 {
+            backfillQuickBrainRegion(labelID: labelID,
+                                     pet: pet,
+                                     threshold: threshold,
+                                     bounds: bounds,
+                                     voxels: &voxels,
+                                     counts: &counts)
+        }
+
+        atlas.voxels = voxels
+        labeling.labelMaps.append(atlas)
+        labeling.activeLabelMap = atlas
+        labeling.markDirty()
+        saveOrUpdateCurrentStudySession(announce: false, includeLabelMaps: true)
+        statusMessage = "Created quick PET-derived brain atlas. Use a registered anatomical atlas for clinical-grade regional analysis."
+        if announce {
+            objectWillChange.send()
+        }
+        return atlas
+    }
+
+    private func quickBrainBounds(in pet: ImageVolume, threshold: Float) -> QuickBrainAtlasBounds? {
+        var minZ = pet.depth, maxZ = -1
+        var minY = pet.height, maxY = -1
+        var minX = pet.width, maxX = -1
+        for z in 0..<pet.depth {
+            for y in 0..<pet.height {
+                let row = z * pet.height * pet.width + y * pet.width
+                for x in 0..<pet.width {
+                    let value = pet.pixels[row + x]
+                    guard value.isFinite, value >= threshold else { continue }
+                    minZ = min(minZ, z)
+                    maxZ = max(maxZ, z)
+                    minY = min(minY, y)
+                    maxY = max(maxY, y)
+                    minX = min(minX, x)
+                    maxX = max(maxX, x)
+                }
+            }
+        }
+        guard maxZ >= minZ, maxY >= minY, maxX >= minX else { return nil }
+        return QuickBrainAtlasBounds(minZ: minZ, maxZ: maxZ, minY: minY, maxY: maxY, minX: minX, maxX: maxX)
+    }
+
+    private func fillQuickBrainRegion(labelID: UInt16,
+                                      pet: ImageVolume,
+                                      threshold: Float,
+                                      bounds: QuickBrainAtlasBounds,
+                                      x xRange: Range<Double>,
+                                      y yRange: Range<Double>,
+                                      z zRange: Range<Double>,
+                                      voxels: inout [UInt16],
+                                      counts: inout [UInt16: Int]) {
+        let spanX = max(1, bounds.maxX - bounds.minX)
+        let spanY = max(1, bounds.maxY - bounds.minY)
+        let spanZ = max(1, bounds.maxZ - bounds.minZ)
+        for z in bounds.minZ...bounds.maxZ {
+            let fz = Double(z - bounds.minZ) / Double(spanZ)
+            guard zRange.contains(fz) else { continue }
+            for y in bounds.minY...bounds.maxY {
+                let fy = Double(y - bounds.minY) / Double(spanY)
+                guard yRange.contains(fy) else { continue }
+                let row = z * pet.height * pet.width + y * pet.width
+                for x in bounds.minX...bounds.maxX {
+                    let fx = Double(x - bounds.minX) / Double(spanX)
+                    guard xRange.contains(fx) else { continue }
+                    let index = row + x
+                    let value = pet.pixels[index]
+                    guard value.isFinite, value >= threshold else { continue }
+                    voxels[index] = labelID
+                    counts[labelID, default: 0] += 1
+                }
+            }
+        }
+    }
+
+    private func backfillQuickBrainRegion(labelID: UInt16,
+                                          pet: ImageVolume,
+                                          threshold: Float,
+                                          bounds: QuickBrainAtlasBounds,
+                                          voxels: inout [UInt16],
+                                          counts: inout [UInt16: Int]) {
+        let centerX = (bounds.minX + bounds.maxX) / 2
+        let centerY = (bounds.minY + bounds.maxY) / 2
+        let centerZ = (bounds.minZ + bounds.maxZ) / 2
+        let radiusX = max(1, (bounds.maxX - bounds.minX) / 12)
+        let radiusY = max(1, (bounds.maxY - bounds.minY) / 12)
+        let radiusZ = max(1, (bounds.maxZ - bounds.minZ) / 12)
+        for z in max(bounds.minZ, centerZ - radiusZ)...min(bounds.maxZ, centerZ + radiusZ) {
+            for y in max(bounds.minY, centerY - radiusY)...min(bounds.maxY, centerY + radiusY) {
+                let row = z * pet.height * pet.width + y * pet.width
+                for x in max(bounds.minX, centerX - radiusX)...min(bounds.maxX, centerX + radiusX) {
+                    let index = row + x
+                    let value = pet.pixels[index]
+                    guard value.isFinite, value >= threshold * 0.5 else { continue }
+                    voxels[index] = labelID
+                    counts[labelID, default: 0] += 1
+                }
+            }
         }
     }
 
@@ -3130,6 +3326,21 @@ public final class ViewerViewModel: ObservableObject {
         fusionAdjustmentTask = Task { [weak self] in
             await self?.applyFusionManualTranslation(next)
         }
+    }
+
+    public func previewFusionManualTranslation(_ offset: SIMD3<Double>) {
+        let next = SIMD3<Double>(
+            max(-120, min(120, offset.x)),
+            max(-120, min(120, offset.y)),
+            max(-120, min(120, offset.z))
+        )
+        fusion?.manualTranslationMM = next
+        fusion?.objectWillChange.send()
+        objectWillChange.send()
+        statusMessage = String(format: "Fusion align preview: X %.1f / Y %.1f / Z %.1f mm. Release to apply.",
+                               next.x,
+                               next.y,
+                               next.z)
     }
 
     public func nudgeFusionManualTranslation(dx: Double, dy: Double, dz: Double) {

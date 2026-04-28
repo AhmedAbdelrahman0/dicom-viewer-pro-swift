@@ -83,6 +83,19 @@ struct BrainPETPanel: View {
                 Slider(value: $tauThreshold, in: 1.05...2.2, step: 0.01)
             }
 
+            if vm.labeling.activeLabelMap == nil {
+                Button {
+                    _ = vm.createQuickBrainPETAtlasForActivePET()
+                } label: {
+                    Label("Create Quick PET Atlas", systemImage: "map")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(vm.activePETQuantificationVolume == nil)
+                .help("Creates a coarse PET-derived research atlas so Analyze can run. Replace it with a registered anatomical atlas for clinical-grade regional analysis.")
+            }
+
             Button {
                 vm.runActiveBrainPETAnalysis(tracer: tracer,
                                              tauSUVRThreshold: tauThreshold,
@@ -95,7 +108,7 @@ struct BrainPETPanel: View {
             .controlSize(.small)
             .disabled(vm.activePETQuantificationVolume == nil)
             .help(vm.labeling.activeLabelMap == nil
-                  ? "Analyze will prompt for a PET-aligned brain atlas label map."
+                  ? "Analyze will create a coarse PET-derived quick atlas if no PET-aligned brain atlas is loaded."
                   : "Run FDG, amyloid, or tau regional brain PET analysis.")
 
             HStack(spacing: 8) {
@@ -445,7 +458,8 @@ struct BrainPETPanel: View {
                             .textSelection(.enabled)
                             .lineLimit(3)
                     }
-                } else if !gaainStatus.isEmpty {
+                }
+                if !gaainStatus.isEmpty {
                     Text(gaainStatus)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -522,6 +536,7 @@ struct BrainPETPanel: View {
            let detected = DGXSparkConfig.detectedNVIDIASparkProfile(enabled: true) {
             detected.save()
             cfg = detected
+            gaainStatus = "Applied detected Spark profile: \(detected.sshDestination). Preparing remote build..."
         }
         guard cfg.enabled, cfg.isConfigured else {
             gaainStatus = cfg.readinessMessage ?? "Enable and configure DGX Spark in Settings before launching the GAAIN build."
@@ -573,6 +588,7 @@ struct BrainPETPanel: View {
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 guard let detail, !detail.isEmpty else { return }
                 Task { @MainActor in
+                    gaainStatus = detail
                     JobManager.shared.heartbeat(operationID: operationID,
                                                 detail: detail)
                 }

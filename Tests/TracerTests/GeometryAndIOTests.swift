@@ -1814,6 +1814,37 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(report.regions.first(where: { $0.labelID == 1 })?.zScore ?? 0, -4.5, accuracy: 1e-9)
     }
 
+    @MainActor
+    func testBrainPETAnalysisCreatesQuickAtlasWhenNoAtlasIsLoaded() throws {
+        let pet = makeTestVolume(
+            modality: "PT",
+            description: "Brain FDG PET",
+            width: 16,
+            height: 16,
+            depth: 16,
+            fill: 4
+        )
+        let sessionRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Tracer-QuickBrainAtlas-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessionRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: sessionRoot) }
+
+        let vm = ViewerViewModel(studySessionStore: StudySessionStore(rootURL: sessionRoot))
+        vm.loadedVolumes = [pet]
+        vm.displayVolume(pet)
+
+        let report = try XCTUnwrap(vm.runActiveBrainPETAnalysis(tracer: .fdg))
+        let atlas = try XCTUnwrap(vm.labeling.activeLabelMap)
+
+        XCTAssertEqual(atlas.name, "Quick Brain PET Atlas")
+        XCTAssertEqual(atlas.width, pet.width)
+        XCTAssertEqual(atlas.height, pet.height)
+        XCTAssertEqual(atlas.depth, pet.depth)
+        XCTAssertGreaterThan(report.referenceMean, 0)
+        XCTAssertTrue(report.regions.contains { $0.name == "Cerebellar gray" })
+        XCTAssertTrue(report.referenceRegionName.localizedCaseInsensitiveContains("cerebellar"))
+    }
+
     func testBrainPETNormalDatabaseParsesCSV() throws {
         let csv = """
         region,labelID,meanSUVR,sdSUVR,n,ageMin,ageMax

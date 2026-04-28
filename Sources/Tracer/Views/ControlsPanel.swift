@@ -655,6 +655,18 @@ private struct FusionTab: View {
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
+            Button {
+                vm.setActiveViewerTool(.fusionAlign)
+            } label: {
+                Label(vm.activeTool == .fusionAlign ? "Mouse Alignment Active" : "Align With Mouse",
+                      systemImage: "cursorarrow.motionlines")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .disabled(vm.fusion == nil)
+            .help("Drag any fused viewport to preview the PET offset. Release the mouse to apply the resampled fusion correction.")
+
             manualAxisRow(title: "X L/R",
                           value: pair.manualTranslationMM.x,
                           negative: { vm.nudgeFusionManualTranslation(dx: -1, dy: 0, dz: 0) },
@@ -1471,6 +1483,7 @@ private struct DisplayTab: View {
         case .angle: return "Tap three points for an angle measurement"
         case .area: return "Tap three+ points, close to measure area"
         case .suvSphere: return "Tap PET/fusion for SUV or CT/MR for intensity ROI"
+        case .fusionAlign: return "Drag a fused viewport to nudge PET; release to resample and apply"
         }
     }
 }
