@@ -3050,6 +3050,14 @@ public final class ViewerViewModel: ObservableObject {
         await fusePETMR(base: pair.mr, overlay: pair.pet)
     }
 
+    public func reregisterActivePETMRFusion() async {
+        guard let pair = fusion, pair.isPETMR else {
+            statusMessage = "No active PET/MR fusion to re-register"
+            return
+        }
+        await fusePETMR(base: pair.baseVolume, overlay: pair.overlayVolume)
+    }
+
     public func fusePETCT(base: ImageVolume, overlay: ImageVolume) async {
         isLoading = true
         statusMessage = "Fusing PET/CT..."
@@ -3318,17 +3326,53 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     public func setFusionManualTranslation(x: Double, y: Double, z: Double) {
+        let rotation = fusion?.manualRotationDegrees ?? SIMD3<Double>(0, 0, 0)
+        let scale = fusion?.manualScale ?? 1
+        setFusionManualTransform(translation: SIMD3<Double>(x, y, z),
+                                 rotationDegrees: rotation,
+                                 scale: scale)
+    }
+
+    public func setFusionManualRotation(x: Double, y: Double, z: Double) {
+        let translation = fusion?.manualTranslationMM ?? SIMD3<Double>(0, 0, 0)
+        let scale = fusion?.manualScale ?? 1
+        setFusionManualTransform(translation: translation,
+                                 rotationDegrees: SIMD3<Double>(x, y, z),
+                                 scale: scale)
+    }
+
+    public func setFusionManualScale(_ scale: Double) {
+        let translation = fusion?.manualTranslationMM ?? SIMD3<Double>(0, 0, 0)
+        let rotation = fusion?.manualRotationDegrees ?? SIMD3<Double>(0, 0, 0)
+        setFusionManualTransform(translation: translation,
+                                 rotationDegrees: rotation,
+                                 scale: scale)
+    }
+
+    public func setFusionManualTransform(translation: SIMD3<Double>,
+                                         rotationDegrees: SIMD3<Double>,
+                                         scale: Double) {
         let next = SIMD3<Double>(
-            max(-120, min(120, x)),
-            max(-120, min(120, y)),
-            max(-120, min(120, z))
+            max(-120, min(120, translation.x)),
+            max(-120, min(120, translation.y)),
+            max(-120, min(120, translation.z))
         )
+        let nextRotation = SIMD3<Double>(
+            max(-45, min(45, rotationDegrees.x)),
+            max(-45, min(45, rotationDegrees.y)),
+            max(-180, min(180, rotationDegrees.z))
+        )
+        let nextScale = max(0.50, min(1.85, scale))
         fusion?.manualTranslationMM = next
+        fusion?.manualRotationDegrees = nextRotation
+        fusion?.manualScale = nextScale
         fusion?.objectWillChange.send()
         objectWillChange.send()
         fusionAdjustmentTask?.cancel()
         fusionAdjustmentTask = Task { [weak self] in
-            await self?.applyFusionManualTranslation(next)
+            await self?.applyFusionManualTransform(translation: next,
+                                                   rotationDegrees: nextRotation,
+                                                   scale: nextScale)
         }
     }
 
@@ -3354,31 +3398,88 @@ public final class ViewerViewModel: ObservableObject {
                                    z: current.z + dz)
     }
 
+    public func nudgeFusionManualRotation(dx: Double, dy: Double, dz: Double) {
+        let current = fusion?.manualRotationDegrees ?? SIMD3<Double>(0, 0, 0)
+        setFusionManualRotation(x: current.x + dx,
+                                y: current.y + dy,
+                                z: current.z + dz)
+    }
+
+    public func nudgeFusionManualScale(_ delta: Double) {
+        let current = fusion?.manualScale ?? 1
+        setFusionManualScale(current + delta)
+    }
+
     public func resetFusionManualTranslation() {
         setFusionManualTranslation(x: 0, y: 0, z: 0)
     }
 
+    public func resetFusionManualTransform() {
+        setFusionManualTransform(translation: SIMD3<Double>(0, 0, 0),
+                                 rotationDegrees: SIMD3<Double>(0, 0, 0),
+                                 scale: 1)
+    }
+
     public func applyFusionManualTranslation(_ offset: SIMD3<Double>) async {
+        let rotation = fusion?.manualRotationDegrees ?? SIMD3<Double>(0, 0, 0)
+        let scale = fusion?.manualScale ?? 1
+        await applyFusionManualTransform(translation: offset,
+                                         rotationDegrees: rotation,
+                                         scale: scale)
+    }
+
+    public func applyFusionManualTransform(translation offset: SIMD3<Double>,
+                                           rotationDegrees: SIMD3<Double>,
+                                           scale: Double) async {
         guard let pair = fusion else { return }
         let base = pair.baseVolume
         let overlay = pair.registrationResampledOverlay ?? pair.overlayVolume
-        guard simd_length(offset) > 0.001 else {
+        let normalizedRotation = SIMD3<Double>(
+            max(-45, min(45, rotationDegrees.x)),
+            max(-45, min(45, rotationDegrees.y)),
+            max(-180, min(180, rotationDegrees.z))
+        )
+        let normalizedScale = max(0.50, min(1.85, scale))
+        let hasTransform = simd_length(offset) > 0.001 ||
+            simd_length(normalizedRotation) > 0.001 ||
+            abs(normalizedScale - 1) > 0.001
+        guard hasTransform else {
             pair.resampledOverlay = pair.registrationResampledOverlay
             pair.isGeometryResampled = pair.resampledOverlay != nil
             pair.manualTranslationMM = SIMD3<Double>(0, 0, 0)
+            pair.manualRotationDegrees = SIMD3<Double>(0, 0, 0)
+            pair.manualScale = 1
             pair.objectWillChange.send()
             objectWillChange.send()
             clearSliceRenderCache()
             scheduleVisibleSliceCacheWarmup(reason: "fusion manual reset")
-            statusMessage = "Fusion manual offset reset"
+            statusMessage = "Fusion manual transform reset"
             return
         }
 
         let shifted = await Task.detached(priority: .userInitiated) {
-            VolumeResampler.resample(
+            let center = base.worldPoint(voxel: SIMD3<Double>(
+                Double(base.width - 1) / 2,
+                Double(base.height - 1) / 2,
+                Double(base.depth - 1) / 2
+            ))
+            let radians = SIMD3<Double>(
+                normalizedRotation.x * .pi / 180.0,
+                normalizedRotation.y * .pi / 180.0,
+                normalizedRotation.z * .pi / 180.0
+            )
+            let sourceToDisplay = Transform3D.translation(center.x + offset.x,
+                                                          center.y + offset.y,
+                                                          center.z + offset.z)
+                .concatenate(Transform3D.rotationZ(radians.z))
+                .concatenate(Transform3D.rotationY(radians.y))
+                .concatenate(Transform3D.rotationX(radians.x))
+                .concatenate(Transform3D.scale(normalizedScale))
+                .concatenate(Transform3D.translation(-center.x, -center.y, -center.z))
+            return VolumeResampler.resample(
                 source: overlay,
                 target: base,
-                transform: Transform3D.translation(-offset.x, -offset.y, -offset.z),
+                transform: sourceToDisplay.inverse,
                 mode: .linear
             )
         }.value
@@ -3387,6 +3488,8 @@ public final class ViewerViewModel: ObservableObject {
         pair.resampledOverlay = shifted
         pair.isGeometryResampled = true
         pair.manualTranslationMM = offset
+        pair.manualRotationDegrees = normalizedRotation
+        pair.manualScale = normalizedScale
         pair.objectWillChange.send()
         objectWillChange.send()
         clearSliceRenderCache()
@@ -3394,8 +3497,8 @@ public final class ViewerViewModel: ObservableObject {
             clearPETMIPRenderedImageCache()
             startPETMIPCineWarmupForVolume(pair.displayedOverlay)
         }
-        scheduleVisibleSliceCacheWarmup(reason: "fusion manual offset")
-        statusMessage = "Fusion manual offset: \(pair.manualTranslationLabel)"
+        scheduleVisibleSliceCacheWarmup(reason: "fusion manual transform")
+        statusMessage = "Fusion manual transform: \(pair.manualTranslationLabel), \(pair.manualRotationLabel), scale \(pair.manualScaleLabel)"
     }
 
     @discardableResult

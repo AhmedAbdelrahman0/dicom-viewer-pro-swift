@@ -47,6 +47,15 @@ public struct Transform3D: Sendable {
         return Transform3D(matrix: m)
     }
 
+    /// Uniform scale around the world origin.
+    public static func scale(_ factor: Double) -> Transform3D {
+        var m = matrix_identity_double4x4
+        m[0, 0] = factor
+        m[1, 1] = factor
+        m[2, 2] = factor
+        return Transform3D(matrix: m)
+    }
+
     /// Build a rigid transform from Euler angles (radians) + translation (mm).
     public static func rigid(tx: Double, ty: Double, tz: Double,
                               rx: Double, ry: Double, rz: Double) -> Transform3D {

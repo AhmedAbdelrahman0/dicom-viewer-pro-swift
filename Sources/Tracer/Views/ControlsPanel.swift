@@ -672,6 +672,18 @@ private struct FusionTab: View {
             .disabled(vm.fusion == nil)
             .help("Drag any fused viewport to preview the PET offset. Release the mouse to apply the resampled fusion correction.")
 
+            if pair.isPETMR {
+                Button {
+                    Task { await vm.reregisterActivePETMRFusion() }
+                } label: {
+                    Label("Re-run PET/MR Registration", systemImage: "scope")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Run the selected PET/MR registration mode again and replace the current PET overlay grid.")
+            }
+
             manualAxisRow(title: "X L/R",
                           value: pair.manualTranslationMM.x,
                           negative: { vm.nudgeFusionManualTranslation(dx: -1, dy: 0, dz: 0) },
@@ -691,15 +703,42 @@ private struct FusionTab: View {
                           coarseNegative: { vm.nudgeFusionManualTranslation(dx: 0, dy: 0, dz: -5) },
                           coarsePositive: { vm.nudgeFusionManualTranslation(dx: 0, dy: 0, dz: 5) })
 
+            Divider().opacity(0.35)
+
+            Text("Rotation and scale refine the already-registered PET layer around the MR center.")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            manualAxisRow(title: "RX",
+                          value: pair.manualRotationDegrees.x,
+                          negative: { vm.nudgeFusionManualRotation(dx: -1, dy: 0, dz: 0) },
+                          positive: { vm.nudgeFusionManualRotation(dx: 1, dy: 0, dz: 0) },
+                          coarseNegative: { vm.nudgeFusionManualRotation(dx: -5, dy: 0, dz: 0) },
+                          coarsePositive: { vm.nudgeFusionManualRotation(dx: 5, dy: 0, dz: 0) })
+            manualAxisRow(title: "RY",
+                          value: pair.manualRotationDegrees.y,
+                          negative: { vm.nudgeFusionManualRotation(dx: 0, dy: -1, dz: 0) },
+                          positive: { vm.nudgeFusionManualRotation(dx: 0, dy: 1, dz: 0) },
+                          coarseNegative: { vm.nudgeFusionManualRotation(dx: 0, dy: -5, dz: 0) },
+                          coarsePositive: { vm.nudgeFusionManualRotation(dx: 0, dy: 5, dz: 0) })
+            manualAxisRow(title: "RZ",
+                          value: pair.manualRotationDegrees.z,
+                          negative: { vm.nudgeFusionManualRotation(dx: 0, dy: 0, dz: -1) },
+                          positive: { vm.nudgeFusionManualRotation(dx: 0, dy: 0, dz: 1) },
+                          coarseNegative: { vm.nudgeFusionManualRotation(dx: 0, dy: 0, dz: -5) },
+                          coarsePositive: { vm.nudgeFusionManualRotation(dx: 0, dy: 0, dz: 5) })
+            manualScaleRow(value: pair.manualScale)
+
             Button {
-                vm.resetFusionManualTranslation()
+                vm.resetFusionManualTransform()
             } label: {
-                Label("Reset Manual Offset", systemImage: "arrow.counterclockwise")
+                Label("Reset Manual Transform", systemImage: "arrow.counterclockwise")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
-            .disabled(!pair.hasManualTranslation)
+            .disabled(!pair.hasManualTransform)
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -728,6 +767,23 @@ private struct FusionTab: View {
             Button("-1", action: negative)
             Button("+1", action: positive)
             Button("+5", action: coarsePositive)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.mini)
+    }
+
+    private func manualScaleRow(value: Double) -> some View {
+        HStack(spacing: 5) {
+            Text("Scale")
+                .font(.system(size: 10, weight: .semibold))
+                .frame(width: 44, alignment: .leading)
+            Text(String(format: "%.2f", value))
+                .font(.system(size: 10, design: .monospaced))
+                .frame(width: 48, alignment: .trailing)
+            Button("-0.10") { vm.nudgeFusionManualScale(-0.10) }
+            Button("-0.02") { vm.nudgeFusionManualScale(-0.02) }
+            Button("+0.02") { vm.nudgeFusionManualScale(0.02) }
+            Button("+0.10") { vm.nudgeFusionManualScale(0.10) }
         }
         .buttonStyle(.bordered)
         .controlSize(.mini)

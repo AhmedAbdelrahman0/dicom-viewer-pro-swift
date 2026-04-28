@@ -48,6 +48,8 @@ public final class FusionPair: ObservableObject {
     @Published public var registrationNote: String = "Assumes aligned geometry"
     @Published public var registrationQuality: RegistrationQualityComparison?
     @Published public var manualTranslationMM = SIMD3<Double>(0, 0, 0)
+    @Published public var manualRotationDegrees = SIMD3<Double>(0, 0, 0)
+    @Published public var manualScale: Double = 1
 
     public init(base: ImageVolume, overlay: ImageVolume) {
         self.baseVolume = base
@@ -91,7 +93,24 @@ public final class FusionPair: ObservableObject {
                manualTranslationMM.z)
     }
 
+    public var manualRotationLabel: String {
+        String(format: "RX %.1f° / RY %.1f° / RZ %.1f°",
+               manualRotationDegrees.x,
+               manualRotationDegrees.y,
+               manualRotationDegrees.z)
+    }
+
+    public var manualScaleLabel: String {
+        String(format: "%.2fx", manualScale)
+    }
+
     public var hasManualTranslation: Bool {
         simd_length(manualTranslationMM) > 0.001
+    }
+
+    public var hasManualTransform: Bool {
+        hasManualTranslation ||
+        simd_length(manualRotationDegrees) > 0.001 ||
+        abs(manualScale - 1) > 0.001
     }
 }

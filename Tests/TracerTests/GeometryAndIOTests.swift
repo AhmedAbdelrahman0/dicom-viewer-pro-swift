@@ -234,6 +234,99 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(resampled.intensity(z: 8, y: 8, x: 14), 0, accuracy: 1e-5)
     }
 
+    func testPETMRRegistrationScalesOversizedPETEnvelopeIntoMRI() {
+        func blockVolume(modality: String,
+                         description: String,
+                         size: Int,
+                         bodyRange: Range<Int>,
+                         value: Float) -> ImageVolume {
+            var pixels = [Float](repeating: 0, count: size * size * size)
+            for z in bodyRange {
+                for y in bodyRange {
+                    for x in bodyRange {
+                        pixels[z * size * size + y * size + x] = value
+                    }
+                }
+            }
+            return ImageVolume(
+                pixels: pixels,
+                depth: size,
+                height: size,
+                width: size,
+                modality: modality,
+                seriesDescription: description
+            )
+        }
+
+        let mr = blockVolume(modality: "MR", description: "Brain T1", size: 32, bodyRange: 10..<22, value: 10)
+        let pet = blockVolume(modality: "PT", description: "Large PET", size: 40, bodyRange: 8..<32, value: 5)
+
+        let result = PETMRRegistrationEngine.estimatePETToMR(pet: pet, mr: mr, mode: .rigidThenDeformable)
+
+        XCTAssertLessThan(result.scale, 0.75)
+        XCTAssertTrue(result.optimizerDescription.contains("scale"))
+        let mappedPETCenter = result.movingToFixed.apply(to: pet.worldPoint(voxel: SIMD3<Double>(19.5, 19.5, 19.5)))
+        let mrCenter = mr.worldPoint(voxel: SIMD3<Double>(15.5, 15.5, 15.5))
+        XCTAssertEqual(mappedPETCenter.x, mrCenter.x, accuracy: 1.5)
+        XCTAssertEqual(mappedPETCenter.y, mrCenter.y, accuracy: 1.5)
+        XCTAssertEqual(mappedPETCenter.z, mrCenter.z, accuracy: 1.5)
+    }
+
+    func testPETMRRegistrationSearchesInPlaneRotation() {
+        func lShapeVolume(modality: String, rotated: Bool, value: Float) -> ImageVolume {
+            let size = 32
+            let center = Double(size - 1) / 2
+            var pixels = [Float](repeating: 0, count: size * size * size)
+
+            func mark(_ x: Int, _ y: Int, _ z: Int) {
+                guard x >= 0, x < size, y >= 0, y < size, z >= 0, z < size else { return }
+                pixels[z * size * size + y * size + x] = value
+            }
+
+            for z in 12..<20 {
+                for y in 8..<24 {
+                    for x in 9..<13 {
+                        if rotated {
+                            let xr = Int(round(center - (Double(y) - center)))
+                            let yr = Int(round(center + (Double(x) - center)))
+                            mark(xr, yr, z)
+                        } else {
+                            mark(x, y, z)
+                        }
+                    }
+                }
+                for y in 20..<24 {
+                    for x in 9..<24 {
+                        if rotated {
+                            let xr = Int(round(center - (Double(y) - center)))
+                            let yr = Int(round(center + (Double(x) - center)))
+                            mark(xr, yr, z)
+                        } else {
+                            mark(x, y, z)
+                        }
+                    }
+                }
+            }
+
+            return ImageVolume(
+                pixels: pixels,
+                depth: size,
+                height: size,
+                width: size,
+                modality: modality,
+                seriesDescription: modality == "MR" ? "Brain T1" : "FDG PET"
+            )
+        }
+
+        let mr = lShapeVolume(modality: "MR", rotated: false, value: 10)
+        let pet = lShapeVolume(modality: "PT", rotated: true, value: 5)
+
+        let result = PETMRRegistrationEngine.estimatePETToMR(pet: pet, mr: mr, mode: .rigidAnatomical)
+
+        XCTAssertEqual(abs(result.rotationDegrees.z), 90, accuracy: 15)
+        XCTAssertGreaterThan(result.score ?? 0, 0.5)
+    }
+
     @MainActor
     func testCloseVolumeClearsFusionAndFallsBackToRemainingSeries() async throws {
         let vm = ViewerViewModel()
