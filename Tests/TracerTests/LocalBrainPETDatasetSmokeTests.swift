@@ -87,6 +87,37 @@ final class LocalBrainPETDatasetSmokeTests: XCTestCase {
         XCTAssertTrue(anatomyReport.qcMetrics.contains { $0.id == "cortex" && $0.passed })
     }
 
+    @MainActor
+    func testWorklistOpenLoadsWholeBrainPETMRIStudy() async throws {
+        let root = try smokeDirectory()
+        let subjectID = ProcessInfo.processInfo.environment["TRACER_BRAIN_PET_SUBJECT"] ?? "sub-control05"
+        let result = PACSDirectoryIndexer.scan(
+            url: root,
+            progressStride: 1_000,
+            seriesDirectoryFastPath: true
+        )
+        let study = try XCTUnwrap(PACSWorklistStudy.grouped(from: result.records).first {
+            $0.patientID == subjectID
+        })
+        XCTAssertTrue(study.series.contains { Modality.normalize($0.modality) == .PT })
+        XCTAssertTrue(study.series.contains { Modality.normalize($0.modality) == .MR })
+
+        let sessionRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Tracer-BrainPET-Worklist-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessionRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: sessionRoot) }
+
+        let vm = ViewerViewModel(studySessionStore: StudySessionStore(rootURL: sessionRoot))
+        await vm.openWorklistStudy(study)
+
+        XCTAssertGreaterThanOrEqual(vm.loadedMRVolumes.count, 2)
+        XCTAssertEqual(vm.loadedPETVolumes.count, 1)
+        XCTAssertNotNil(vm.currentVolume)
+        XCTAssertTrue(vm.statusMessage.contains("Opened") || vm.statusMessage.contains("Loaded"))
+        XCTAssertTrue(vm.window.isFinite)
+        XCTAssertTrue(vm.level.isFinite)
+    }
+
     private func makeCoarseBrainSmokeAtlas(for volume: ImageVolume) throws -> LabelMap {
         let atlas = LabelMap(
             parentSeriesUID: volume.seriesUID,

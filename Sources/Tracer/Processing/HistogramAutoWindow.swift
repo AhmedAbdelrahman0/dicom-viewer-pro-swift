@@ -61,18 +61,24 @@ public enum HistogramAutoWindow {
                                      totalSamples: 0)
         }
 
-        // Collect min/max from filtered stream.
+        // Collect min/max from the finite filtered stream. Derived MR/PET maps
+        // in research archives commonly contain NaN/Inf outside the valid mask;
+        // those must never participate in histogram bin math.
         var minV: Float = .infinity
         var maxV: Float = -.infinity
         var filteredCount = 0
         for v in pixels {
+            guard v.isFinite else { continue }
             if ignoreZeros, v == 0 { continue }
             if v < minV { minV = v }
             if v > maxV { maxV = v }
             filteredCount += 1
         }
         guard filteredCount > 0, maxV > minV else {
-            let m = Double(pixels.first ?? 0)
+            let finite = pixels.first { value in
+                value.isFinite && (!ignoreZeros || value != 0)
+            }
+            let m = Double(finite ?? 0)
             return WindowLevelResult(window: 1, level: m,
                                      lowerValue: m, upperValue: m + 1,
                                      totalSamples: filteredCount)
@@ -84,6 +90,7 @@ public enum HistogramAutoWindow {
         let range = maxV - minV
         let scale = Float(bins - 1) / range
         for v in pixels {
+            guard v.isFinite else { continue }
             if ignoreZeros, v == 0 { continue }
             var idx = Int((v - minV) * scale)
             if idx < 0 { idx = 0 }

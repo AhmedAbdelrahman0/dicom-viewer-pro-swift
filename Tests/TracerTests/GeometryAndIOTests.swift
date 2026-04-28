@@ -2816,6 +2816,40 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertGreaterThan(result.window, 0)
     }
 
+    func testHistogramAutoWindowIgnoresNonFiniteResearchVoxels() {
+        let pixels: [Float] = [
+            .nan, .infinity, -.infinity,
+            0, 2, 4, 6, 8, 10
+        ]
+
+        let result = HistogramAutoWindow.compute(
+            pixels: pixels,
+            preset: .balanced,
+            binCount: 32
+        )
+
+        XCTAssertEqual(result.totalSamples, 6)
+        XCTAssertTrue(result.window.isFinite)
+        XCTAssertTrue(result.level.isFinite)
+        XCTAssertGreaterThan(result.window, 0)
+        XCTAssertGreaterThanOrEqual(result.lowerValue, 0)
+        XCTAssertLessThanOrEqual(result.upperValue, 10)
+    }
+
+    func testHistogramAutoWindowFallsBackWhenOnlyNonFiniteVoxelsRemain() {
+        let result = HistogramAutoWindow.compute(
+            pixels: [.nan, .infinity, -.infinity, 0],
+            preset: .balanced,
+            ignoreZeros: true
+        )
+
+        XCTAssertEqual(result.totalSamples, 0)
+        XCTAssertEqual(result.window, 1)
+        XCTAssertEqual(result.level, 0)
+        XCTAssertTrue(result.lowerValue.isFinite)
+        XCTAssertTrue(result.upperValue.isFinite)
+    }
+
     // MARK: - Level-set segmentation
 
     func testLevelSetShrinksBubbleToDarkVoxels() {
