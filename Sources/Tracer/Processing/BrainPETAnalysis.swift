@@ -429,6 +429,123 @@ public struct BrainPETAnalysisConfiguration: Codable, Equatable, Sendable {
     }
 }
 
+public enum BrainPETAnatomyMode: String, CaseIterable, Identifiable, Codable, Sendable {
+    case automatic
+    case petOnly
+    case ctAssisted
+    case mriAssisted
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .automatic: return "Auto anatomy"
+        case .petOnly: return "PET only"
+        case .ctAssisted: return "CT assisted"
+        case .mriAssisted: return "MRI assisted"
+        }
+    }
+
+    public var shortName: String {
+        switch self {
+        case .automatic: return "Auto"
+        case .petOnly: return "PET"
+        case .ctAssisted: return "PET+CT"
+        case .mriAssisted: return "PET+MRI"
+        }
+    }
+
+    public var systemImage: String {
+        switch self {
+        case .automatic: return "wand.and.stars"
+        case .petOnly: return "brain.head.profile"
+        case .ctAssisted: return "viewfinder"
+        case .mriAssisted: return "brain.head.profile"
+        }
+    }
+}
+
+public enum BrainPETAnatomyConfidence: String, Codable, Sendable {
+    case high
+    case medium
+    case low
+
+    public var displayName: String {
+        switch self {
+        case .high: return "High"
+        case .medium: return "Medium"
+        case .low: return "Low"
+        }
+    }
+}
+
+public struct BrainPETAnatomyQCMetric: Identifiable, Codable, Equatable, Sendable {
+    public let id: String
+    public let title: String
+    public let value: String
+    public let passed: Bool
+
+    public init(id: String,
+                title: String,
+                value: String,
+                passed: Bool) {
+        self.id = id
+        self.title = title
+        self.value = value
+        self.passed = passed
+    }
+}
+
+public struct BrainPETAnatomyDelta: Codable, Equatable, Sendable {
+    public let targetSUVR: Double?
+    public let centiloid: Double?
+
+    public init(standard: BrainPETReport, anatomyAware: BrainPETReport) {
+        if let standardSUVR = standard.targetSUVR,
+           let awareSUVR = anatomyAware.targetSUVR {
+            targetSUVR = awareSUVR - standardSUVR
+        } else {
+            targetSUVR = nil
+        }
+        if let standardCL = standard.centiloid,
+           let awareCL = anatomyAware.centiloid {
+            centiloid = awareCL - standardCL
+        } else {
+            centiloid = nil
+        }
+    }
+}
+
+public struct BrainPETAnatomyAwareReport: Codable, Equatable, Sendable {
+    public let requestedMode: BrainPETAnatomyMode
+    public let resolvedMode: BrainPETAnatomyMode
+    public let confidence: BrainPETAnatomyConfidence
+    public let anatomySeriesDescription: String?
+    public let standardReport: BrainPETReport
+    public let anatomyAwareReport: BrainPETReport
+    public let delta: BrainPETAnatomyDelta
+    public let qcMetrics: [BrainPETAnatomyQCMetric]
+    public let warnings: [String]
+
+    public var summary: String {
+        let mode = resolvedMode.shortName
+        switch (anatomyAwareReport.targetSUVR, anatomyAwareReport.centiloid) {
+        case let (_, centiloid?):
+            return String(format: "%@ anatomy-aware Centiloid %.1f (%@ confidence).",
+                          mode,
+                          centiloid,
+                          confidence.displayName.lowercased())
+        case let (suvr?, nil):
+            return String(format: "%@ anatomy-aware target SUVR %.3f (%@ confidence).",
+                          mode,
+                          suvr,
+                          confidence.displayName.lowercased())
+        default:
+            return "\(mode) anatomy-aware brain PET analysis complete (\(confidence.displayName.lowercased()) confidence)."
+        }
+    }
+}
+
 public struct BrainPETRegionStatistic: Identifiable, Codable, Equatable, Sendable {
     public var id: UInt16 { labelID }
     public let labelID: UInt16
@@ -617,6 +734,62 @@ public enum BrainPETAnalysis {
         )
     }
 
+    public static func analyzeAnatomyAware(volume: ImageVolume,
+                                           atlas: LabelMap?,
+                                           anatomyVolume: ImageVolume?,
+                                           requestedMode: BrainPETAnatomyMode,
+                                           configuration: BrainPETAnalysisConfiguration) throws -> BrainPETAnatomyAwareReport {
+        guard let atlas else { throw BrainPETAnalysisError.missingAtlas }
+        let standard = try analyze(volume: volume, atlas: atlas, configuration: configuration)
+        let resolvedMode = resolveAnatomyMode(requestedMode, anatomyVolume: anatomyVolume)
+        let profile = AnatomyProfile(atlas: atlas)
+
+        var awareConfiguration = configuration
+        if !profile.corticalGrayIDs.isEmpty {
+            let targetIDs = configuration.targetClassIDs.isEmpty
+                ? profile.corticalGrayIDs
+                : configuration.targetClassIDs.filter { profile.corticalGrayIDs.contains($0) }
+            if !targetIDs.isEmpty {
+                awareConfiguration.targetClassIDs = targetIDs
+            }
+        }
+        if !profile.cerebellarGrayIDs.isEmpty,
+           configuration.referenceClassIDs.isEmpty {
+            awareConfiguration.referenceClassIDs = profile.cerebellarGrayIDs
+        }
+
+        let anatomyAware = try analyze(volume: volume, atlas: atlas, configuration: awareConfiguration)
+        let qc = anatomyQualityMetrics(
+            atlas: atlas,
+            anatomyVolume: anatomyVolume,
+            requestedMode: requestedMode,
+            resolvedMode: resolvedMode,
+            profile: profile
+        )
+        let warnings = anatomyWarnings(
+            requestedMode: requestedMode,
+            resolvedMode: resolvedMode,
+            anatomyVolume: anatomyVolume,
+            profile: profile,
+            standard: standard,
+            anatomyAware: anatomyAware
+        )
+        let confidence = anatomyConfidence(resolvedMode: resolvedMode,
+                                           profile: profile)
+
+        return BrainPETAnatomyAwareReport(
+            requestedMode: requestedMode,
+            resolvedMode: resolvedMode,
+            confidence: confidence,
+            anatomySeriesDescription: anatomyVolume?.seriesDescription,
+            standardReport: standard,
+            anatomyAwareReport: anatomyAware,
+            delta: BrainPETAnatomyDelta(standard: standard, anatomyAware: anatomyAware),
+            qcMetrics: qc,
+            warnings: warnings
+        )
+    }
+
     public static func normalizedRegionName(_ name: String) -> String {
         name.lowercased()
             .replacingOccurrences(of: "left", with: "")
@@ -627,6 +800,164 @@ public enum BrainPETAnalysis {
             .split(separator: " ")
             .joined(separator: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private struct AnatomyProfile {
+        let corticalGrayIDs: [UInt16]
+        let whiteMatterIDs: [UInt16]
+        let csfIDs: [UInt16]
+        let cerebellarGrayIDs: [UInt16]
+
+        init(atlas: LabelMap) {
+            var corticalGray: [UInt16] = []
+            var whiteMatter: [UInt16] = []
+            var csf: [UInt16] = []
+            var cerebellarGray: [UInt16] = []
+            for cls in atlas.classes {
+                let name = BrainPETAnalysis.normalizedRegionName(cls.name)
+                let isWhite = BrainPETAnalysis.containsAny(name, ["white matter", "whitematter", "wm"])
+                let isCSF = BrainPETAnalysis.containsAny(name, ["csf", "ventricle", "ventricular", "cerebrospinal"])
+                let isGray = BrainPETAnalysis.containsAny(name, ["gray", "grey", "cortex", "cortical", "gm"])
+                let isCerebellar = BrainPETAnalysis.containsAny(name, ["cerebellum", "cerebellar"])
+                let isCorticalTarget = BrainPETAnalysis.containsAny(name, [
+                    "frontal", "temporal", "parietal", "occipital",
+                    "precuneus", "cingulate", "orbitofrontal", "insular",
+                    "precentral", "postcentral"
+                ])
+                if isWhite {
+                    whiteMatter.append(cls.labelID)
+                }
+                if isCSF {
+                    csf.append(cls.labelID)
+                }
+                if isCerebellar && isGray && !isWhite && !isCSF {
+                    cerebellarGray.append(cls.labelID)
+                }
+                if isCorticalTarget && isGray && !isWhite && !isCSF {
+                    corticalGray.append(cls.labelID)
+                }
+            }
+            corticalGrayIDs = corticalGray
+            whiteMatterIDs = whiteMatter
+            csfIDs = csf
+            cerebellarGrayIDs = cerebellarGray
+        }
+
+        var hasTissueSeparation: Bool {
+            !corticalGrayIDs.isEmpty && (!whiteMatterIDs.isEmpty || !csfIDs.isEmpty)
+        }
+    }
+
+    private static func containsAny(_ text: String, _ needles: [String]) -> Bool {
+        needles.contains { text.contains($0) }
+    }
+
+    private static func resolveAnatomyMode(_ requested: BrainPETAnatomyMode,
+                                           anatomyVolume: ImageVolume?) -> BrainPETAnatomyMode {
+        let modality = anatomyVolume.map { Modality.normalize($0.modality) }
+        switch requested {
+        case .automatic:
+            if modality == .MR { return .mriAssisted }
+            if modality == .CT { return .ctAssisted }
+            return .petOnly
+        case .mriAssisted:
+            return modality == .MR ? .mriAssisted : .petOnly
+        case .ctAssisted:
+            return modality == .CT ? .ctAssisted : .petOnly
+        case .petOnly:
+            return .petOnly
+        }
+    }
+
+    private static func anatomyQualityMetrics(atlas: LabelMap,
+                                              anatomyVolume: ImageVolume?,
+                                              requestedMode: BrainPETAnatomyMode,
+                                              resolvedMode: BrainPETAnatomyMode,
+                                              profile: AnatomyProfile) -> [BrainPETAnatomyQCMetric] {
+        let geometryMatch = anatomyVolume.map {
+            $0.width == atlas.width && $0.height == atlas.height && $0.depth == atlas.depth
+        } ?? false
+        let anatomyLabel = anatomyVolume.map {
+            let modality = Modality.normalize($0.modality).displayName
+            let description = $0.seriesDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+            return description.isEmpty ? modality : "\(modality): \(description)"
+        } ?? "None"
+        return [
+            BrainPETAnatomyQCMetric(
+                id: "mode",
+                title: "Mode",
+                value: resolvedMode.displayName,
+                passed: requestedMode == .petOnly || resolvedMode != .petOnly
+            ),
+            BrainPETAnatomyQCMetric(
+                id: "anatomy",
+                title: "Anatomy",
+                value: anatomyLabel,
+                passed: requestedMode == .petOnly || anatomyVolume != nil
+            ),
+            BrainPETAnatomyQCMetric(
+                id: "grid",
+                title: "Grid",
+                value: geometryMatch ? "Atlas aligned" : "Registration/preprocessing needed",
+                passed: geometryMatch || resolvedMode == .petOnly
+            ),
+            BrainPETAnatomyQCMetric(
+                id: "cortex",
+                title: "Cortical gray",
+                value: "\(profile.corticalGrayIDs.count) class(es)",
+                passed: !profile.corticalGrayIDs.isEmpty
+            ),
+            BrainPETAnatomyQCMetric(
+                id: "whiteMatter",
+                title: "White/CSF exclusion",
+                value: "\(profile.whiteMatterIDs.count + profile.csfIDs.count) class(es)",
+                passed: !profile.whiteMatterIDs.isEmpty || !profile.csfIDs.isEmpty
+            )
+        ]
+    }
+
+    private static func anatomyWarnings(requestedMode: BrainPETAnatomyMode,
+                                        resolvedMode: BrainPETAnatomyMode,
+                                        anatomyVolume: ImageVolume?,
+                                        profile: AnatomyProfile,
+                                        standard: BrainPETReport,
+                                        anatomyAware: BrainPETReport) -> [String] {
+        var warnings: [String] = []
+        let delta = BrainPETAnatomyDelta(standard: standard, anatomyAware: anatomyAware)
+        if requestedMode != .petOnly, resolvedMode == .petOnly {
+            warnings.append("Requested anatomy assistance was unavailable; analysis fell back to PET-only quantification.")
+        }
+        if resolvedMode == .ctAssisted {
+            warnings.append("CT can stabilize registration and brain masking, but low-dose CT alone is limited for gray/white matter separation.")
+        }
+        if resolvedMode == .mriAssisted, anatomyVolume == nil {
+            warnings.append("MRI-assisted mode needs a T1-weighted MRI volume for cortical ribbon segmentation.")
+        }
+        if !profile.hasTissueSeparation {
+            warnings.append("Atlas does not expose enough cortical gray/white/CSF classes for full anatomy-aware spillover correction.")
+        }
+        if let centiloidDelta = delta.centiloid,
+           abs(centiloidDelta) >= 5 {
+            warnings.append(String(format: "Anatomy-aware Centiloid differs from standard by %.1f CL; treat borderline cases carefully.", centiloidDelta))
+        }
+        if let suvrDelta = delta.targetSUVR,
+           abs(suvrDelta) >= 0.10 {
+            warnings.append(String(format: "Anatomy-aware target SUVR differs from standard by %.3f.", suvrDelta))
+        }
+        return warnings
+    }
+
+    private static func anatomyConfidence(resolvedMode: BrainPETAnatomyMode,
+                                          profile: AnatomyProfile) -> BrainPETAnatomyConfidence {
+        if resolvedMode == .mriAssisted,
+           profile.hasTissueSeparation {
+            return .high
+        }
+        if resolvedMode != .petOnly,
+           !profile.corticalGrayIDs.isEmpty {
+            return .medium
+        }
+        return .low
     }
 
     private struct RegionMean {

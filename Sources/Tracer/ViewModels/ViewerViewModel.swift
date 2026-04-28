@@ -495,6 +495,7 @@ public final class ViewerViewModel: ObservableObject {
     @Published public private(set) var activePETOncologyReview: PETOncologyReview?
     @Published public private(set) var activeSegmentationQualityReport: SegmentationQualityReport?
     @Published public private(set) var brainPETReport: BrainPETReport?
+    @Published public private(set) var brainPETAnatomyAwareReport: BrainPETAnatomyAwareReport?
     @Published public private(set) var brainPETNormalDatabase: BrainPETNormalDatabase?
     @Published public var dynamicStudy: DynamicImageStudy?
     @Published public var selectedDynamicFrameIndex: Int = 0
@@ -703,6 +704,41 @@ public final class ViewerViewModel: ObservableObject {
 
     public var activePETSourceVolume: ImageVolume? {
         fusion?.overlayVolume ?? activePETQuantificationVolume
+    }
+
+    public func activeBrainPETAnatomyVolume(for mode: BrainPETAnatomyMode,
+                                            pet: ImageVolume? = nil) -> ImageVolume? {
+        let pet = pet ?? activePETQuantificationVolume
+        let candidates: [ImageVolume]
+        if let pet {
+            let studyCandidates = studyVolumes(anchoredAt: pet).filter {
+                let modality = Modality.normalize($0.modality)
+                return modality == .MR || modality == .CT
+            }
+            candidates = studyCandidates.isEmpty ? loadedAnatomicalVolumes : studyCandidates
+        } else {
+            candidates = loadedAnatomicalVolumes
+        }
+
+        func best(_ modality: Modality) -> ImageVolume? {
+            if let currentVolume,
+               Modality.normalize(currentVolume.modality) == modality,
+               candidates.contains(where: { $0.sessionIdentity == currentVolume.sessionIdentity }) {
+                return currentVolume
+            }
+            return candidates.first { Modality.normalize($0.modality) == modality }
+        }
+
+        switch mode {
+        case .automatic:
+            return best(.MR) ?? best(.CT)
+        case .mriAssisted:
+            return best(.MR)
+        case .ctAssisted:
+            return best(.CT)
+        case .petOnly:
+            return nil
+        }
     }
 
     public func preparePETMIPCine(for axis: Int) {
@@ -1906,17 +1942,20 @@ public final class ViewerViewModel: ObservableObject {
     @discardableResult
     public func runActiveBrainPETAnalysis(tracer: BrainPETTracer,
                                           tauSUVRThreshold: Double = 1.34,
-                                          normalDatabase: BrainPETNormalDatabase? = nil) -> BrainPETReport? {
+                                          normalDatabase: BrainPETNormalDatabase? = nil,
+                                          anatomyMode: BrainPETAnatomyMode = .petOnly) -> BrainPETReport? {
         let fallbackPET = currentVolume.flatMap {
             Modality.normalize($0.modality) == .PT ? $0 : nil
         }
         guard let pet = activePETQuantificationVolume ?? fallbackPET else {
             brainPETReport = nil
+            brainPETAnatomyAwareReport = nil
             statusMessage = "Load a brain PET volume before running brain analysis"
             return nil
         }
         guard let atlas = labeling.activeLabelMap else {
             brainPETReport = nil
+            brainPETAnatomyAwareReport = nil
             statusMessage = "Load or create a brain atlas label map before running brain PET analysis"
             return nil
         }
@@ -1926,16 +1965,21 @@ public final class ViewerViewModel: ObservableObject {
             normalDatabase: normalDatabase ?? matchingBrainPETNormalDatabase(for: tracer)
         )
         do {
-            let report = try BrainPETAnalysis.analyze(
+            let anatomyReport = try BrainPETAnalysis.analyzeAnatomyAware(
                 volume: pet,
                 atlas: atlas,
+                anatomyVolume: activeBrainPETAnatomyVolume(for: anatomyMode, pet: pet),
+                requestedMode: anatomyMode,
                 configuration: configuration
             )
+            let report = anatomyReport.anatomyAwareReport
             brainPETReport = report
-            statusMessage = report.summary
+            brainPETAnatomyAwareReport = anatomyReport
+            statusMessage = anatomyReport.summary
             return report
         } catch {
             brainPETReport = nil
+            brainPETAnatomyAwareReport = nil
             statusMessage = "Brain PET analysis failed: \(error.localizedDescription)"
             return nil
         }

@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 struct BrainPETPanel: View {
     @EnvironmentObject var vm: ViewerViewModel
     @State private var tracer: BrainPETTracer = .fdg
+    @State private var anatomyMode: BrainPETAnatomyMode = .automatic
     @State private var tauThreshold: Double = 1.34
     @State private var showNormalDatabaseImporter = false
     @State private var gaainSummary: GAAINReferenceDatasetSummary?
@@ -15,7 +16,10 @@ struct BrainPETPanel: View {
         VStack(alignment: .leading, spacing: 14) {
             header
             controls
-            if let report = vm.brainPETReport {
+            if let anatomyReport = vm.brainPETAnatomyAwareReport {
+                anatomyAwareSummaryView(anatomyReport)
+                reportView(anatomyReport.anatomyAwareReport)
+            } else if let report = vm.brainPETReport {
                 reportView(report)
             } else {
                 emptyState
@@ -47,6 +51,26 @@ struct BrainPETPanel: View {
                 }
             }
 
+            Picker("Anatomy", selection: $anatomyMode) {
+                ForEach(BrainPETAnatomyMode.allCases) { mode in
+                    Label(mode.displayName, systemImage: mode.systemImage).tag(mode)
+                }
+            }
+
+            if let anatomy = vm.activeBrainPETAnatomyVolume(for: anatomyMode) {
+                Label(anatomy.seriesDescription.isEmpty ? Modality.normalize(anatomy.modality).displayName : anatomy.seriesDescription,
+                      systemImage: anatomyMode.systemImage)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            } else if anatomyMode != .petOnly {
+                Label("No matching CT/MRI anatomy found; PET-only fallback will be used.",
+                      systemImage: "exclamationmark.triangle")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             if tracer.family == .tau {
                 HStack {
                     Text("Tau threshold")
@@ -61,7 +85,8 @@ struct BrainPETPanel: View {
 
             Button {
                 vm.runActiveBrainPETAnalysis(tracer: tracer,
-                                             tauSUVRThreshold: tauThreshold)
+                                             tauSUVRThreshold: tauThreshold,
+                                             anatomyMode: anatomyMode)
             } label: {
                 Label("Analyze", systemImage: "chart.xyaxis.line")
                     .frame(maxWidth: .infinity)
@@ -120,6 +145,105 @@ struct BrainPETPanel: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(TracerTheme.viewportBackground.opacity(0.55))
         .clipShape(RoundedRectangle(cornerRadius: 7))
+    }
+
+    private func anatomyAwareSummaryView(_ report: BrainPETAnatomyAwareReport) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label(report.resolvedMode.displayName, systemImage: report.resolvedMode.systemImage)
+                    .font(.system(size: 12, weight: .semibold))
+                Spacer()
+                Text(report.confidence.displayName)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(confidenceColor(report.confidence))
+            }
+            if let anatomy = report.anatomySeriesDescription,
+               !anatomy.isEmpty {
+                metric("Anatomy", anatomy)
+            }
+            HStack(spacing: 8) {
+                comparisonColumn(title: "Standard",
+                                 suvr: report.standardReport.targetSUVR,
+                                 centiloid: report.standardReport.centiloid)
+                comparisonColumn(title: "Anatomy-aware",
+                                 suvr: report.anatomyAwareReport.targetSUVR,
+                                 centiloid: report.anatomyAwareReport.centiloid)
+            }
+            if report.delta.targetSUVR != nil || report.delta.centiloid != nil {
+                HStack(spacing: 10) {
+                    if let delta = report.delta.targetSUVR {
+                        metricChip("ΔSUVR", String(format: "%+.3f", delta))
+                    }
+                    if let delta = report.delta.centiloid {
+                        metricChip("ΔCL", String(format: "%+.1f", delta))
+                    }
+                }
+            }
+            VStack(spacing: 4) {
+                ForEach(report.qcMetrics) { metric in
+                    HStack {
+                        Image(systemName: metric.passed ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                            .foregroundStyle(metric.passed ? .green : .orange)
+                            .frame(width: 16)
+                        Text(metric.title)
+                            .font(.caption2)
+                        Spacer()
+                        Text(metric.value)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+            }
+            if !report.warnings.isEmpty {
+                Divider()
+                ForEach(report.warnings.prefix(3), id: \.self) { warning in
+                    Text(warning)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .padding(10)
+        .background(TracerTheme.viewportBackground.opacity(0.72))
+        .overlay(
+            RoundedRectangle(cornerRadius: 7)
+                .stroke(TracerTheme.hairline, lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 7))
+    }
+
+    private func comparisonColumn(title: String, suvr: Double?, centiloid: Double?) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(suvr.map { String(format: "SUVR %.3f", $0) } ?? "SUVR --")
+                .font(.caption2.monospaced())
+            if let centiloid {
+                Text(String(format: "CL %.1f", centiloid))
+                    .font(.caption2.monospaced())
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(TracerTheme.panelBackground.opacity(0.55))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func metricChip(_ title: String, _ value: String) -> some View {
+        HStack(spacing: 4) {
+            Text(title)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .fontWeight(.semibold)
+        }
+        .font(.caption2.monospaced())
+        .padding(.horizontal, 7)
+        .padding(.vertical, 4)
+        .background(TracerTheme.accent.opacity(0.16))
+        .clipShape(RoundedRectangle(cornerRadius: 5))
     }
 
     private func reportView(_ report: BrainPETReport) -> some View {
@@ -478,6 +602,14 @@ struct BrainPETPanel: View {
             return z >= 2 ? .orange : .secondary
         case .generic:
             return abs(z) >= 2 ? .orange : .secondary
+        }
+    }
+
+    private func confidenceColor(_ confidence: BrainPETAnatomyConfidence) -> Color {
+        switch confidence {
+        case .high: return .green
+        case .medium: return .orange
+        case .low: return .secondary
         }
     }
 }
