@@ -3364,22 +3364,34 @@ public final class ViewerViewModel: ObservableObject {
     private func automaticPETMRExternalConfigurations() -> [PETMRDeformableRegistrationConfiguration] {
         var configs: [PETMRDeformableRegistrationConfiguration] = []
         let selectedSimpleITK = petMRDeformableRegistration.backend == .simpleITKMI
+        let selectedBRAINSFit = petMRDeformableRegistration.backend == .brainsFit
+        let selectedExtraArguments = petMRDeformableRegistration.extraArguments
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         var simpleITK = PETMRDeformableRegistrationConfiguration(
             backend: .simpleITKMI,
             executablePath: selectedSimpleITK ? petMRDeformableRegistration.executablePath : "",
             timeoutSeconds: min(max(petMRDeformableRegistration.timeoutSeconds, 120), 300),
             metricPreset: selectedSimpleITK ? petMRDeformableRegistration.metricPreset : .multimodalMI
         )
-        let selectedExtraArguments = petMRDeformableRegistration.extraArguments
-            .trimmingCharacters(in: .whitespacesAndNewlines)
         simpleITK.extraArguments = selectedSimpleITK && !selectedExtraArguments.isEmpty
             ? selectedExtraArguments
             : "--sampling 0.05 --iterations 120 --bins 64"
         if simpleITK.isExternalConfigured {
             configs.append(simpleITK)
         }
+        if selectedBRAINSFit {
+            var brainsFit = PETMRDeformableRegistrationConfiguration(
+                backend: .brainsFit,
+                executablePath: petMRDeformableRegistration.executablePath,
+                timeoutSeconds: min(max(petMRDeformableRegistration.timeoutSeconds, 120), 300),
+                metricPreset: petMRDeformableRegistration.metricPreset
+            )
+            brainsFit.extraArguments = selectedExtraArguments
+            configs.append(brainsFit)
+        }
         if petMRDeformableRegistration.isExternalConfigured,
-           petMRDeformableRegistration.backend != .simpleITKMI {
+           petMRDeformableRegistration.backend != .simpleITKMI,
+           petMRDeformableRegistration.backend != .brainsFit {
             configs.append(petMRDeformableRegistration)
         }
         return configs
@@ -3417,7 +3429,59 @@ public final class ViewerViewModel: ObservableObject {
         } else if best.note.localizedCaseInsensitiveContains("brain uptake fit") {
             note += " Brain uptake visual fit contributed to the selected fit."
         }
+        if let optimizerNote = petMROptimizerSummary(from: best.deformationQuality?.notes ?? []) {
+            note += " \(optimizerNote)."
+        }
         return note
+    }
+
+    private func petMROptimizerSummary(from notes: [String]) -> String? {
+        func value(prefix: String) -> String? {
+            notes.first { $0.hasPrefix(prefix) }.map { String($0.dropFirst(prefix.count)) }
+        }
+        guard let iterations = value(prefix: "optimizerIterations=") else { return nil }
+        let attempt = value(prefix: "maskAttempt=").map { ", mask \($0)" } ?? ""
+        return "Optimizer iterations \(iterations)\(attempt)"
+    }
+
+    private func petMRAutomaticDiagnostics(candidates: [PETMRFusionCandidate],
+                                           selected: PETMRFusionCandidate,
+                                           failedEngines: [String]) -> [String] {
+        var lines = candidates
+            .sorted {
+                let lhsScore = petMRFusionCandidateScore($0.quality)
+                let rhsScore = petMRFusionCandidateScore($1.quality)
+                if abs(lhsScore - rhsScore) > 0.001 { return lhsScore > rhsScore }
+                return $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending
+            }
+            .map { candidate -> String in
+                let marker = candidate.label == selected.label ? "SELECTED" : "rejected"
+                var metrics = [
+                    String(format: "score %.2f", petMRFusionCandidateScore(candidate.quality)),
+                    "QA \(candidate.quality.grade.displayName)"
+                ]
+                if let nmi = candidate.quality.normalizedMutualInformation {
+                    metrics.append(String(format: "NMI %.3f", nmi))
+                }
+                if let dice = candidate.quality.maskDice {
+                    metrics.append(String(format: "Dice %.2f", dice))
+                }
+                if let centroid = candidate.quality.centroidResidualMM {
+                    metrics.append(String(format: "centroid %.1f mm", centroid))
+                }
+                if let edge = candidate.quality.edgeAlignment {
+                    metrics.append(String(format: "edge %.2f", edge))
+                }
+                if let optimizer = petMROptimizerSummary(from: candidate.deformationQuality?.notes ?? []) {
+                    metrics.append(optimizer)
+                }
+                if !candidate.quality.warnings.isEmpty {
+                    metrics.append("warnings \(candidate.quality.warnings.joined(separator: ", "))")
+                }
+                return "\(marker): \(candidate.label) · \(metrics.joined(separator: " · "))"
+            }
+        lines += failedEngines.map { "failed: \($0)" }
+        return lines
     }
 
     public func fusePETMR(base: ImageVolume, overlay: ImageVolume) async {
@@ -3603,6 +3667,9 @@ public final class ViewerViewModel: ObservableObject {
             deformation: deformationQuality,
             allowBrainPETMRFitInside: registrationNote.localizedCaseInsensitiveContains("brain uptake fit")
         )
+        if !candidateInputs.isEmpty {
+            pair.registrationDiagnostics = ["Manual PET/MR mode tested \(candidateInputs.count) candidate input(s). Selected: \(qualityAfter.label)"]
+        }
         pair.objectWillChange.send()
         applyHangingProtocol(grid: .threeByTwo, panes: HangingPaneConfiguration.defaultPETMR)
         let qaLabel = pair.registrationQuality?.grade.displayName ?? RegistrationQualityGrade.unknown.displayName
@@ -3659,7 +3726,7 @@ public final class ViewerViewModel: ObservableObject {
         var failedEngines: [String] = []
         let externalConfigs = automaticPETMRExternalConfigurations()
         if !externalConfigs.isEmpty {
-            let seeds = topPETMRFusionCandidates(candidates, limit: 3)
+            let seeds = topPETMRFusionCandidates(candidates, limit: 1)
             for config in externalConfigs {
                 for seed in seeds {
                     statusMessage = "Auto-registering PET/MR: refining \(seed.label) with \(config.backend.displayName)..."
@@ -3696,6 +3763,9 @@ public final class ViewerViewModel: ObservableObject {
                                                      candidateCount: candidates.count,
                                                      failedEngines: failedEngines,
                                                      selectionNote: selection.selectionNote)
+        pair.registrationDiagnostics = petMRAutomaticDiagnostics(candidates: candidates,
+                                                                 selected: best,
+                                                                 failedEngines: failedEngines)
         pair.registrationQuality = RegistrationQualityAssurance.compare(
             before: geometryQuality,
             after: best.quality,

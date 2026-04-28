@@ -506,7 +506,10 @@ public enum PETMRRegistrationEngine {
         let intensitySamples: [(world: SIMD3<Double>, value: Float)] = samples.map {
             (world: $0.world, value: $0.value)
         }
-        let movingMaskSamples = maskWorldSamples(for: movingOnFixedGrid)
+        let brainMaskModel = brainPETMRMaskModel(moving: movingOnFixedGrid, fixed: fixed)
+        let movingMaskSamples = brainMaskModel.map {
+            maskWorldSamples(for: movingOnFixedGrid, minimumValue: $0.movingLower)
+        } ?? maskWorldSamples(for: movingOnFixedGrid)
         let fixedRange = finiteRange(intensitySamples.map { $0.value })
         let movingRange = movingOnFixedGrid.intensityRange
         guard samples.count >= 128,
@@ -525,7 +528,8 @@ public enum PETMRRegistrationEngine {
             movingMaskSamples: movingMaskSamples,
             fixedRange: fixedRange,
             movingRange: movingRange,
-            movingToFixed: .identity
+            movingToFixed: .identity,
+            brainMaskModel: brainMaskModel
         )
         guard identityScore.isFinite else { return nil }
 
@@ -548,7 +552,8 @@ public enum PETMRRegistrationEngine {
                 movingMaskSamples: movingMaskSamples,
                 fixedRange: fixedRange,
                 movingRange: movingRange,
-                movingToFixed: transform
+                movingToFixed: transform,
+                brainMaskModel: brainMaskModel
             )
             if score > best.score + 0.0005 {
                 best = SegmentationPolishCandidate(transform: transform,
@@ -613,7 +618,8 @@ public enum PETMRRegistrationEngine {
         }
 
         let note = String(
-            format: "Post-resample PET/MR segmentation polish, local edge/MI QA +%.3f, shift X %.1f / Y %.1f / Z %.1f mm, rotate X %.1f° / Y %.1f° / Z %.1f°",
+            format: "Post-resample PET/MR segmentation polish, %@local edge/MI QA +%.3f, shift X %.1f / Y %.1f / Z %.1f mm, rotate X %.1f° / Y %.1f° / Z %.1f°",
+            brainMaskModel == nil ? "" : "brain-mask ",
             scoreGain,
             best.translationMM.x,
             best.translationMM.y,
@@ -753,14 +759,31 @@ public enum PETMRRegistrationEngine {
                                                 movingMaskSamples: [SIMD3<Double>],
                                                 fixedRange: (min: Float, max: Float),
                                                 movingRange: (min: Float, max: Float),
-                                                movingToFixed: Transform3D) -> Double {
-        let overlap = maskOverlapScore(moving: moving,
+                                                movingToFixed: Transform3D,
+                                                brainMaskModel: BrainMaskModel? = nil) -> Double {
+        let overlap: Double
+        if let brainMaskModel {
+            overlap = brainMaskOverlapScore(moving: moving,
+                                            fixedSamples: fixedSamples,
+                                            movingToFixed: movingToFixed,
+                                            model: brainMaskModel)
+        } else {
+            overlap = maskOverlapScore(moving: moving,
                                        fixedSamples: fixedSamples,
                                        movingToFixed: movingToFixed)
+        }
         guard overlap.isFinite else { return -.infinity }
-        let containment = movingContainmentScore(movingMaskSamples: movingMaskSamples,
+        let containment: Double
+        if let brainMaskModel {
+            containment = brainMovingContainmentScore(movingMaskSamples: movingMaskSamples,
+                                                     fixed: fixed,
+                                                     movingToFixed: movingToFixed,
+                                                     model: brainMaskModel)
+        } else {
+            containment = movingContainmentScore(movingMaskSamples: movingMaskSamples,
                                                 fixed: fixed,
                                                 movingToFixed: movingToFixed)
+        }
         guard containment.isFinite else { return -.infinity }
         let nmi = mutualInformationScore(moving: moving,
                                          fixedSamples: fixedIntensitySamples,
@@ -773,7 +796,59 @@ public enum PETMRRegistrationEngine {
                                       movingToFixed: movingToFixed)
         let boundedNMI = nmi.isFinite ? max(0, min(1.5, nmi)) : 0
         let boundedEdge = edge.isFinite ? max(0, min(1, edge)) : 0
+        if brainMaskModel != nil {
+            return 0.44 * overlap + 0.26 * containment + 0.12 * boundedNMI + 0.18 * boundedEdge
+        }
         return 0.36 * overlap + 0.20 * containment + 0.24 * boundedNMI + 0.20 * boundedEdge
+    }
+
+    private static func brainMaskOverlapScore(moving: ImageVolume,
+                                              fixedSamples: [RegistrationSample],
+                                              movingToFixed: Transform3D,
+                                              model: BrainMaskModel) -> Double {
+        let fixedToMoving = movingToFixed.inverse
+        var intersection = 0.0
+        var fixedCount = 0.0
+        var movingCount = 0.0
+        var pairedCount = 0.0
+        for sample in fixedSamples {
+            let fixedInMask = sample.value >= model.fixedLower && sample.value <= model.fixedUpper
+            if fixedInMask { fixedCount += 1 }
+            let movingWorld = fixedToMoving.apply(to: sample.world)
+            let voxel = moving.voxelCoordinates(from: movingWorld)
+            guard let movingValue = linearSample(moving, x: voxel.x, y: voxel.y, z: voxel.z) else { continue }
+            let movingInMask = movingValue >= model.movingLower && movingValue <= model.movingUpper
+            if movingInMask { movingCount += 1 }
+            if fixedInMask && movingInMask { intersection += 1 }
+            pairedCount += 1
+        }
+        guard pairedCount >= 128,
+              fixedCount >= 32,
+              movingCount >= 32 else { return -.infinity }
+        let dice = (2 * intersection) / max(1, fixedCount + movingCount)
+        let coverage = intersection / max(1, fixedCount)
+        return 0.72 * dice + 0.28 * coverage
+    }
+
+    private static func brainMovingContainmentScore(movingMaskSamples: [SIMD3<Double>],
+                                                    fixed: ImageVolume,
+                                                    movingToFixed: Transform3D,
+                                                    model: BrainMaskModel) -> Double {
+        var inside = 0.0
+        var total = 0.0
+        for movingWorld in movingMaskSamples {
+            let fixedWorld = movingToFixed.apply(to: movingWorld)
+            let voxel = fixed.voxelCoordinates(from: fixedWorld)
+            total += 1
+            guard let fixedValue = linearSample(fixed, x: voxel.x, y: voxel.y, z: voxel.z) else {
+                continue
+            }
+            if fixedValue >= model.fixedLower && fixedValue <= model.fixedUpper {
+                inside += 1
+            }
+        }
+        guard total >= 32 else { return -.infinity }
+        return inside / total
     }
 
     private static func edgeAgreementScore(moving: ImageVolume,
@@ -1086,6 +1161,72 @@ public enum PETMRRegistrationEngine {
         return samples
     }
 
+    private static func maskWorldSamples(for moving: ImageVolume,
+                                         minimumValue: Float) -> [SIMD3<Double>] {
+        let step = max(1, Int(ceil(pow(Double(max(1, moving.width * moving.height * moving.depth)) / 12_000.0, 1.0 / 3.0))))
+        var samples: [SIMD3<Double>] = []
+        samples.reserveCapacity(16_000)
+        for z in Swift.stride(from: 0, to: moving.depth, by: step) {
+            for y in Swift.stride(from: 0, to: moving.height, by: step) {
+                for x in Swift.stride(from: 0, to: moving.width, by: step) {
+                    let value = moving.intensity(z: z, y: y, x: x)
+                    guard value.isFinite, value >= minimumValue else { continue }
+                    samples.append(moving.worldPoint(z: z, y: y, x: x))
+                }
+            }
+        }
+        if samples.count >= 32 {
+            return samples
+        }
+        return maskWorldSamples(for: moving)
+    }
+
+    private static func brainPETMRMaskModel(moving: ImageVolume,
+                                            fixed: ImageVolume) -> BrainMaskModel? {
+        guard isLikelyBrainMR(fixed) else { return nil }
+        guard let fixedP20 = sampledPercentile(fixed, percentile: 20, positiveOnly: true),
+              let fixedP998 = sampledPercentile(fixed, percentile: 99.8, positiveOnly: true),
+              let movingP90 = sampledPercentile(moving, percentile: 90, positiveOnly: true),
+              let movingP998 = sampledPercentile(moving, percentile: 99.8, positiveOnly: true) else {
+            return nil
+        }
+        let fixedSpan = max(1, fixed.intensityRange.max - fixed.intensityRange.min)
+        let movingSpan = max(1, moving.intensityRange.max - moving.intensityRange.min)
+        let fixedLower = max(fixedP20, fixed.intensityRange.min + fixedSpan * 0.06)
+        let movingLower = max(movingP90, moving.intensityRange.min + movingSpan * 0.08)
+        let fixedUpper = max(fixedLower, fixedP998)
+        let movingUpper = max(movingLower, movingP998)
+        guard fixedUpper > fixedLower,
+              movingUpper > movingLower else { return nil }
+        return BrainMaskModel(fixedLower: fixedLower,
+                              fixedUpper: fixedUpper,
+                              movingLower: movingLower,
+                              movingUpper: movingUpper)
+    }
+
+    private static func sampledPercentile(_ volume: ImageVolume,
+                                          percentile: Double,
+                                          positiveOnly: Bool) -> Float? {
+        let step = max(1, Int(ceil(pow(Double(max(1, volume.width * volume.height * volume.depth)) / 180_000.0, 1.0 / 3.0))))
+        var values: [Float] = []
+        values.reserveCapacity(200_000)
+        for z in Swift.stride(from: 0, to: volume.depth, by: step) {
+            for y in Swift.stride(from: 0, to: volume.height, by: step) {
+                for x in Swift.stride(from: 0, to: volume.width, by: step) {
+                    let value = volume.intensity(z: z, y: y, x: x)
+                    guard value.isFinite else { continue }
+                    if positiveOnly && value <= 0 { continue }
+                    values.append(value)
+                }
+            }
+        }
+        guard values.count >= 32 else { return nil }
+        values.sort()
+        let bounded = max(0, min(100, percentile))
+        let index = Int((Double(values.count - 1) * bounded / 100.0).rounded())
+        return values[max(0, min(values.count - 1, index))]
+    }
+
     private static func fixedSamples(for fixed: ImageVolume) -> [(world: SIMD3<Double>, value: Float)] {
         let modality = Modality.normalize(fixed.modality)
         let mask = maskKind(for: modality)
@@ -1301,6 +1442,13 @@ private struct SegmentationPolishCandidate {
     let translationMM: SIMD3<Double>
     let rotationRadians: SIMD3<Double>
     let score: Double
+}
+
+private struct BrainMaskModel {
+    let fixedLower: Float
+    let fixedUpper: Float
+    let movingLower: Float
+    let movingUpper: Float
 }
 
 private enum MaskKind {

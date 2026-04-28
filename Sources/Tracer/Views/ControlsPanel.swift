@@ -411,6 +411,20 @@ private struct FusionTab: View {
                     Text(pair.registrationNote)
                         .font(.system(size: 10))
                         .foregroundColor(.secondary)
+                    if !pair.registrationDiagnostics.isEmpty {
+                        DisclosureGroup("Registration candidates") {
+                            VStack(alignment: .leading, spacing: 3) {
+                                ForEach(pair.registrationDiagnostics, id: \.self) { line in
+                                    Text(line)
+                                        .font(.system(size: 9, design: .monospaced))
+                                        .foregroundColor(.secondary)
+                                        .textSelection(.enabled)
+                                }
+                            }
+                            .padding(.top, 2)
+                        }
+                        .font(.system(size: 10, weight: .semibold))
+                    }
                     Text("Base grid \(pair.baseGridLabel) · overlay grid \(pair.overlayGridLabel)")
                         .font(.system(size: 10, design: .monospaced))
                         .foregroundColor(.secondary)

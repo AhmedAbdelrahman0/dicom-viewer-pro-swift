@@ -164,8 +164,57 @@ final class LocalBrainPETDatasetSmokeTests: XCTestCase {
 
         XCTAssertTrue(ImageVolumeGeometry.gridsMatch(mri, result.warpedMoving))
         XCTAssertTrue(result.note.contains("SimpleITK MI"))
+        let iterationCount = optimizerIterations(from: result.deformationQuality?.notes ?? [])
+        XCTAssertGreaterThan(iterationCount, 0, "SimpleITK should report non-zero optimizer iterations: \(result.deformationQuality?.notes ?? [])")
         XCTAssertFalse(result.stderr.localizedCaseInsensitiveContains("registration failed"), result.stderr)
         XCTAssertFalse(result.warpedMoving.pixels.allSatisfy { !$0.isFinite || abs($0) < 1e-8 })
+        XCTAssertGreaterThan(meanAbsoluteDifference(prealigned, result.warpedMoving), 1e-6, "SimpleITK should change the prealigned PET voxels.")
+    }
+
+    @MainActor
+    func testAutomaticPETMRRejectsIterativeSimpleITKWhenItDoesNotImproveLocalBrainCase() async throws {
+        guard simpleITKAvailable() else {
+            throw XCTSkip("Python SimpleITK is not installed.")
+        }
+        let root = try smokeDirectory()
+        let subjectID = ProcessInfo.processInfo.environment["TRACER_BRAIN_PET_SUBJECT"] ?? "sub-control01"
+        let petURL = root
+            .appendingPathComponent(subjectID, isDirectory: true)
+            .appendingPathComponent("pet", isDirectory: true)
+            .appendingPathComponent("\(subjectID)_pet.nii.gz")
+        let mriURL = root
+            .appendingPathComponent(subjectID, isDirectory: true)
+            .appendingPathComponent("anat", isDirectory: true)
+            .appendingPathComponent("\(subjectID)_T1w.nii.gz")
+
+        let pet = try NIfTILoader.load(petURL, modalityHint: "PT")
+        let mri = try NIfTILoader.load(mriURL, modalityHint: "MR")
+        let vm = ViewerViewModel()
+        vm.loadedVolumes = [mri, pet]
+        vm.displayVolume(mri)
+        vm.petMRRegistrationMode = .automaticBestFit
+        vm.petMRDeformableRegistration = PETMRDeformableRegistrationConfiguration(
+            backend: .simpleITKMI,
+            executablePath: "python3",
+            extraArguments: "--sampling 0.03 --iterations 20 --bins 32",
+            timeoutSeconds: 120,
+            metricPreset: .multimodalMI
+        )
+
+        await vm.fusePETMR(base: mri, overlay: pet)
+
+        let pair = try XCTUnwrap(vm.fusion)
+        XCTAssertTrue(pair.registrationNote.localizedCaseInsensitiveContains("Scanner/world geometry retained"),
+                      "Auto should keep the safer candidate when iterative refinement does not improve QA, note: \(pair.registrationNote)")
+        XCTAssertFalse(pair.registrationDiagnostics.isEmpty, "Auto PET/MR should expose candidate diagnostics.")
+        XCTAssertTrue(pair.registrationDiagnostics.contains { $0.localizedCaseInsensitiveContains("SELECTED: Scanner geometry") },
+                      "Diagnostics should identify the selected candidate: \(pair.registrationDiagnostics)")
+        XCTAssertTrue(pair.registrationDiagnostics.contains { $0.localizedCaseInsensitiveContains("SimpleITK") },
+                      "Diagnostics should prove the SimpleITK candidate actually ran: \(pair.registrationDiagnostics)")
+        let displayed = pair.displayedOverlay
+        let scannerGeometry = VolumeResampler.resample(overlay: pet, toMatch: mri, mode: .linear)
+        XCTAssertLessThan(meanAbsoluteDifference(scannerGeometry, displayed), 1e-6,
+                          "Auto should not display the worse iterative overlay when it fails QA.")
     }
 
     private func makeCoarseBrainSmokeAtlas(for volume: ImageVolume) throws -> LabelMap {
@@ -323,5 +372,24 @@ final class LocalBrainPETDatasetSmokeTests: XCTestCase {
         } catch {
             return false
         }
+    }
+
+    private func optimizerIterations(from notes: [String]) -> Int {
+        for note in notes where note.hasPrefix("optimizerIterations=") {
+            return Int(note.dropFirst("optimizerIterations=".count)) ?? 0
+        }
+        return 0
+    }
+
+    private func meanAbsoluteDifference(_ lhs: ImageVolume, _ rhs: ImageVolume) -> Double {
+        guard lhs.pixels.count == rhs.pixels.count, !lhs.pixels.isEmpty else { return 0 }
+        var sum = 0.0
+        for index in lhs.pixels.indices {
+            let a = lhs.pixels[index]
+            let b = rhs.pixels[index]
+            guard a.isFinite, b.isFinite else { continue }
+            sum += abs(Double(a - b))
+        }
+        return sum / Double(lhs.pixels.count)
     }
 }

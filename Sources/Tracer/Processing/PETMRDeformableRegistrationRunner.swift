@@ -4,6 +4,7 @@ import simd
 public enum PETMRDeformableBackend: String, CaseIterable, Identifiable, Codable, Sendable {
     case internalBodyEnvelope
     case simpleITKMI
+    case brainsFit
     case antsSyN
     case synthMorph
     case voxelMorph
@@ -15,6 +16,7 @@ public enum PETMRDeformableBackend: String, CaseIterable, Identifiable, Codable,
         switch self {
         case .internalBodyEnvelope: return "Internal body warp"
         case .simpleITKMI: return "SimpleITK MI"
+        case .brainsFit: return "3D Slicer BRAINSFit"
         case .antsSyN: return "ANTs SyN"
         case .synthMorph: return "SynthMorph"
         case .voxelMorph: return "VoxelMorph"
@@ -30,6 +32,9 @@ public enum PETMRDeformableBackend: String, CaseIterable, Identifiable, Codable,
         switch self {
         case .internalBodyEnvelope: return ""
         case .simpleITKMI: return "python3"
+        case .brainsFit:
+            let slicerPath = "/Applications/Slicer.app/Contents/lib/Slicer-5.10/cli-modules/BRAINSFit"
+            return FileManager.default.isExecutableFile(atPath: slicerPath) ? slicerPath : "BRAINSFit"
         case .antsSyN: return "antsRegistration"
         case .synthMorph: return "mri_synthmorph"
         case .voxelMorph: return "python3"
@@ -43,6 +48,8 @@ public enum PETMRDeformableBackend: String, CaseIterable, Identifiable, Codable,
             return "Uses Tracer's built-in body-envelope alignment. No external tools required."
         case .simpleITKMI:
             return "Runs a local Python SimpleITK Mattes mutual-information rigid precision-polish after PET has been prealigned to the MR grid. Add --allow-scale in extra args only when scale is intentional."
+        case .brainsFit:
+            return "Runs 3D Slicer's BRAINSFit on Tracer's staged orthonormal PET/MR grid. Best used as a rigid, brain-cropped multimodal refinement candidate."
         case .antsSyN:
             return "Runs antsRegistration with rigid/affine/SyN stages and reads the warped PET NIfTI output."
         case .synthMorph:
@@ -127,6 +134,9 @@ public struct PETMRDeformableRegistrationConfiguration: Equatable, Sendable {
         }
         if backend == .simpleITKMI {
             return "SimpleITK MI will run via \(exe). Requires the Python SimpleITK package."
+        }
+        if backend == .brainsFit {
+            return "BRAINSFit will run via \(exe). Requires 3D Slicer or BRAINSFit on PATH."
         }
         return "\(backend.displayName) will run via \(exe)."
     }
@@ -239,11 +249,12 @@ public enum PETMRDeformableRegistrationRunner {
             gridNote = "; output grid was resampled to fixed MR geometry"
         }
         let deformationQuality = RegistrationQualityAssurance.loadDeformationQualitySidecar(from: qaURL)
+        let optimizerNote = optimizerSummary(from: deformationQuality?.notes ?? [])
 
         return PETMRDeformableRegistrationResult(
             warpedMoving: warpedOnFixedGrid,
             backend: configuration.backend,
-            note: "\(configuration.backend.displayName) deformable registration finished in \(String(format: "%.1f", Date().timeIntervalSince(start)))s\(gridNote)",
+            note: "\(configuration.backend.displayName) deformable registration finished in \(String(format: "%.1f", Date().timeIntervalSince(start)))s\(gridNote)\(optimizerNote)",
             stdout: output.stdout,
             stderr: output.stderr,
             durationSeconds: Date().timeIntervalSince(start),
@@ -283,13 +294,25 @@ public enum PETMRDeformableRegistrationRunner {
     private static func orthonormalRegistrationGrid(for fixed: ImageVolume) -> ImageVolume? {
         guard !directionIsOrthonormal(fixed.direction) else { return nil }
         let direction = orthonormalizedDirection(fixed.direction)
+        let centerVoxel = SIMD3<Double>(
+            Double(max(0, fixed.width - 1)) / 2,
+            Double(max(0, fixed.height - 1)) / 2,
+            Double(max(0, fixed.depth - 1)) / 2
+        )
+        let centerWorld = fixed.worldPoint(voxel: centerVoxel)
+        let centerOffset = direction * SIMD3<Double>(
+            centerVoxel.x * fixed.spacing.x,
+            centerVoxel.y * fixed.spacing.y,
+            centerVoxel.z * fixed.spacing.z
+        )
+        let origin = centerWorld - centerOffset
         return ImageVolume(
             pixels: [Float](repeating: 0, count: fixed.width * fixed.height * fixed.depth),
             depth: fixed.depth,
             height: fixed.height,
             width: fixed.width,
             spacing: (fixed.spacing.x, fixed.spacing.y, fixed.spacing.z),
-            origin: fixed.origin,
+            origin: (origin.x, origin.y, origin.z),
             direction: direction,
             modality: fixed.modality,
             seriesUID: fixed.seriesUID + "_external_orthonormal_grid",
@@ -346,6 +369,25 @@ public enum PETMRDeformableRegistrationRunner {
         return vector / length
     }
 
+    private static func optimizerSummary(from notes: [String]) -> String {
+        func value(prefix: String) -> String? {
+            notes.first { $0.hasPrefix(prefix) }.map { String($0.dropFirst(prefix.count)) }
+        }
+
+        var parts: [String] = []
+        if let iterations = value(prefix: "optimizerIterations=") {
+            parts.append("iterations \(iterations)")
+        }
+        if let attempt = value(prefix: "maskAttempt=") {
+            parts.append("attempt \(attempt)")
+        }
+        if let metric = value(prefix: "metricValue=") {
+            parts.append("metric \(metric)")
+        }
+        guard !parts.isEmpty else { return "" }
+        return "; " + parts.joined(separator: ", ")
+    }
+
     private struct CommandLine {
         var executable: String
         var arguments: [String]
@@ -385,6 +427,32 @@ public enum PETMRDeformableRegistrationRunner {
                     "--metric", configuration.metricPreset.rawValue
                 ] + extra,
                 environment: environment
+            )
+
+        case .brainsFit:
+            return CommandLine(
+                executable: exe,
+                arguments: [
+                    "--fixedVolume", fixed,
+                    "--movingVolume", moving,
+                    "--outputVolume", warped,
+                    "--outputTransform", transform,
+                    "--transformType", "Rigid",
+                    "--initializeTransformMode", "Off",
+                    "--maskProcessingMode", "ROIAUTO",
+                    "--ROIAutoDilateSize", "4",
+                    "--costMetric", brainsFitCostMetric(configuration.metricPreset),
+                    "--numberOfSamples", "200000",
+                    "--numberOfHistogramBins", "64",
+                    "--numberOfIterations", "1500",
+                    "--maximumStepLength", "0.20",
+                    "--minimumStepLength", "0.005",
+                    "--interpolationMode", "Linear",
+                    "--outputVolumePixelType", "float",
+                    "--failureExitCode", "0",
+                    "--writeTransformOnFailure"
+                ] + extra,
+                environment: ResourcePolicy.load().applyingSubprocessDefaults(to: ProcessInfo.processInfo.environment)
             )
 
         case .antsSyN:
@@ -437,6 +505,15 @@ public enum PETMRDeformableRegistrationRunner {
 
         case .internalBodyEnvelope:
             return CommandLine(executable: "", arguments: [], environment: [:])
+        }
+    }
+
+    private static func brainsFitCostMetric(_ preset: PETMRRegistrationMetricPreset) -> String {
+        switch preset {
+        case .sameContrastCC:
+            return "NC"
+        case .multimodalMI, .hybridMIAndCC:
+            return "MMI"
         }
     }
 

@@ -46,6 +46,7 @@ public final class FusionPair: ObservableObject {
     @Published public var registrationResampledOverlay: ImageVolume?
     @Published public var isGeometryResampled: Bool = false
     @Published public var registrationNote: String = "Assumes aligned geometry"
+    @Published public var registrationDiagnostics: [String] = []
     @Published public var registrationQuality: RegistrationQualityComparison?
     @Published public var manualTranslationMM = SIMD3<Double>(0, 0, 0)
     @Published public var manualRotationDegrees = SIMD3<Double>(0, 0, 0)
