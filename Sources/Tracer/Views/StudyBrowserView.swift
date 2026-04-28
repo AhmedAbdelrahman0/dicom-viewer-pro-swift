@@ -581,7 +581,7 @@ struct StudyBrowserView: View {
                             ForEach(study.series) { series in
                                 Button {
                                     setStatus(.inProgress, for: study)
-                                    Task { await vm.openIndexedSeries(series) }
+                                    Task { await vm.openIndexedSeries(series, autoFuse: false) }
                                 } label: {
                                     WorklistSeriesRow(entry: series)
                                 }
@@ -772,13 +772,43 @@ struct StudyBrowserView: View {
 
             if !filteredLoadedVolumes.isEmpty {
                 Section("Viewer Volumes") {
+                    Button(role: .destructive) {
+                        vm.closeAllVolumes()
+                    } label: {
+                        Label("Close All Loaded Series", systemImage: "xmark.square")
+                    }
+                    .buttonStyle(.plain)
+
                     ForEach(filteredLoadedVolumes) { volume in
-                        Button {
-                            vm.displayVolume(volume)
-                        } label: {
-                            VolumeRow(volume: volume)
+                        HStack(spacing: 8) {
+                            Button {
+                                vm.displayVolume(volume)
+                            } label: {
+                                VolumeRow(volume: volume)
+                            }
+                            .buttonStyle(.plain)
+
+                            Button(role: .destructive) {
+                                vm.closeVolume(volume)
+                            } label: {
+                                Image(systemName: "xmark.circle")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Close this loaded series")
                         }
-                        .buttonStyle(.plain)
+                        .contextMenu {
+                            Button {
+                                vm.displayVolume(volume)
+                            } label: {
+                                Label("Show Series", systemImage: "eye")
+                            }
+                            Button(role: .destructive) {
+                                vm.closeVolume(volume)
+                            } label: {
+                                Label("Close Series", systemImage: "xmark.circle")
+                            }
+                        }
                     }
                 }
             }

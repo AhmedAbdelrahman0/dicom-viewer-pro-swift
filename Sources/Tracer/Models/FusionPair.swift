@@ -1,4 +1,5 @@
 import Foundation
+import simd
 
 public enum Colormap: String, CaseIterable, Identifiable {
     case tracerPET = "tracer_pet", petRainbow = "pet_rainbow", petHotIron = "pet_hot_iron", petMagma = "pet_magma", petViridis = "pet_viridis"
@@ -40,9 +41,13 @@ public final class FusionPair: ObservableObject {
     /// Resampled overlay in the base's grid (optional). If nil, overlay is
     /// used directly (assumes matching geometry).
     @Published public var resampledOverlay: ImageVolume?
+    /// Overlay resampled by scanner geometry / registration before any
+    /// operator-side manual translation is applied.
+    @Published public var registrationResampledOverlay: ImageVolume?
     @Published public var isGeometryResampled: Bool = false
     @Published public var registrationNote: String = "Assumes aligned geometry"
     @Published public var registrationQuality: RegistrationQualityComparison?
+    @Published public var manualTranslationMM = SIMD3<Double>(0, 0, 0)
 
     public init(base: ImageVolume, overlay: ImageVolume) {
         self.baseVolume = base
@@ -73,5 +78,16 @@ public final class FusionPair: ObservableObject {
 
     public var overlayGridLabel: String {
         "\(overlayVolume.width)x\(overlayVolume.height)x\(overlayVolume.depth)"
+    }
+
+    public var manualTranslationLabel: String {
+        String(format: "X %.1f / Y %.1f / Z %.1f mm",
+               manualTranslationMM.x,
+               manualTranslationMM.y,
+               manualTranslationMM.z)
+    }
+
+    public var hasManualTranslation: Bool {
+        simd_length(manualTranslationMM) > 0.001
     }
 }

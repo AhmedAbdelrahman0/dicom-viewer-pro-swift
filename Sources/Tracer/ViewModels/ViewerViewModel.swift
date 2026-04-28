@@ -576,6 +576,7 @@ public final class ViewerViewModel: ObservableObject {
     private var volumeOperationTask: Task<Void, Never>?
     private var autoWindowTask: Task<Void, Never>?
     private var sliceRenderWarmupTask: Task<Void, Never>?
+    private var fusionAdjustmentTask: Task<Void, Never>?
     private var dynamicPlaybackTask: Task<Void, Never>?
     private var dynamicTACTask: Task<Void, Never>?
     private var petMIPProjectionCache: [PETMIPProjectionKey: PETMIPProjection] = [:]
@@ -2502,7 +2503,7 @@ public final class ViewerViewModel: ObservableObject {
 
     // MARK: - Loading
 
-    public func loadNIfTI(url: URL, autoFuse: Bool = true) async {
+    public func loadNIfTI(url: URL, autoFuse: Bool = false) async {
         let sourcePath = NIfTILoader.canonicalSourcePath(for: url)
         if let existing = loadedVolume(sourcePath: sourcePath) {
             displayVolume(existing)
@@ -2559,7 +2560,6 @@ public final class ViewerViewModel: ObservableObject {
             for mr in mrSeries.prefix(6) {
                 await openSeries(mr, autoFuse: false)
             }
-            await autoFusePETCT()
             if mrSeries.isEmpty {
                 applyHangingProtocol(grid: .defaultPETCT, panes: HangingPaneConfiguration.defaultPETCT)
             } else {
@@ -2567,8 +2567,8 @@ public final class ViewerViewModel: ObservableObject {
                                      panes: HangingPaneConfiguration.defaultUnified)
             }
             statusMessage = mrSeries.isEmpty
-                ? "Opened PET/CT study: \(pair.ct.displayName) + \(pair.pet.displayName)"
-                : "Opened unified CT/MR/PET study: \(pair.ct.displayName) + \(pair.pet.displayName) + \(min(6, mrSeries.count)) MR"
+                ? "Opened PET/CT study. Choose CT + PET in Fusion to fuse."
+                : "Opened unified CT/MR/PET study. Choose the anatomical and PET series in Fusion to fuse."
             return
         }
 
@@ -2578,8 +2578,8 @@ public final class ViewerViewModel: ObservableObject {
                 await openSeries(mr, autoFuse: false)
             }
             await openSeries(pair.pet, autoFuse: false)
-            await autoFusePETMR()
-            statusMessage = "Opened PET/MR study: \(pair.mr.displayName) + \(pair.pet.displayName)"
+            resetPETMRHangingProtocol()
+            statusMessage = "Opened PET/MR study. Choose the MR sequence and PET series in Fusion to fuse."
             return
         }
 
@@ -2599,11 +2599,11 @@ public final class ViewerViewModel: ObservableObject {
         // Open the first new series automatically; if everything was already
         // known, select the existing match instead of loading a duplicate.
         if let first = merge.added.first ?? series.first.flatMap({ loadedSeriesMatch(for: $0) }) {
-            await openSeries(first)
+            await openSeries(first, autoFuse: false)
         }
     }
 
-    public func openSeries(_ series: DICOMSeries, autoFuse: Bool = true) async {
+    public func openSeries(_ series: DICOMSeries, autoFuse: Bool = false) async {
         if let existing = loadedVolume(seriesUID: series.uid) {
             displayVolume(existing)
             statusMessage = "Already loaded: \(series.displayName)"
@@ -2744,7 +2744,7 @@ public final class ViewerViewModel: ObservableObject {
         JobManager.shared.markCancellationRequested(operationID: "pacs-index")
     }
 
-    public func openIndexedSeries(_ entry: PACSIndexedSeriesSnapshot, autoFuse: Bool = true) async {
+    public func openIndexedSeries(_ entry: PACSIndexedSeriesSnapshot, autoFuse: Bool = false) async {
         switch entry.kind {
         case .dicom:
             await openIndexedDICOMSeries(entry, autoFuse: autoFuse)
@@ -2772,19 +2772,18 @@ public final class ViewerViewModel: ObservableObject {
             }
             await openIndexedSeries(pet, autoFuse: false)
             if anatomicalModality == .MR {
-                await autoFusePETMR()
+                resetPETMRHangingProtocol()
+            } else if !preferredMRDisplaySeries(in: study.series).isEmpty {
+                applyHangingProtocol(grid: HangingGridLayout(columns: 4, rows: 2),
+                                     panes: HangingPaneConfiguration.defaultUnified)
             } else {
-                await autoFusePETCT()
-                if !preferredMRDisplaySeries(in: study.series).isEmpty {
-                    applyHangingProtocol(grid: HangingGridLayout(columns: 4, rows: 2),
-                                         panes: HangingPaneConfiguration.defaultUnified)
-                }
+                applyHangingProtocol(grid: .defaultPETCT, panes: HangingPaneConfiguration.defaultPETCT)
             }
             let hasMRSeries = !preferredMRDisplaySeries(in: study.series).isEmpty
             let label = anatomicalModality == .MR
                 ? "PET/MR"
                 : (hasMRSeries ? "unified CT/MR/PET" : "PET/CT")
-            statusMessage = "Opened \(label) study: \(study.patientName.isEmpty ? study.patientID : study.patientName)"
+            statusMessage = "Opened \(label) study. Choose the series to fuse in Fusion."
             return
         }
 
@@ -2805,7 +2804,7 @@ public final class ViewerViewModel: ObservableObject {
             statusMessage = "Worklist study has no series"
             return
         }
-        await openIndexedSeries(first)
+        await openIndexedSeries(first, autoFuse: false)
         statusMessage = "Opened study: \(study.patientName.isEmpty ? study.patientID : study.patientName)"
     }
 
@@ -2999,7 +2998,7 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     private func openIndexedDICOMSeries(_ entry: PACSIndexedSeriesSnapshot,
-                                        autoFuse: Bool = true) async {
+                                        autoFuse: Bool = false) async {
         isLoading = true
         statusMessage = "Loading \(entry.displayName)..."
         defer { isLoading = false }
@@ -3056,6 +3055,132 @@ public final class ViewerViewModel: ObservableObject {
     public func removeOverlay() {
         fusion = nil
         statusMessage = "Overlay removed"
+    }
+
+    public func closeVolume(_ volume: ImageVolume) {
+        guard loadedVolumes.contains(where: { $0.id == volume.id }) else { return }
+        if hasGeneratedStudySessionContent {
+            saveOrUpdateCurrentStudySession(announce: false, includeLabelMaps: true)
+        }
+
+        let wasCurrent = currentVolume?.id == volume.id
+        let closedStudyUID = volume.studyUID
+        loadedVolumes.removeAll { $0.id == volume.id }
+
+        if let pair = fusion,
+           pair.baseVolume.id == volume.id ||
+           pair.overlayVolume.id == volume.id ||
+           pair.displayedOverlay.id == volume.id {
+            fusion = nil
+            fusionAdjustmentTask?.cancel()
+            fusionAdjustmentTask = nil
+        }
+
+        clearSliceRenderCache()
+        clearPETMIPRenderedImageCache()
+
+        if loadedVolumes.isEmpty {
+            currentVolume = nil
+            activeStudySessionKey = nil
+            activeStudySessionID = nil
+            studySessions = []
+            clearCurrentStudySessionState()
+        } else if wasCurrent {
+            let replacement = loadedVolumes.first {
+                !closedStudyUID.isEmpty && $0.studyUID == closedStudyUID
+            } ?? loadedVolumes.first
+            if let replacement {
+                displayVolume(replacement)
+            }
+        }
+
+        statusMessage = "Closed series: \(volume.seriesDescription.isEmpty ? Modality.normalize(volume.modality).displayName : volume.seriesDescription)"
+    }
+
+    public func closeAllVolumes() {
+        guard !loadedVolumes.isEmpty else { return }
+        if hasGeneratedStudySessionContent {
+            saveOrUpdateCurrentStudySession(announce: false, includeLabelMaps: true)
+        }
+        let count = loadedVolumes.count
+        loadedVolumes.removeAll()
+        fusion = nil
+        fusionAdjustmentTask?.cancel()
+        fusionAdjustmentTask = nil
+        currentVolume = nil
+        activeStudySessionKey = nil
+        activeStudySessionID = nil
+        studySessions = []
+        clearCurrentStudySessionState()
+        clearSliceRenderCache()
+        clearPETMIPRenderedImageCache()
+        statusMessage = "Closed \(count) loaded series"
+    }
+
+    public func setFusionManualTranslation(x: Double, y: Double, z: Double) {
+        let next = SIMD3<Double>(
+            max(-120, min(120, x)),
+            max(-120, min(120, y)),
+            max(-120, min(120, z))
+        )
+        fusion?.manualTranslationMM = next
+        fusion?.objectWillChange.send()
+        objectWillChange.send()
+        fusionAdjustmentTask?.cancel()
+        fusionAdjustmentTask = Task { [weak self] in
+            await self?.applyFusionManualTranslation(next)
+        }
+    }
+
+    public func nudgeFusionManualTranslation(dx: Double, dy: Double, dz: Double) {
+        let current = fusion?.manualTranslationMM ?? SIMD3<Double>(0, 0, 0)
+        setFusionManualTranslation(x: current.x + dx,
+                                   y: current.y + dy,
+                                   z: current.z + dz)
+    }
+
+    public func resetFusionManualTranslation() {
+        setFusionManualTranslation(x: 0, y: 0, z: 0)
+    }
+
+    public func applyFusionManualTranslation(_ offset: SIMD3<Double>) async {
+        guard let pair = fusion else { return }
+        let base = pair.baseVolume
+        let overlay = pair.registrationResampledOverlay ?? pair.overlayVolume
+        guard simd_length(offset) > 0.001 else {
+            pair.resampledOverlay = pair.registrationResampledOverlay
+            pair.isGeometryResampled = pair.resampledOverlay != nil
+            pair.manualTranslationMM = SIMD3<Double>(0, 0, 0)
+            pair.objectWillChange.send()
+            objectWillChange.send()
+            clearSliceRenderCache()
+            scheduleVisibleSliceCacheWarmup(reason: "fusion manual reset")
+            statusMessage = "Fusion manual offset reset"
+            return
+        }
+
+        let shifted = await Task.detached(priority: .userInitiated) {
+            VolumeResampler.resample(
+                source: overlay,
+                target: base,
+                transform: Transform3D.translation(-offset.x, -offset.y, -offset.z),
+                mode: .linear
+            )
+        }.value
+
+        guard !Task.isCancelled, let activePair = fusion, activePair === pair else { return }
+        pair.resampledOverlay = shifted
+        pair.isGeometryResampled = true
+        pair.manualTranslationMM = offset
+        pair.objectWillChange.send()
+        objectWillChange.send()
+        clearSliceRenderCache()
+        if Modality.normalize(pair.displayedOverlay.modality) == .PT {
+            clearPETMIPRenderedImageCache()
+            startPETMIPCineWarmupForVolume(pair.displayedOverlay)
+        }
+        scheduleVisibleSliceCacheWarmup(reason: "fusion manual offset")
+        statusMessage = "Fusion manual offset: \(pair.manualTranslationLabel)"
     }
 
     @discardableResult
@@ -3350,6 +3475,7 @@ public final class ViewerViewModel: ObservableObject {
 
         let pair = FusionPair(base: base, overlay: overlay)
         pair.resampledOverlay = resampledOverlay
+        pair.registrationResampledOverlay = resampledOverlay
         pair.isGeometryResampled = resampledOverlay != nil
         pair.registrationNote = resampledOverlay == nil
             ? "Overlay already matches base grid"

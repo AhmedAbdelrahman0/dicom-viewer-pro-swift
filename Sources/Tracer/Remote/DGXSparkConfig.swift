@@ -109,6 +109,61 @@ public struct DGXSparkConfig: Codable, Equatable, Sendable {
                 return trimmed
             }
     }
+
+    public var readinessMessage: String? {
+        if !enabled {
+            if let detected = Self.detectedNVIDIASparkProfile(enabled: true) {
+                return "DGX Spark is disabled. Detected \(detected.host); enable or apply the detected profile in Settings."
+            }
+            return "Enable DGX Spark in Settings."
+        }
+        if host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Set a DGX Spark host in Settings."
+        }
+        return nil
+    }
+
+    public static func detectedNVIDIASparkProfile(enabled: Bool = true) -> DGXSparkConfig? {
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser.path
+        let identity = "\(home)/Library/Application Support/NVIDIA/Sync/config/nvsync.key"
+        let candidateConfigs = [
+            "\(home)/.ssh/config",
+            "\(home)/Library/Application Support/NVIDIA/Sync/config/ssh_config"
+        ]
+
+        let host = candidateConfigs
+            .compactMap { try? String(contentsOfFile: $0) }
+            .compactMap(firstSparkHostAlias)
+            .first
+
+        guard let host else { return nil }
+        return DGXSparkConfig(
+            host: host,
+            user: NSUserName().isEmpty ? "ahmed" : NSUserName(),
+            port: 22,
+            identityFile: fm.fileExists(atPath: identity) ? identity : "",
+            remoteWorkdir: "~/tracer-remote",
+            enabled: enabled
+        )
+    }
+
+    private static func firstSparkHostAlias(in contents: String) -> String? {
+        for rawLine in contents.split(whereSeparator: \.isNewline) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            let lower = line.lowercased()
+            guard lower.hasPrefix("host ") else { continue }
+            let aliases = line
+                .dropFirst(5)
+                .split(separator: " ")
+                .map(String.init)
+                .filter { !$0.contains("*") && !$0.contains("?") }
+            if let alias = aliases.first(where: { $0.lowercased().contains("spark") }) {
+                return alias
+            }
+        }
+        return nil
+    }
 }
 
 public extension Notification.Name {

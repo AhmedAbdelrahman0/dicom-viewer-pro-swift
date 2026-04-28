@@ -425,6 +425,10 @@ private struct FusionTab: View {
                     registrationQualityCard(quality)
                 }
 
+                if pair.isPETMR {
+                    manualAlignmentPanel(pair)
+                }
+
                 Toggle("Show PET overlay", isOn: Binding(
                     get: { vm.fusion?.overlayVisible ?? false },
                     set: { vm.setFusionOverlayVisible($0) }
@@ -633,6 +637,83 @@ private struct FusionTab: View {
         case .fail: return "xmark.octagon"
         case .unknown: return "questionmark.diamond"
         }
+    }
+
+    private func manualAlignmentPanel(_ pair: FusionPair) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Label("Manual PET/MR alignment", systemImage: "arrow.up.left.and.arrow.down.right")
+                    .font(.system(size: 11, weight: .semibold))
+                Spacer()
+                Text(pair.manualTranslationLabel)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+
+            Text("Nudge the PET layer in patient LPS space after registration. Positive X = left, Y = posterior, Z = superior.")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            manualAxisRow(title: "X L/R",
+                          value: pair.manualTranslationMM.x,
+                          negative: { vm.nudgeFusionManualTranslation(dx: -1, dy: 0, dz: 0) },
+                          positive: { vm.nudgeFusionManualTranslation(dx: 1, dy: 0, dz: 0) },
+                          coarseNegative: { vm.nudgeFusionManualTranslation(dx: -5, dy: 0, dz: 0) },
+                          coarsePositive: { vm.nudgeFusionManualTranslation(dx: 5, dy: 0, dz: 0) })
+            manualAxisRow(title: "Y P/A",
+                          value: pair.manualTranslationMM.y,
+                          negative: { vm.nudgeFusionManualTranslation(dx: 0, dy: -1, dz: 0) },
+                          positive: { vm.nudgeFusionManualTranslation(dx: 0, dy: 1, dz: 0) },
+                          coarseNegative: { vm.nudgeFusionManualTranslation(dx: 0, dy: -5, dz: 0) },
+                          coarsePositive: { vm.nudgeFusionManualTranslation(dx: 0, dy: 5, dz: 0) })
+            manualAxisRow(title: "Z S/I",
+                          value: pair.manualTranslationMM.z,
+                          negative: { vm.nudgeFusionManualTranslation(dx: 0, dy: 0, dz: -1) },
+                          positive: { vm.nudgeFusionManualTranslation(dx: 0, dy: 0, dz: 1) },
+                          coarseNegative: { vm.nudgeFusionManualTranslation(dx: 0, dy: 0, dz: -5) },
+                          coarsePositive: { vm.nudgeFusionManualTranslation(dx: 0, dy: 0, dz: 5) })
+
+            Button {
+                vm.resetFusionManualTranslation()
+            } label: {
+                Label("Reset Manual Offset", systemImage: "arrow.counterclockwise")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(!pair.hasManualTranslation)
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.secondary.opacity(0.08))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(TracerTheme.hairline, lineWidth: 1)
+        )
+        .cornerRadius(6)
+    }
+
+    private func manualAxisRow(title: String,
+                               value: Double,
+                               negative: @escaping () -> Void,
+                               positive: @escaping () -> Void,
+                               coarseNegative: @escaping () -> Void,
+                               coarsePositive: @escaping () -> Void) -> some View {
+        HStack(spacing: 5) {
+            Text(title)
+                .font(.system(size: 10, weight: .semibold))
+                .frame(width: 44, alignment: .leading)
+            Text(String(format: "%+.1f", value))
+                .font(.system(size: 10, design: .monospaced))
+                .frame(width: 48, alignment: .trailing)
+            Button("-5", action: coarseNegative)
+            Button("-1", action: negative)
+            Button("+1", action: positive)
+            Button("+5", action: coarsePositive)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.mini)
     }
 
     private var hangingProtocolPanel: some View {

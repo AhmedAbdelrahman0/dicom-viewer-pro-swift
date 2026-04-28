@@ -187,6 +187,54 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertGreaterThan(result.displacementMM, 12)
     }
 
+    @MainActor
+    func testCloseVolumeClearsFusionAndFallsBackToRemainingSeries() async throws {
+        let vm = ViewerViewModel()
+        let mr = makeTestVolume(modality: "MR", description: "T1")
+        let pet = makeTestVolume(modality: "PT", description: "FDG PET")
+        vm.loadedVolumes = [mr, pet]
+        vm.displayVolume(mr)
+
+        await vm.fusePETMR(base: mr, overlay: pet)
+        XCTAssertNotNil(vm.fusion)
+
+        vm.closeVolume(pet)
+
+        XCTAssertNil(vm.fusion)
+        XCTAssertEqual(vm.loadedVolumes.count, 1)
+        XCTAssertTrue(vm.currentVolume === mr)
+        XCTAssertTrue(vm.statusMessage.contains("Closed series"))
+    }
+
+    @MainActor
+    func testManualFusionTranslationShiftsDisplayedOverlayOnBaseGrid() async throws {
+        let size = 5
+        var pixels = [Float](repeating: 0, count: size * size * size)
+        pixels[2 * size * size + 2 * size + 2] = 10
+        let mr = makeTestVolume(modality: "MR", description: "T1", width: size, height: size, depth: size, fill: 0)
+        let pet = ImageVolume(
+            pixels: pixels,
+            depth: size,
+            height: size,
+            width: size,
+            modality: "PT",
+            seriesDescription: "FDG PET"
+        )
+        let vm = ViewerViewModel()
+        vm.loadedVolumes = [mr, pet]
+        vm.displayVolume(mr)
+
+        await vm.fusePETMR(base: mr, overlay: pet)
+        let pair = try XCTUnwrap(vm.fusion)
+        await vm.applyFusionManualTranslation(SIMD3<Double>(1, 0, 0))
+
+        XCTAssertEqual(pair.manualTranslationMM.x, 1, accuracy: 1e-6)
+        XCTAssertTrue(pair.hasManualTranslation)
+        let shifted = pair.displayedOverlay
+        XCTAssertEqual(shifted.intensity(z: 2, y: 2, x: 3), 10, accuracy: 1e-5)
+        XCTAssertEqual(shifted.intensity(z: 2, y: 2, x: 2), 0, accuracy: 1e-5)
+    }
+
     func testPETMRDeformableRunnerLoadsWarpedOutputFromWrapper() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("PETMRDeformableRunner-\(UUID().uuidString)", isDirectory: true)

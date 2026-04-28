@@ -386,6 +386,16 @@ public struct DGXSparkSettingsTab: View {
         Form {
             Section("Connection") {
                 Toggle("Enable DGX Spark remote execution", isOn: $config.enabled)
+                if let detected = DGXSparkConfig.detectedNVIDIASparkProfile(enabled: true),
+                   (config.host.isEmpty || config.host != detected.host) {
+                    Button {
+                        config = detected
+                        config.save()
+                        probeStatus = "Applied detected NVIDIA Spark profile: \(detected.sshDestination)"
+                    } label: {
+                        Label("Use Detected NVIDIA Spark Profile", systemImage: "bolt.horizontal.circle")
+                    }
+                }
                 TextField("Host", text: $config.host,
                           prompt: Text("dgx-spark.local or 192.168.1.42"))
                     .textFieldStyle(.roundedBorder)

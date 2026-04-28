@@ -93,7 +93,10 @@ struct BrainPETPanel: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
-            .disabled(vm.labeling.activeLabelMap == nil || vm.activePETQuantificationVolume == nil)
+            .disabled(vm.activePETQuantificationVolume == nil)
+            .help(vm.labeling.activeLabelMap == nil
+                  ? "Analyze will prompt for a PET-aligned brain atlas label map."
+                  : "Run FDG, amyloid, or tau regional brain PET analysis.")
 
             HStack(spacing: 8) {
                 Button {
@@ -395,6 +398,19 @@ struct BrainPETPanel: View {
                 .controlSize(.small)
                 .disabled(isGAAINRemoteRunning)
 
+                if DGXSparkConfig.load().readinessMessage != nil,
+                   let detected = DGXSparkConfig.detectedNVIDIASparkProfile(enabled: true) {
+                    Button {
+                        detected.save()
+                        gaainStatus = "Applied detected Spark profile: \(detected.sshDestination)"
+                    } label: {
+                        Label("Use Detected Spark Profile", systemImage: "bolt.horizontal.circle")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+
                 if let summary = gaainSummary {
                     VStack(alignment: .leading, spacing: 5) {
                         metric("Files", "\(summary.completeFileCount)/\(summary.files.count)")
@@ -501,9 +517,14 @@ struct BrainPETPanel: View {
     private func launchGAAINOnSpark() async {
         guard !isGAAINRemoteRunning else { return }
         let operationID = "brain-pet-gaain-reference-spark"
-        let cfg = DGXSparkConfig.load()
+        var cfg = DGXSparkConfig.load()
+        if cfg.readinessMessage != nil,
+           let detected = DGXSparkConfig.detectedNVIDIASparkProfile(enabled: true) {
+            detected.save()
+            cfg = detected
+        }
         guard cfg.enabled, cfg.isConfigured else {
-            gaainStatus = "Enable and configure DGX Spark in Settings before launching the GAAIN build."
+            gaainStatus = cfg.readinessMessage ?? "Enable and configure DGX Spark in Settings before launching the GAAIN build."
             JobManager.shared.start(JobUpdate(
                 operationID: operationID,
                 kind: .brainPETReference,
