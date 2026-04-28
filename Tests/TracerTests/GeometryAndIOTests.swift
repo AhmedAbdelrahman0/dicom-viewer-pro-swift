@@ -187,6 +187,53 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertGreaterThan(result.displacementMM, 12)
     }
 
+    func testPETMRBodyWarpFitsLargePETEnvelopeIntoMRGrid() {
+        func blockVolume(modality: String,
+                         description: String,
+                         size: Int,
+                         bodyRange: Range<Int>,
+                         value: Float) -> ImageVolume {
+            var pixels = [Float](repeating: 0, count: size * size * size)
+            for z in bodyRange {
+                for y in bodyRange {
+                    for x in bodyRange {
+                        pixels[z * size * size + y * size + x] = value
+                    }
+                }
+            }
+            return ImageVolume(
+                pixels: pixels,
+                depth: size,
+                height: size,
+                width: size,
+                modality: modality,
+                seriesDescription: description
+            )
+        }
+
+        let mr = blockVolume(modality: "MR", description: "Regional T1", size: 16, bodyRange: 4..<12, value: 10)
+        let pet = blockVolume(modality: "PT", description: "Whole-body FDG PET", size: 24, bodyRange: 2..<22, value: 5)
+
+        let registration = PETMRRegistrationEngine.estimatePETToMR(
+            pet: pet,
+            mr: mr,
+            mode: .rigidThenDeformable
+        )
+        let resampled = VolumeResampler.resample(
+            source: pet,
+            target: mr,
+            transform: registration.fixedToMoving,
+            mode: .linear
+        )
+
+        XCTAssertEqual(resampled.width, mr.width)
+        XCTAssertEqual(resampled.height, mr.height)
+        XCTAssertEqual(resampled.depth, mr.depth)
+        XCTAssertGreaterThan(resampled.intensity(z: 8, y: 8, x: 8), 4.5)
+        XCTAssertEqual(resampled.intensity(z: 8, y: 8, x: 2), 0, accuracy: 1e-5)
+        XCTAssertEqual(resampled.intensity(z: 8, y: 8, x: 14), 0, accuracy: 1e-5)
+    }
+
     @MainActor
     func testCloseVolumeClearsFusionAndFallsBackToRemainingSeries() async throws {
         let vm = ViewerViewModel()
@@ -233,6 +280,53 @@ final class GeometryAndIOTests: XCTestCase {
         let shifted = pair.displayedOverlay
         XCTAssertEqual(shifted.intensity(z: 2, y: 2, x: 3), 10, accuracy: 1e-5)
         XCTAssertEqual(shifted.intensity(z: 2, y: 2, x: 2), 0, accuracy: 1e-5)
+    }
+
+    @MainActor
+    func testPETMRFusionDisplaysLargePETOnMRGridAfterBodyWarp() async throws {
+        func blockVolume(modality: String,
+                         description: String,
+                         size: Int,
+                         bodyRange: Range<Int>,
+                         value: Float) -> ImageVolume {
+            var pixels = [Float](repeating: 0, count: size * size * size)
+            for z in bodyRange {
+                for y in bodyRange {
+                    for x in bodyRange {
+                        pixels[z * size * size + y * size + x] = value
+                    }
+                }
+            }
+            return ImageVolume(
+                pixels: pixels,
+                depth: size,
+                height: size,
+                width: size,
+                modality: modality,
+                seriesDescription: description
+            )
+        }
+
+        let vm = ViewerViewModel()
+        let mr = blockVolume(modality: "MR", description: "Regional T1", size: 16, bodyRange: 4..<12, value: 10)
+        let pet = blockVolume(modality: "PT", description: "Whole-body FDG PET", size: 24, bodyRange: 2..<22, value: 5)
+        vm.loadedVolumes = [mr, pet]
+        vm.displayVolume(mr)
+        vm.petMRRegistrationMode = .rigidThenDeformable
+        vm.petMRDeformableRegistration = PETMRDeformableRegistrationConfiguration(backend: .internalBodyEnvelope)
+
+        await vm.fusePETMR(base: mr, overlay: pet)
+
+        let pair = try XCTUnwrap(vm.fusion)
+        let displayed = pair.displayedOverlay
+        XCTAssertTrue(pair.isPETMR)
+        XCTAssertTrue(pair.isGeometryResampled)
+        XCTAssertEqual(displayed.width, mr.width)
+        XCTAssertEqual(displayed.height, mr.height)
+        XCTAssertEqual(displayed.depth, mr.depth)
+        XCTAssertGreaterThan(displayed.intensity(z: 8, y: 8, x: 8), 4.5)
+        XCTAssertEqual(displayed.intensity(z: 8, y: 8, x: 14), 0, accuracy: 1e-5)
+        XCTAssertTrue(pair.registrationNote.localizedCaseInsensitiveContains("body"))
     }
 
     func testPETMRDeformableRunnerLoadsWarpedOutputFromWrapper() async throws {

@@ -80,6 +80,10 @@ public final class FusionPair: ObservableObject {
         "\(overlayVolume.width)x\(overlayVolume.height)x\(overlayVolume.depth)"
     }
 
+    public var displayedOverlayGridLabel: String {
+        "\(displayedOverlay.width)x\(displayedOverlay.height)x\(displayedOverlay.depth)"
+    }
+
     public var manualTranslationLabel: String {
         String(format: "X %.1f / Y %.1f / Z %.1f mm",
                manualTranslationMM.x,

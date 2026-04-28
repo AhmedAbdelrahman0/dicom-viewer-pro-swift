@@ -413,6 +413,11 @@ private struct FusionTab: View {
                     Text("Base grid \(pair.baseGridLabel) · overlay grid \(pair.overlayGridLabel)")
                         .font(.system(size: 10, design: .monospaced))
                         .foregroundColor(.secondary)
+                    if pair.isGeometryResampled {
+                        Text("Displayed PET grid \(pair.displayedOverlayGridLabel)")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
                 }
                 .padding(8)
                 .frame(maxWidth: .infinity, alignment: .leading)

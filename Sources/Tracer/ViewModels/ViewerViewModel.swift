@@ -3089,18 +3089,19 @@ public final class ViewerViewModel: ObservableObject {
 
         let mode = petMRRegistrationMode
         let alreadyAligned = hasMatchingGrid(mr, pet)
+        let useGeometryOnly = alreadyAligned && mode == .geometry
         let registrationModeForInitializer: PETMRRegistrationMode = mode == .geometry ? .geometry : .rigidAnatomical
         let registration = PETMRRegistrationEngine.estimatePETToMR(
             pet: pet,
             mr: mr,
-            mode: alreadyAligned ? .geometry : registrationModeForInitializer
+            mode: useGeometryOnly ? .geometry : registrationModeForInitializer
         )
 
         var resampled: ImageVolume?
         var registrationNote = registration.note
         var qualityBefore: RegistrationQualitySnapshot?
         var deformationQuality: DeformationFieldQuality?
-        if alreadyAligned {
+        if useGeometryOnly {
             resampled = nil
             qualityBefore = RegistrationQualityAssurance.evaluate(
                 fixed: mr,

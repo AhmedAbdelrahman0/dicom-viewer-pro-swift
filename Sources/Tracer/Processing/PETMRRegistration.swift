@@ -104,7 +104,13 @@ public enum PETMRRegistrationEngine {
 
         func safeScale(_ fixedExtent: Double, _ movingExtent: Double) -> Double {
             guard fixedExtent.isFinite, movingExtent.isFinite, movingExtent > 1 else { return 1 }
-            return max(0.75, min(1.35, fixedExtent / movingExtent))
+            // PET and MR often arrive with very different fields of view,
+            // especially when the PET is whole body and the MR is regional.
+            // The body-envelope warp should fit the PET uptake envelope into
+            // the MR anatomy envelope instead of leaving a visibly oversized
+            // overlay. Keep broad finite clamps to avoid pathological metadata
+            // causing explosive scale factors.
+            return max(0.20, min(5.0, fixedExtent / movingExtent))
         }
 
         let sourceCenter = movingBox.center
