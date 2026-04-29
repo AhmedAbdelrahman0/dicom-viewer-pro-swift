@@ -641,7 +641,8 @@ public enum PETMRRegistrationEngine {
     }
 
     public static func postResampleBrainLandmarkFit(movingOnFixedGrid: ImageVolume,
-                                                    fixed: ImageVolume) -> PETMRVisualFitCorrection? {
+                                                    fixed: ImageVolume,
+                                                    minimumAnatomyGain: Double = 0.010) -> PETMRVisualFitCorrection? {
         guard Modality.normalize(movingOnFixedGrid.modality) == .PT,
               Modality.normalize(fixed.modality) == .MR,
               hasSameGrid(movingOnFixedGrid, fixed),
@@ -898,13 +899,55 @@ public enum PETMRRegistrationEngine {
                      scale: best.scale)
         }
 
+        let microRotationOffsets = degrees([-0.6, 0, 0.6])
+        let microRotationAnchor = best.rotationRadians
+        let microTranslationAnchor = best.translationMM
+        let microScaleAnchor = best.scale
+        for rx in microRotationOffsets {
+            for ry in microRotationOffsets {
+                for rz in microRotationOffsets {
+                    evaluate(translation: microTranslationAnchor,
+                             rotation: microRotationAnchor + SIMD3<Double>(rx, ry, rz),
+                             scale: microScaleAnchor)
+                }
+            }
+        }
+
+        let microTranslationAnchor2 = best.translationMM
+        let microRotationAnchor2 = best.rotationRadians
+        let microScaleAnchor2 = best.scale
+        for dz in [-0.35, 0, 0.35] {
+            for dy in [-0.35, 0, 0.35] {
+                for dx in [-0.35, 0, 0.35] where dx != 0 || dy != 0 || dz != 0 {
+                    let offset = fixedGridOffset(xMM: dx, yMM: dy, zMM: dz)
+                    evaluate(translation: microTranslationAnchor2 + offset,
+                             rotation: microRotationAnchor2,
+                             scale: microScaleAnchor2)
+                }
+            }
+        }
+
+        let subVoxelAnchor = best.translationMM
+        for offset in [
+            fixedGridOffset(xMM: 0.18, yMM: 0, zMM: 0),
+            fixedGridOffset(xMM: -0.18, yMM: 0, zMM: 0),
+            fixedGridOffset(xMM: 0, yMM: 0.18, zMM: 0),
+            fixedGridOffset(xMM: 0, yMM: -0.18, zMM: 0),
+            fixedGridOffset(xMM: 0, yMM: 0, zMM: 0.18),
+            fixedGridOffset(xMM: 0, yMM: 0, zMM: -0.18)
+        ] {
+            evaluate(translation: subVoxelAnchor + offset,
+                     rotation: best.rotationRadians,
+                     scale: best.scale)
+        }
+
         let scoreGain = best.score.total - identityScore.total
         let shiftMM = simd_length(best.translationMM)
         let rotationDegrees = radiansToDegrees(best.rotationRadians)
         let maxRotation = max(abs(rotationDegrees.x), max(abs(rotationDegrees.y), abs(rotationDegrees.z)))
         let scaleDelta = max(abs(best.scale.x - 1), max(abs(best.scale.y - 1), abs(best.scale.z - 1)))
         let orientationChanged = best.orientationLabel != "identity"
-        let requiredGain = orientationChanged ? 0.002 : 0.010
+        let requiredGain = orientationChanged ? 0.002 : max(0.0005, minimumAnatomyGain)
         guard scoreGain >= requiredGain,
               orientationChanged || shiftMM >= 0.35 || maxRotation >= 0.30 || scaleDelta >= 0.008 else {
             return nil

@@ -3169,6 +3169,24 @@ public final class ViewerViewModel: ObservableObject {
             note.contains("rigid rotation")
     }
 
+    private func isExternalBrainPETMRRefinement(_ candidate: PETMRFusionCandidate) -> Bool {
+        candidate.label.localizedCaseInsensitiveContains("ITK-SNAP Greedy") ||
+            candidate.note.localizedCaseInsensitiveContains("ITK-SNAP Greedy") ||
+            candidate.label.localizedCaseInsensitiveContains("3D Slicer BRAINSFit") ||
+            candidate.note.localizedCaseInsensitiveContains("3D Slicer BRAINSFit")
+    }
+
+    private func hasStrongExternalBrainPETMRRefinement(in candidates: [PETMRFusionCandidate]) -> Bool {
+        guard let geometry = candidates.first(where: isScannerGeometryPETMRCandidate) else {
+            return false
+        }
+        return candidates.contains { candidate in
+            !isScannerGeometryPETMRCandidate(candidate) &&
+                isExternalBrainPETMRRefinement(candidate) &&
+                petMRAutomaticMateriallyImproves(candidate, over: geometry)
+        }
+    }
+
     private func brainPETMRExternalSeeds(from candidates: [PETMRFusionCandidate]) -> [PETMRFusionCandidate] {
         var safeSeeds = candidates
             .filter(isBrainSafePETMRCandidate)
@@ -3304,6 +3322,24 @@ public final class ViewerViewModel: ObservableObject {
            (geometry.quality.centroidResidualMM ?? .infinity) <= 25,
            (geometry.quality.maskDice ?? 0) >= 0.45 {
             let precisionEdgeGain = edgeGain ?? 0
+            let isMicroNudge = candidate.label.localizedCaseInsensitiveContains("QA nudge") ||
+                candidate.note.localizedCaseInsensitiveContains("precision QA nudge")
+            if isMicroNudge,
+               candidateScore >= geometryScore - 0.025,
+               nmiGain >= 0.0005,
+               diceGain >= -0.006,
+               centroidGain >= 0.40,
+               precisionEdgeGain >= -0.002 {
+                return true
+            }
+            if isExternalBrainPETMRRefinement(candidate),
+               (candidate.quality.centroidResidualMM ?? .infinity) <= 30,
+               candidateScore >= geometryScore + 0.025,
+               nmiGain >= 0.025,
+               diceGain >= 0.035,
+               precisionEdgeGain >= 0.035 {
+                return true
+            }
             let isPrecisionRefinement =
                 candidate.label.localizedCaseInsensitiveContains("SimpleITK") ||
                 candidate.note.localizedCaseInsensitiveContains("SimpleITK") ||
@@ -3622,8 +3658,10 @@ public final class ViewerViewModel: ObservableObject {
             let centroidGain = (bestQuality.centroidResidualMM ?? .infinity) - (quality.centroidResidualMM ?? .infinity)
             let edgeGain = (quality.edgeAlignment ?? -.infinity) - (bestQuality.edgeAlignment ?? -.infinity)
             let nmiGain = (quality.normalizedMutualInformation ?? -.infinity) - (bestQuality.normalizedMutualInformation ?? -.infinity)
+            let diceGain = (quality.maskDice ?? -.infinity) - (bestQuality.maskDice ?? -.infinity)
             if quality.grade == .fail { return false }
             if scoreGain >= 0.004 { return true }
+            if nmiGain >= 0.0005, centroidGain >= 0.20, edgeGain >= -0.006, diceGain >= -0.008 { return true }
             if centroidGain >= 0.75, edgeGain >= -0.015, nmiGain >= -0.010 { return true }
             if edgeGain >= 0.025, centroidGain >= -0.75, nmiGain >= -0.010 { return true }
             return false
@@ -3674,13 +3712,46 @@ public final class ViewerViewModel: ObservableObject {
             }
         }
 
+        if isScannerGeometryPETMRCandidate(seed) {
+            let anchor = bestTranslation
+            let targetedDiagonalOffsets: [SIMD3<Double>] = [
+                SIMD3<Double>(-1.5, 1.5, -1.0),
+                SIMD3<Double>(-1.5, 1.5, -0.5),
+                SIMD3<Double>(-1.5, 1.5, 0),
+                SIMD3<Double>(-1.5, 1.0, -1.0),
+                SIMD3<Double>(-1.0, 1.5, -1.0),
+                SIMD3<Double>(-2.0, 1.5, -1.0),
+                SIMD3<Double>(-1.5, 2.0, -1.0),
+                SIMD3<Double>(1.5, -1.5, 1.0),
+                SIMD3<Double>(1.5, -1.5, 0.5),
+                SIMD3<Double>(1.5, -1.5, 0),
+                SIMD3<Double>(1.5, -1.0, 1.0),
+                SIMD3<Double>(1.0, -1.5, 1.0),
+                SIMD3<Double>(2.0, -1.5, 1.0),
+                SIMD3<Double>(1.5, -2.0, 1.0),
+                SIMD3<Double>(-0.75, 0.75, -0.5),
+                SIMD3<Double>(0.75, -0.75, 0.5)
+            ]
+            for offset in targetedDiagonalOffsets {
+                await evaluate(translation: anchor + fixedAxisOffset(offset.x, offset.y, offset.z),
+                               rotation: bestRotation,
+                               scale: bestScale,
+                               label: "\(seed.label) + QA nudge")
+            }
+        }
+
         let finalScoreGain = petMRFusionCandidateScore(bestQuality) - baseScore
         let finalCentroidGain = (seed.quality.centroidResidualMM ?? .infinity) -
             (bestQuality.centroidResidualMM ?? .infinity)
         let finalEdgeGain = (bestQuality.edgeAlignment ?? -.infinity) -
             (seed.quality.edgeAlignment ?? -.infinity)
+        let finalNMIGain = (bestQuality.normalizedMutualInformation ?? -.infinity) -
+            (seed.quality.normalizedMutualInformation ?? -.infinity)
+        let finalDiceGain = (bestQuality.maskDice ?? -.infinity) -
+            (seed.quality.maskDice ?? -.infinity)
         guard finalScoreGain >= 0.004 ||
               (finalCentroidGain >= 0.75 && finalEdgeGain >= -0.015) ||
+              (finalNMIGain >= 0.0005 && finalCentroidGain >= 0.20 && finalEdgeGain >= -0.006 && finalDiceGain >= -0.008) ||
               finalEdgeGain >= 0.025 else {
             return nil
         }
@@ -3812,6 +3883,62 @@ public final class ViewerViewModel: ObservableObject {
         )
     }
 
+    private func petMRGranularBrainAnatomyCandidate(from seed: PETMRFusionCandidate,
+                                                    fixed mr: ImageVolume) async -> PETMRFusionCandidate? {
+        guard !seed.label.localizedCaseInsensitiveContains("granular anatomy"),
+              let landmark = PETMRRegistrationEngine.postResampleBrainLandmarkFit(
+                movingOnFixedGrid: seed.volume,
+                fixed: mr,
+                minimumAnatomyGain: 0.0015
+              ) else {
+            return nil
+        }
+
+        let refined = await Task.detached(priority: .userInitiated) {
+            VolumeResampler.resample(source: seed.volume,
+                                     target: mr,
+                                     transform: landmark.sourceToDisplay.inverse,
+                                     mode: .linear)
+        }.value
+        let label = "\(seed.label) + granular anatomy match"
+        let quality = RegistrationQualityAssurance.evaluate(
+            fixed: mr,
+            movingOnFixedGrid: refined,
+            label: label
+        )
+
+        let scoreGain = petMRFusionCandidateScore(quality) - petMRFusionCandidateScore(seed.quality)
+        let edgeGain = (quality.edgeAlignment ?? -.infinity) - (seed.quality.edgeAlignment ?? -.infinity)
+        let nmiGain = (quality.normalizedMutualInformation ?? -.infinity) - (seed.quality.normalizedMutualInformation ?? -.infinity)
+        let diceGain = (quality.maskDice ?? -.infinity) - (seed.quality.maskDice ?? -.infinity)
+        let centroidGain = (seed.quality.centroidResidualMM ?? .infinity) - (quality.centroidResidualMM ?? .infinity)
+
+        guard quality.grade != .fail,
+              nmiGain >= -0.008,
+              diceGain >= -0.018,
+              centroidGain >= -0.75,
+              scoreGain >= 0.0015 || edgeGain >= 0.012 || centroidGain >= 0.35 else {
+            return nil
+        }
+
+        let note = String(
+            format: "%@. Granular PET/MR anatomy match accepted after global direction/volume fit: score +%.3f, edge %+0.3f, centroid %+0.2f mm. %@",
+            seed.note,
+            scoreGain,
+            edgeGain,
+            centroidGain,
+            landmark.note
+        )
+        return PETMRFusionCandidate(
+            volume: refined,
+            note: note,
+            deformationQuality: seed.deformationQuality,
+            quality: quality,
+            allowBrainFitInside: true,
+            label: label
+        )
+    }
+
     private func automaticPETMRExternalConfigurations() -> [PETMRDeformableRegistrationConfiguration] {
         var configs: [PETMRDeformableRegistrationConfiguration] = []
         let selectedSimpleITK = petMRDeformableRegistration.backend == .simpleITKMI
@@ -3920,6 +4047,8 @@ public final class ViewerViewModel: ObservableObject {
         }
         if best.note.localizedCaseInsensitiveContains("SimpleITK") {
             note += " SimpleITK contributed to the selected fit."
+        } else if best.note.localizedCaseInsensitiveContains("precision QA nudge") {
+            note += " Precision QA nudge contributed to the selected fit."
         } else if best.note.localizedCaseInsensitiveContains("brain landmark") {
             note += " Brain cortex/cerebellum landmark fit contributed to the selected fit."
         } else if best.note.localizedCaseInsensitiveContains("segmentation polish") {
@@ -4280,7 +4409,7 @@ public final class ViewerViewModel: ObservableObject {
                 }
             }
         }
-        if preferBrainSafe {
+        if preferBrainSafe && !hasStrongExternalBrainPETMRRefinement(in: candidates) {
             for seed in brainPETMRExternalSeeds(from: candidates) {
                 if let nudged = await petMRPrecisionNudgeCandidate(from: seed, fixed: mr) {
                     candidates.append(nudged)
@@ -4407,9 +4536,11 @@ public final class ViewerViewModel: ObservableObject {
             }
         }
 
-        for seed in brainPETMRExternalSeeds(from: candidates) {
-            if let nudged = await petMRPrecisionNudgeCandidate(from: seed, fixed: mr) {
-                candidates.append(nudged)
+        if !hasStrongExternalBrainPETMRRefinement(in: candidates) {
+            for seed in brainPETMRExternalSeeds(from: candidates) {
+                if let nudged = await petMRPrecisionNudgeCandidate(from: seed, fixed: mr) {
+                    candidates.append(nudged)
+                }
             }
         }
 
@@ -4419,9 +4550,15 @@ public final class ViewerViewModel: ObservableObject {
             statusMessage = "Brain PET/MR registration failed: no MRI-safe candidate could be scored"
             return
         }
-        let best = selection.candidate
-        let selectionNote = selection.selectionNote ??
+        var best = selection.candidate
+        var selectionNote = selection.selectionNote ??
             "Brain MRI-driven registration excluded body-envelope warp and selected among scanner/rigid-space candidates."
+
+        if let granular = await petMRGranularBrainAnatomyCandidate(from: best, fixed: mr) {
+            candidates.append(granular)
+            best = granular
+            selectionNote += " Final granular anatomy matching refined cortex/cerebellum alignment after direction and volume correction."
+        }
 
         let pair = configureFusion(base: mr, overlay: pet, resampledOverlay: best.volume)
         pair.registrationNote = concisePETMRAutoNote(best: best,
