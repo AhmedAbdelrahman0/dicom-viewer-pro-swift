@@ -50,9 +50,19 @@ enum ProcessWaiter {
                                   timeoutSeconds: TimeInterval?,
                                   terminationGraceSeconds: TimeInterval = 5) -> Bool {
         let exited = DispatchSemaphore(value: 0)
-        DispatchQueue.global(qos: .userInitiated).async {
-            process.waitUntilExit()
+
+        if !process.isRunning {
+            return false
+        }
+
+        let priorTerminationHandler = process.terminationHandler
+        process.terminationHandler = { terminatedProcess in
+            priorTerminationHandler?(terminatedProcess)
             exited.signal()
+        }
+
+        if !process.isRunning {
+            return false
         }
 
         guard let timeoutSeconds else {

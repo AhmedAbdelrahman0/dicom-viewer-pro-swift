@@ -5,19 +5,21 @@ import Tracer
 #if os(macOS)
 import AppKit
 
-private final class WorkstationWindow: NSWindow {
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
-}
-
 private final class TracerAppDelegate: NSObject, NSApplicationDelegate {
-    private var mainWindow: WorkstationWindow?
+    private var mainWindow: NSWindow?
     private var settingsWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         installMenu()
         openMainWindow()
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            openMainWindow()
+        }
+        return true
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -32,12 +34,24 @@ private final class TracerAppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let screen = NSScreen.main
-        let frame = defaultWindowFrame(on: screen)
+        let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 960)
+        let width = min(max(1180, visible.width * 0.82), visible.width)
+        let height = min(max(760, visible.height * 0.84), visible.height)
+        let frame = NSRect(x: visible.midX - width / 2,
+                           y: visible.midY - height / 2,
+                           width: width,
+                           height: height)
+
         let root = ContentView()
             .modelContainer(for: PACSIndexedSeries.self)
+            .frame(minWidth: 900, minHeight: 600)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .preferredColorScheme(.dark)
+        let hostingView = NSHostingView(rootView: root)
+        hostingView.autoresizingMask = [.width, .height]
+        hostingView.frame = NSRect(origin: .zero, size: frame.size)
 
-        let window = WorkstationWindow(
+        let window = NSWindow(
             contentRect: frame,
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
@@ -45,48 +59,17 @@ private final class TracerAppDelegate: NSObject, NSApplicationDelegate {
             screen: screen
         )
         window.title = "Tracer"
-        window.minSize = NSSize(width: 920, height: 640)
-        window.contentView = NSHostingView(rootView: root)
+        window.minSize = NSSize(width: 900, height: 600)
+        window.contentView = hostingView
         window.backgroundColor = .black
         window.isReleasedWhenClosed = false
+        window.isRestorable = false
         window.collectionBehavior = [.managed, .fullScreenPrimary]
-        window.setFrameAutosaveName("Tracer.MainWindow")
-        mainWindow = window
-
-        constrainMainWindowToCurrentScreen()
+        window.setFrame(frame, display: true, animate: false)
         window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+        mainWindow = window
         NSApp.activate(ignoringOtherApps: true)
-
-        NotificationCenter.default.addObserver(
-            forName: NSWindow.didChangeScreenNotification,
-            object: window,
-            queue: .main
-        ) { [weak self] _ in
-            self?.constrainMainWindowToCurrentScreen()
-        }
-    }
-
-    private func defaultWindowFrame(on screen: NSScreen?) -> NSRect {
-        let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 960)
-        let width = min(max(1180, visible.width * 0.82), visible.width)
-        let height = min(max(760, visible.height * 0.84), visible.height)
-        return NSRect(x: visible.midX - width / 2,
-                      y: visible.midY - height / 2,
-                      width: width,
-                      height: height)
-    }
-
-    private func constrainMainWindowToCurrentScreen() {
-        guard let window = mainWindow else { return }
-        guard let screen = window.screen ?? NSScreen.main else { return }
-        let constrained = window.constrainFrameRect(window.frame, to: screen)
-        window.setFrame(constrained, display: true, animate: false)
-    }
-
-    @objc private func fitMainWindowToDisplay() {
-        guard let window = mainWindow,
-              let screen = window.screen ?? NSScreen.main else { return }
-        window.setFrame(screen.visibleFrame, display: true, animate: true)
     }
 
     private func installMenu() {
@@ -94,16 +77,8 @@ private final class TracerAppDelegate: NSObject, NSApplicationDelegate {
 
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu()
-        let about = NSMenuItem(title: "About Tracer",
-                               action: #selector(showAbout),
-                               keyEquivalent: "")
-        about.target = self
-        appMenu.addItem(about)
-        let settings = NSMenuItem(title: "Settings...",
-                                  action: #selector(showSettings),
-                                  keyEquivalent: ",")
-        settings.target = self
-        appMenu.addItem(settings)
+        appMenu.addItem(makeMenuItem(title: "About Tracer", action: #selector(showAbout), modifiers: []))
+        appMenu.addItem(makeMenuItem(title: "Settings...", action: #selector(showSettings), key: ","))
         appMenu.addItem(.separator())
         appMenu.addItem(NSMenuItem(title: "Quit Tracer",
                                    action: #selector(NSApplication.terminate(_:)),
@@ -111,31 +86,28 @@ private final class TracerAppDelegate: NSObject, NSApplicationDelegate {
         appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)
 
-        let editMenuItem = NSMenuItem()
-        let editMenu = NSMenu(title: "Edit")
-        editMenu.addItem(makeMenuItem(title: "Undo", action: #selector(undoLastEdit), key: "z", modifiers: [.command]))
-        editMenu.addItem(makeMenuItem(title: "Redo", action: #selector(redoLastEdit), key: "Z", modifiers: [.command, .shift]))
-        editMenu.addItem(.separator())
-        editMenu.addItem(makeMenuItem(title: "Reset Editable Changes", action: #selector(resetEditableChanges), key: "0", modifiers: [.command, .option]))
-        editMenuItem.submenu = editMenu
-        mainMenu.addItem(editMenuItem)
-
         let fileMenuItem = NSMenuItem()
         let fileMenu = NSMenu(title: "File")
-        let openDICOM = NSMenuItem(title: "Open DICOM Directory...",
-                                   action: #selector(openDICOMDirectory),
-                                   keyEquivalent: "o")
-        openDICOM.target = self
-        openDICOM.keyEquivalentModifierMask = [.command]
-        fileMenu.addItem(openDICOM)
-        let openNIfTI = NSMenuItem(title: "Open NIfTI File...",
-                                   action: #selector(openNIfTIFile),
-                                   keyEquivalent: "n")
-        openNIfTI.target = self
-        openNIfTI.keyEquivalentModifierMask = [.command]
-        fileMenu.addItem(openNIfTI)
+        fileMenu.addItem(makeMenuItem(title: "Open DICOM Directory...",
+                                      action: #selector(openDICOMDirectory),
+                                      key: "o"))
+        fileMenu.addItem(makeMenuItem(title: "Open NIfTI File...",
+                                      action: #selector(openNIfTIFile),
+                                      key: "n"))
         fileMenuItem.submenu = fileMenu
         mainMenu.addItem(fileMenuItem)
+
+        let editMenuItem = NSMenuItem()
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(makeMenuItem(title: "Undo", action: #selector(undoLastEdit), key: "z"))
+        editMenu.addItem(makeMenuItem(title: "Redo", action: #selector(redoLastEdit), key: "Z", modifiers: [.command, .shift]))
+        editMenu.addItem(.separator())
+        editMenu.addItem(makeMenuItem(title: "Reset Editable Changes",
+                                      action: #selector(resetEditableChanges),
+                                      key: "0",
+                                      modifiers: [.command, .option]))
+        editMenuItem.submenu = editMenu
+        mainMenu.addItem(editMenuItem)
 
         let toolsMenuItem = NSMenuItem()
         let toolsMenu = NSMenu(title: "Tools")
@@ -149,13 +121,16 @@ private final class TracerAppDelegate: NSObject, NSApplicationDelegate {
         toolsMenu.addItem(makeViewerToolItem("Spherical SUV / HU ROI", tool: "suvSphere", key: "s"))
         toolsMenu.addItem(.separator())
         toolsMenu.addItem(makeMenuItem(title: "Link Zoom + Pan", action: #selector(toggleLinkedZoomPan), key: "l", modifiers: []))
-        toolsMenu.addItem(makeMenuItem(title: "Focus Mode", action: #selector(toggleFocusMode), key: "e", modifiers: [.command]))
+        toolsMenu.addItem(makeMenuItem(title: "Focus Mode", action: #selector(toggleFocusMode), key: "e"))
         toolsMenuItem.submenu = toolsMenu
         mainMenu.addItem(toolsMenuItem)
 
         let labelsMenuItem = NSMenuItem()
         let labelsMenu = NSMenu(title: "Labels")
-        labelsMenu.addItem(makeMenuItem(title: "Create / Select Label Map", action: #selector(createLabelMap), key: "l", modifiers: [.command, .shift]))
+        labelsMenu.addItem(makeMenuItem(title: "Create / Select Label Map",
+                                        action: #selector(createLabelMap),
+                                        key: "l",
+                                        modifiers: [.command, .shift]))
         labelsMenu.addItem(.separator())
         labelsMenu.addItem(makeLabelingToolItem("Brush", tool: "brush", key: "b"))
         labelsMenu.addItem(makeLabelingToolItem("Eraser", tool: "eraser", key: "x"))
@@ -177,10 +152,15 @@ private final class TracerAppDelegate: NSObject, NSApplicationDelegate {
         measurementsMenu.addItem(makeViewerToolItem("Area / Polygon ROI", tool: "area", key: ""))
         measurementsMenu.addItem(makeViewerToolItem("Spherical SUV / HU ROI", tool: "suvSphere", key: ""))
         measurementsMenu.addItem(.separator())
-        measurementsMenu.addItem(makeMenuItem(title: "Clear Measurements", action: #selector(clearMeasurements), key: "\u{8}", modifiers: [.command]))
+        measurementsMenu.addItem(makeMenuItem(title: "Clear Measurements",
+                                             action: #selector(clearMeasurements),
+                                             key: "\u{8}"))
         measurementsMenu.addItem(.separator())
-        measurementsMenu.addItem(makeMenuItem(title: "Save Study Session", action: #selector(saveStudySession), key: "s", modifiers: [.command]))
-        measurementsMenu.addItem(makeMenuItem(title: "New Measurement Session", action: #selector(newStudySession), key: "n", modifiers: [.command, .option]))
+        measurementsMenu.addItem(makeMenuItem(title: "Save Study Session", action: #selector(saveStudySession), key: "s"))
+        measurementsMenu.addItem(makeMenuItem(title: "New Measurement Session",
+                                             action: #selector(newStudySession),
+                                             key: "n",
+                                             modifiers: [.command, .option]))
         measurementsMenuItem.submenu = measurementsMenu
         mainMenu.addItem(measurementsMenuItem)
 
@@ -202,12 +182,10 @@ private final class TracerAppDelegate: NSObject, NSApplicationDelegate {
 
         let windowMenuItem = NSMenuItem()
         let windowMenu = NSMenu(title: "Window")
-        let fitDisplay = NSMenuItem(title: "Fit Window to Display",
-                                    action: #selector(fitMainWindowToDisplay),
-                                    keyEquivalent: "f")
-        fitDisplay.target = self
-        fitDisplay.keyEquivalentModifierMask = [.command, .option]
-        windowMenu.addItem(fitDisplay)
+        windowMenu.addItem(makeMenuItem(title: "Fit Window to Display",
+                                        action: #selector(fitMainWindowToDisplay),
+                                        key: "f",
+                                        modifiers: [.command, .option]))
         windowMenu.addItem(.separator())
         windowMenu.addItem(NSMenuItem(title: "Minimize",
                                       action: #selector(NSWindow.performMiniaturize(_:)),
@@ -218,7 +196,6 @@ private final class TracerAppDelegate: NSObject, NSApplicationDelegate {
         windowMenuItem.submenu = windowMenu
         mainMenu.addItem(windowMenuItem)
         NSApp.windowsMenu = windowMenu
-
         NSApp.mainMenu = mainMenu
     }
 
@@ -247,11 +224,11 @@ private final class TracerAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openDICOMDirectory() {
-        NotificationCenter.default.post(name: Notification.Name("openDICOMDirectory"), object: nil)
+        NotificationCenter.default.post(name: .openDICOMDirectory, object: nil)
     }
 
     @objc private func openNIfTIFile() {
-        NotificationCenter.default.post(name: Notification.Name("openNIfTIFile"), object: nil)
+        NotificationCenter.default.post(name: .openNIfTIFile, object: nil)
     }
 
     @objc private func undoLastEdit() { NotificationCenter.default.post(name: .undoLastEdit, object: nil) }
@@ -279,8 +256,14 @@ private final class TracerAppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.post(name: .showEngineInspector, object: nil, userInfo: ["panel": panel])
     }
 
+    @objc private func fitMainWindowToDisplay() {
+        guard let window = mainWindow,
+              let screen = window.screen ?? NSScreen.main else { return }
+        window.setFrame(screen.visibleFrame, display: true, animate: true)
+    }
+
     @objc private func showAbout() {
-        NotificationCenter.default.post(name: Notification.Name("Tracer.showAboutWindow"), object: nil)
+        NotificationCenter.default.post(name: .showAboutWindow, object: nil)
     }
 
     @objc private func showSettings() {
@@ -289,17 +272,19 @@ private final class TracerAppDelegate: NSObject, NSApplicationDelegate {
                 .preferredColorScheme(.dark)
             let window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 620, height: 460),
-                styleMask: [.titled, .closable],
+                styleMask: [.titled, .closable, .resizable],
                 backing: .buffered,
                 defer: false
             )
             window.title = "Tracer Settings"
             window.contentView = NSHostingView(rootView: root)
             window.isReleasedWhenClosed = false
+            window.isRestorable = false
             settingsWindow = window
         }
         settingsWindow?.center()
         settingsWindow?.makeKeyAndOrderFront(nil)
+        settingsWindow?.orderFrontRegardless()
     }
 }
 

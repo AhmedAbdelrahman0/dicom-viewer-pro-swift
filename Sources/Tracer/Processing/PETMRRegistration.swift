@@ -4,6 +4,7 @@ import simd
 public enum PETMRRegistrationMode: String, CaseIterable, Identifiable, Codable, Sendable {
     case automaticBestFit
     case geometry
+    case brainMRIDriven
     case rigidAnatomical
     case rigidThenDeformable
 
@@ -13,6 +14,7 @@ public enum PETMRRegistrationMode: String, CaseIterable, Identifiable, Codable, 
         switch self {
         case .automaticBestFit: return "Auto best fit"
         case .geometry: return "Geometry only"
+        case .brainMRIDriven: return "Brain MRI-driven"
         case .rigidAnatomical: return "Rigid rotation + pixel match"
         case .rigidThenDeformable: return "Similarity pixel fit + body warp"
         }
@@ -21,9 +23,11 @@ public enum PETMRRegistrationMode: String, CaseIterable, Identifiable, Codable, 
     public var helpText: String {
         switch self {
         case .automaticBestFit:
-            return "Use scanner geometry first, test rigid/body-fit/visual-fit, add local segmentation polish, and run available external engines such as SimpleITK, then only accept a more complex fit when PET/MR QA improves materially."
+            return "For brain PET/MR, use the MRI-driven path. For other PET/MR, use scanner geometry first, test rigid/body-fit candidates, run available external engines such as SimpleITK, then only accept a more complex fit when PET/MR QA improves materially."
         case .geometry:
             return "Use scanner/world geometry only. Best for simultaneous PET/MR or already registered images."
+        case .brainMRIDriven:
+            return "Brain-specific PET/MR registration. MRI anatomy is treated as the authority; Tracer tests scanner geometry, rigid brain candidates, orientation fixes, and external precision refinements while excluding body-envelope warp overfit."
         case .rigidAnatomical:
             return "Initialize PET→MR fusion with body/anatomy centroids, search small rigid rotations, then refine by pixel-to-pixel mutual information before resampling."
         case .rigidThenDeformable:
@@ -59,6 +63,8 @@ public enum PETMRRegistrationEngine {
         switch mode {
         case .automaticBestFit:
             return estimatePETToMR(pet: pet, mr: mr, mode: .rigidThenDeformable)
+        case .brainMRIDriven:
+            return estimatePETToMR(pet: pet, mr: mr, mode: .rigidAnatomical)
 
         case .geometry:
             return PETMRRegistrationResult(
@@ -634,6 +640,304 @@ public enum PETMRRegistrationEngine {
                                         note: note)
     }
 
+    public static func postResampleBrainLandmarkFit(movingOnFixedGrid: ImageVolume,
+                                                    fixed: ImageVolume) -> PETMRVisualFitCorrection? {
+        guard Modality.normalize(movingOnFixedGrid.modality) == .PT,
+              Modality.normalize(fixed.modality) == .MR,
+              hasSameGrid(movingOnFixedGrid, fixed),
+              isLikelyBrainMR(fixed),
+              let brainMaskModel = brainPETMRMaskModel(moving: movingOnFixedGrid, fixed: fixed),
+              let fixedBox = thresholdBoundingBox(for: fixed,
+                                                  lower: brainMaskModel.fixedLower,
+                                                  upper: brainMaskModel.fixedUpper) else {
+            return nil
+        }
+
+        let landmarks = brainLandmarkSamples(fixed: fixed,
+                                             model: brainMaskModel,
+                                             box: fixedBox)
+        guard landmarks.cortex.count >= 64,
+              landmarks.cerebellum.count >= 24 else {
+            return nil
+        }
+
+        let movingSamples = maskWorldSamples(for: movingOnFixedGrid,
+                                             minimumValue: brainMaskModel.movingLower)
+        let fixedMaskSamples = maskWorldSamples(for: fixed,
+                                                minimumValue: brainMaskModel.fixedLower)
+        let fixedSamples = landmarks.cortex + landmarks.cerebellum + landmarks.deepBrain
+        guard let fixedBrainCentroid = centroid(of: fixedMaskSamples.isEmpty ? fixedSamples : fixedMaskSamples),
+              let movingMaskCentroid = centroid(of: movingSamples) else {
+            return nil
+        }
+        let fixedIntensitySamples = fixedSamples.map {
+            (world: $0, value: fixed.intensity(z: fixed.voxelIndex(from: $0).z,
+                                               y: fixed.voxelIndex(from: $0).y,
+                                               x: fixed.voxelIndex(from: $0).x))
+        }
+        let fixedRange = finiteRange(fixedIntensitySamples.map { $0.value })
+        let movingRange = movingOnFixedGrid.intensityRange
+        let centroidScaleMM = max(35, max(fixedBox.extent.x, max(fixedBox.extent.y, fixedBox.extent.z)) * 0.35)
+        guard movingSamples.count >= 32,
+              fixedRange.max > fixedRange.min,
+              movingRange.max > movingRange.min else {
+            return nil
+        }
+
+        let center = fixedBox.center
+        let identityScore = brainLandmarkScore(
+            moving: movingOnFixedGrid,
+            fixed: fixed,
+            cortexSamples: landmarks.cortex,
+            cerebellumSamples: landmarks.cerebellum,
+            deepBrainSamples: landmarks.deepBrain,
+            fixedIntensitySamples: fixedIntensitySamples,
+            movingMaskSamples: movingSamples,
+            fixedRange: fixedRange,
+            movingRange: movingRange,
+            model: brainMaskModel,
+            fixedLandmarkCentroid: fixedBrainCentroid,
+            movingMaskCentroid: movingMaskCentroid,
+            centroidScaleMM: centroidScaleMM,
+            movingToFixed: .identity
+        )
+        guard identityScore.total.isFinite else { return nil }
+
+        var best = BrainLandmarkCandidate(
+            transform: .identity,
+            baseTransform: .identity,
+            orientationLabel: "identity",
+            orientationPenalty: 0,
+            translationMM: SIMD3<Double>(0, 0, 0),
+            rotationRadians: SIMD3<Double>(0, 0, 0),
+            scale: SIMD3<Double>(repeating: 1),
+            score: identityScore
+        )
+
+        func adjustedScore(_ candidate: BrainLandmarkCandidate) -> Double {
+            candidate.score.total - candidate.orientationPenalty
+        }
+
+        func makeCandidate(baseTransform: Transform3D,
+                           orientationLabel: String,
+                           orientationPenalty: Double,
+                           translation: SIMD3<Double>,
+                           rotation: SIMD3<Double>,
+                           scale: SIMD3<Double>) -> BrainLandmarkCandidate {
+            let localTransform = brainLandmarkTransform(center: center,
+                                                        translationMM: translation,
+                                                        rotationRadians: rotation,
+                                                        scale: scale)
+            let transform = localTransform.concatenate(baseTransform)
+            let score = brainLandmarkScore(
+                moving: movingOnFixedGrid,
+                fixed: fixed,
+                cortexSamples: landmarks.cortex,
+                cerebellumSamples: landmarks.cerebellum,
+                deepBrainSamples: landmarks.deepBrain,
+                fixedIntensitySamples: fixedIntensitySamples,
+                movingMaskSamples: movingSamples,
+                fixedRange: fixedRange,
+                movingRange: movingRange,
+                model: brainMaskModel,
+                fixedLandmarkCentroid: fixedBrainCentroid,
+                movingMaskCentroid: movingMaskCentroid,
+                centroidScaleMM: centroidScaleMM,
+                movingToFixed: transform
+            )
+            return BrainLandmarkCandidate(transform: transform,
+                                         baseTransform: baseTransform,
+                                         orientationLabel: orientationLabel,
+                                         orientationPenalty: orientationPenalty,
+                                         translationMM: translation,
+                                         rotationRadians: rotation,
+                                         scale: scale,
+                                         score: score)
+        }
+
+        func consider(_ candidate: BrainLandmarkCandidate) {
+            if adjustedScore(candidate) > adjustedScore(best) + 0.0005 {
+                best = candidate
+            }
+        }
+
+        func fixedGridOffset(xMM: Double, yMM: Double, zMM: Double) -> SIMD3<Double> {
+            fixed.direction * SIMD3<Double>(xMM, yMM, zMM)
+        }
+
+        let maximumSeedTranslation = max(60, centroidScaleMM * 1.8)
+        for orientation in brainOrientationCandidates(center: center) {
+            if orientation.label != "identity" {
+                consider(makeCandidate(baseTransform: orientation.transform,
+                                       orientationLabel: orientation.label,
+                                       orientationPenalty: orientation.penalty,
+                                       translation: SIMD3<Double>(0, 0, 0),
+                                       rotation: SIMD3<Double>(0, 0, 0),
+                                       scale: SIMD3<Double>(repeating: 1)))
+            }
+
+            let transformedMovingCentroid = orientation.transform.apply(to: movingMaskCentroid)
+            let centroidTranslation = fixedBrainCentroid - transformedMovingCentroid
+            guard simd_length(centroidTranslation).isFinite,
+                  simd_length(centroidTranslation) <= maximumSeedTranslation else {
+                continue
+            }
+            consider(makeCandidate(baseTransform: orientation.transform,
+                                   orientationLabel: orientation.label,
+                                   orientationPenalty: orientation.penalty,
+                                   translation: centroidTranslation,
+                                   rotation: SIMD3<Double>(0, 0, 0),
+                                   scale: SIMD3<Double>(repeating: 1)))
+        }
+
+        func evaluate(translation: SIMD3<Double>,
+                      rotation: SIMD3<Double>,
+                      scale: SIMD3<Double>) {
+            consider(makeCandidate(baseTransform: best.baseTransform,
+                                   orientationLabel: best.orientationLabel,
+                                   orientationPenalty: best.orientationPenalty,
+                                   translation: translation,
+                                   rotation: rotation,
+                                   scale: scale))
+        }
+
+        let fixedGridTranslationPasses: [[Double]] = [
+            [-8, -4, 0, 4, 8],
+            [-3, -1.5, 0, 1.5, 3],
+            [-1, 0, 1]
+        ]
+        for offsets in fixedGridTranslationPasses {
+            let anchor = best.translationMM
+            for dz in offsets {
+                for dy in offsets {
+                    for dx in offsets {
+                        let offset = fixedGridOffset(xMM: dx, yMM: dy, zMM: dz)
+                        evaluate(translation: anchor + offset,
+                                 rotation: best.rotationRadians,
+                                 scale: best.scale)
+                    }
+                }
+            }
+        }
+
+        let translationPasses: [(radius: Double, step: Double)] = [
+            (8, 4),
+            (3, 1.5),
+            (1, 1)
+        ]
+        for pass in translationPasses {
+            let anchor = best.translationMM
+            var dz = -pass.radius
+            while dz <= pass.radius + 0.0001 {
+                var dy = -pass.radius
+                while dy <= pass.radius + 0.0001 {
+                    var dx = -pass.radius
+                    while dx <= pass.radius + 0.0001 {
+                        evaluate(translation: anchor + SIMD3<Double>(dx, dy, dz),
+                                 rotation: best.rotationRadians,
+                                 scale: best.scale)
+                        dx += pass.step
+                    }
+                    dy += pass.step
+                }
+                dz += pass.step
+            }
+        }
+
+        let rotationOffsets = degrees([-2, 0, 2])
+        let rotationAnchor = best.rotationRadians
+        let translationAnchor = best.translationMM
+        for rx in rotationOffsets {
+            for ry in rotationOffsets {
+                for rz in rotationOffsets {
+                    evaluate(translation: translationAnchor,
+                             rotation: rotationAnchor + SIMD3<Double>(rx, ry, rz),
+                             scale: best.scale)
+                }
+            }
+        }
+
+        let scaleOffsets = [-0.04, -0.02, 0.02, 0.04]
+        let scaleAnchor = best.scale
+        let postRotationAnchor = best.rotationRadians
+        let postTranslationAnchor = best.translationMM
+        for offset in scaleOffsets {
+            let isotropic = SIMD3<Double>(
+                clamp(scaleAnchor.x + offset, 0.92, 1.08),
+                clamp(scaleAnchor.y + offset, 0.92, 1.08),
+                clamp(scaleAnchor.z + offset, 0.92, 1.08)
+            )
+            evaluate(translation: postTranslationAnchor,
+                     rotation: postRotationAnchor,
+                     scale: isotropic)
+            evaluate(translation: postTranslationAnchor,
+                     rotation: postRotationAnchor,
+                     scale: SIMD3<Double>(clamp(scaleAnchor.x + offset, 0.92, 1.08),
+                                          scaleAnchor.y,
+                                          scaleAnchor.z))
+            evaluate(translation: postTranslationAnchor,
+                     rotation: postRotationAnchor,
+                     scale: SIMD3<Double>(scaleAnchor.x,
+                                          clamp(scaleAnchor.y + offset, 0.92, 1.08),
+                                          scaleAnchor.z))
+            evaluate(translation: postTranslationAnchor,
+                     rotation: postRotationAnchor,
+                     scale: SIMD3<Double>(scaleAnchor.x,
+                                          scaleAnchor.y,
+                                          clamp(scaleAnchor.z + offset, 0.92, 1.08)))
+        }
+
+        let finalAnchor = best.translationMM
+        for offset in [
+            SIMD3<Double>(0.5, 0, 0), SIMD3<Double>(-0.5, 0, 0),
+            SIMD3<Double>(0, 0.5, 0), SIMD3<Double>(0, -0.5, 0),
+            SIMD3<Double>(0, 0, 0.5), SIMD3<Double>(0, 0, -0.5)
+        ] {
+            evaluate(translation: finalAnchor + offset,
+                     rotation: best.rotationRadians,
+                     scale: best.scale)
+        }
+
+        let scoreGain = best.score.total - identityScore.total
+        let shiftMM = simd_length(best.translationMM)
+        let rotationDegrees = radiansToDegrees(best.rotationRadians)
+        let maxRotation = max(abs(rotationDegrees.x), max(abs(rotationDegrees.y), abs(rotationDegrees.z)))
+        let scaleDelta = max(abs(best.scale.x - 1), max(abs(best.scale.y - 1), abs(best.scale.z - 1)))
+        let orientationChanged = best.orientationLabel != "identity"
+        let requiredGain = orientationChanged ? 0.002 : 0.010
+        guard scoreGain >= requiredGain,
+              orientationChanged || shiftMM >= 0.35 || maxRotation >= 0.30 || scaleDelta >= 0.008 else {
+            return nil
+        }
+
+        let note = String(
+            format: "Post-resample PET/MR direction-volume-anatomy fit: direction %@, cortex %.2f→%.2f, cerebellum %.2f→%.2f, containment %.2f→%.2f, centroid %.1f→%.1f mm, QA +%.3f, volume shift X %.1f / Y %.1f / Z %.1f mm, anatomy rotate X %.1f° / Y %.1f° / Z %.1f°, volume scale X %.2fx / Y %.2fx / Z %.2fx",
+            best.orientationLabel,
+            identityScore.cortex,
+            best.score.cortex,
+            identityScore.cerebellum,
+            best.score.cerebellum,
+            identityScore.containment,
+            best.score.containment,
+            identityScore.centroidResidualMM,
+            best.score.centroidResidualMM,
+            scoreGain,
+            best.translationMM.x,
+            best.translationMM.y,
+            best.translationMM.z,
+            rotationDegrees.x,
+            rotationDegrees.y,
+            rotationDegrees.z,
+            best.scale.x,
+            best.scale.y,
+            best.scale.z
+        )
+        return PETMRVisualFitCorrection(sourceToDisplay: best.transform,
+                                        scale: (best.scale.x + best.scale.y + best.scale.z) / 3,
+                                        translationMM: best.translationMM,
+                                        note: note)
+    }
+
     private static func brainPETVisualFit(movingOnFixedGrid: ImageVolume,
                                           fixed: ImageVolume) -> PETMRVisualFitCorrection? {
         guard isLikelyBrainMR(fixed) else { return nil }
@@ -851,6 +1155,97 @@ public enum PETMRRegistrationEngine {
         return inside / total
     }
 
+    private static func brainLandmarkScore(moving: ImageVolume,
+                                           fixed: ImageVolume,
+                                           cortexSamples: [SIMD3<Double>],
+                                           cerebellumSamples: [SIMD3<Double>],
+                                           deepBrainSamples: [SIMD3<Double>],
+                                           fixedIntensitySamples: [(world: SIMD3<Double>, value: Float)],
+                                           movingMaskSamples: [SIMD3<Double>],
+                                           fixedRange: (min: Float, max: Float),
+                                           movingRange: (min: Float, max: Float),
+                                           model: BrainMaskModel,
+                                           fixedLandmarkCentroid: SIMD3<Double>,
+                                           movingMaskCentroid: SIMD3<Double>,
+                                           centroidScaleMM: Double,
+                                           movingToFixed: Transform3D) -> BrainLandmarkScore {
+        let cortex = meanNormalizedMovingUptake(moving: moving,
+                                                samples: cortexSamples,
+                                                model: model,
+                                                movingToFixed: movingToFixed)
+        let cerebellum = meanNormalizedMovingUptake(moving: moving,
+                                                    samples: cerebellumSamples,
+                                                    model: model,
+                                                    movingToFixed: movingToFixed)
+        let deepBrain = meanNormalizedMovingUptake(moving: moving,
+                                                   samples: deepBrainSamples,
+                                                   model: model,
+                                                   movingToFixed: movingToFixed)
+        let containment = brainMovingContainmentScore(movingMaskSamples: movingMaskSamples,
+                                                      fixed: fixed,
+                                                      movingToFixed: movingToFixed,
+                                                      model: model)
+        let nmi = mutualInformationScore(moving: moving,
+                                         fixedSamples: fixedIntensitySamples,
+                                         fixedRange: fixedRange,
+                                         movingRange: movingRange,
+                                         movingToFixed: movingToFixed)
+        let edge = edgeAgreementScore(moving: moving,
+                                      fixed: fixed,
+                                      fixedSamples: fixedIntensitySamples.map {
+                                          RegistrationSample(world: $0.world, value: $0.value, fixedInMask: true)
+                                      },
+                                      movingToFixed: movingToFixed)
+        let boundedNMI = nmi.isFinite ? max(0, min(1, (nmi - 0.90) / 0.40)) : 0
+        let boundedEdge = edge.isFinite ? max(0, min(1, edge)) : 0
+        let transformedMovingCentroid = movingToFixed.apply(to: movingMaskCentroid)
+        let centroidResidual = simd_length(transformedMovingCentroid - fixedLandmarkCentroid)
+        let centroidAlignment = max(0, min(1, 1 - centroidResidual / max(1, centroidScaleMM)))
+        let corticalContrast = max(0, min(1, cortex - max(0, deepBrain - 0.10) * 0.35))
+        let cerebellarBalance = max(0, min(1, 1 - abs(cortex - cerebellum)))
+        let total = 0.22 * cortex +
+            0.16 * cerebellum +
+            0.13 * corticalContrast +
+            0.12 * containment +
+            0.10 * centroidAlignment +
+            0.08 * boundedNMI +
+            0.16 * boundedEdge +
+            0.03 * cerebellarBalance
+        return BrainLandmarkScore(total: total,
+                                  cortex: cortex,
+                                  cerebellum: cerebellum,
+                                  containment: containment,
+                                  centroidResidualMM: centroidResidual,
+                                  nmi: nmi,
+                                  edge: edge)
+    }
+
+    private static func meanNormalizedMovingUptake(moving: ImageVolume,
+                                                   samples: [SIMD3<Double>],
+                                                   model: BrainMaskModel,
+                                                   movingToFixed: Transform3D) -> Double {
+        guard !samples.isEmpty else { return -.infinity }
+        let fixedToMoving = movingToFixed.inverse
+        let denominator = max(0.0001, model.movingUpper - model.movingLower)
+        var sum = 0.0
+        var count = 0.0
+        for fixedWorld in samples {
+            let movingWorld = fixedToMoving.apply(to: fixedWorld)
+            let voxel = moving.voxelCoordinates(from: movingWorld)
+            guard let movingValue = linearSample(moving,
+                                                 x: voxel.x,
+                                                 y: voxel.y,
+                                                 z: voxel.z) else {
+                continue
+            }
+            let normalized = Double(max(0, min(1, (movingValue - model.movingLower) / denominator)))
+            sum += normalized
+            count += 1
+        }
+        guard count >= max(16, Double(samples.count) * 0.35) else { return -.infinity }
+        return sum / count
+    }
+
     private static func edgeAgreementScore(moving: ImageVolume,
                                            fixed: ImageVolume,
                                            fixedSamples: [RegistrationSample],
@@ -925,6 +1320,206 @@ public enum PETMRRegistrationEngine {
         let ratio = fixedExtent / movingExtent
         guard ratio.isFinite else { return fallback }
         return clamp(ratio, lower, upper)
+    }
+
+    private static func brainLandmarkTransform(center: SIMD3<Double>,
+                                               translationMM: SIMD3<Double>,
+                                               rotationRadians: SIMD3<Double>,
+                                               scale: SIMD3<Double>) -> Transform3D {
+        let rotation = Transform3D.rotationZ(rotationRadians.z)
+            .concatenate(Transform3D.rotationY(rotationRadians.y))
+            .concatenate(Transform3D.rotationX(rotationRadians.x))
+        return Transform3D.translation(translationMM.x, translationMM.y, translationMM.z)
+            .concatenate(Transform3D.translation(center.x, center.y, center.z))
+            .concatenate(rotation)
+            .concatenate(Transform3D.scale(scale))
+            .concatenate(Transform3D.translation(-center.x, -center.y, -center.z))
+    }
+
+    private static func brainOrientationCandidates(center: SIMD3<Double>) -> [BrainOrientationCandidate] {
+        let permutations = [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0]
+        ]
+        let signs = [-1.0, 1.0]
+        var candidates: [BrainOrientationCandidate] = [
+            BrainOrientationCandidate(label: "identity", transform: .identity, penalty: 0)
+        ]
+        for permutation in permutations {
+            for sx in signs {
+                for sy in signs {
+                    for sz in signs {
+                        var linear = simd_double3x3(0)
+                        let signedAxes = [sx, sy, sz]
+                        for sourceAxis in 0..<3 {
+                            linear[sourceAxis][permutation[sourceAxis]] = signedAxes[sourceAxis]
+                        }
+                        if simd_length(linear.columns.0 - SIMD3<Double>(1, 0, 0)) < 0.001,
+                           simd_length(linear.columns.1 - SIMD3<Double>(0, 1, 0)) < 0.001,
+                           simd_length(linear.columns.2 - SIMD3<Double>(0, 0, 1)) < 0.001 {
+                            continue
+                        }
+                        let flipCount = signedAxes.filter { $0 < 0 }.count
+                        let permuted = permutation != [0, 1, 2]
+                        candidates.append(BrainOrientationCandidate(
+                            label: orientationLabel(permutation: permutation, signs: signedAxes),
+                            transform: centeredLinearTransform(center: center, linear: linear),
+                            penalty: Double(flipCount) * 0.010 + (permuted ? 0.015 : 0)
+                        ))
+                    }
+                }
+            }
+        }
+        return candidates
+    }
+
+    private static func centeredLinearTransform(center: SIMD3<Double>,
+                                                linear: simd_double3x3) -> Transform3D {
+        var matrix = matrix_identity_double4x4
+        matrix[0, 0] = linear[0].x
+        matrix[0, 1] = linear[0].y
+        matrix[0, 2] = linear[0].z
+        matrix[1, 0] = linear[1].x
+        matrix[1, 1] = linear[1].y
+        matrix[1, 2] = linear[1].z
+        matrix[2, 0] = linear[2].x
+        matrix[2, 1] = linear[2].y
+        matrix[2, 2] = linear[2].z
+        let linearTransform = Transform3D(matrix: matrix)
+        return Transform3D.translation(center.x, center.y, center.z)
+            .concatenate(linearTransform)
+            .concatenate(Transform3D.translation(-center.x, -center.y, -center.z))
+    }
+
+    private static func orientationLabel(permutation: [Int],
+                                         signs: [Double]) -> String {
+        let names = ["L/R", "P/A", "S/I"]
+        var parts: [String] = []
+        for sourceAxis in 0..<3 {
+            let destination = names[permutation[sourceAxis]]
+            let source = names[sourceAxis]
+            let sign = signs[sourceAxis] < 0 ? "flipped" : "same"
+            parts.append("\(source)→\(destination) \(sign)")
+        }
+        return parts.joined(separator: ", ")
+    }
+
+    private static func thresholdBoundingBox(for volume: ImageVolume,
+                                             lower: Float,
+                                             upper: Float) -> (min: SIMD3<Double>, max: SIMD3<Double>, center: SIMD3<Double>, extent: SIMD3<Double>)? {
+        let step = samplingStride(for: volume)
+        var found = false
+        var minPoint = SIMD3<Double>(Double.greatestFiniteMagnitude,
+                                     Double.greatestFiniteMagnitude,
+                                     Double.greatestFiniteMagnitude)
+        var maxPoint = SIMD3<Double>(-Double.greatestFiniteMagnitude,
+                                     -Double.greatestFiniteMagnitude,
+                                     -Double.greatestFiniteMagnitude)
+        for z in Swift.stride(from: 0, to: volume.depth, by: step) {
+            for y in Swift.stride(from: 0, to: volume.height, by: step) {
+                for x in Swift.stride(from: 0, to: volume.width, by: step) {
+                    let value = volume.intensity(z: z, y: y, x: x)
+                    guard value.isFinite, value >= lower, value <= upper else { continue }
+                    let point = volume.worldPoint(z: z, y: y, x: x)
+                    minPoint = simd_min(minPoint, point)
+                    maxPoint = simd_max(maxPoint, point)
+                    found = true
+                }
+            }
+        }
+        guard found else { return nil }
+        let center = (minPoint + maxPoint) / 2
+        return (minPoint, maxPoint, center, maxPoint - minPoint)
+    }
+
+    private static func brainLandmarkSamples(
+        fixed: ImageVolume,
+        model: BrainMaskModel,
+        box: (min: SIMD3<Double>, max: SIMD3<Double>, center: SIMD3<Double>, extent: SIMD3<Double>)
+    ) -> (cortex: [SIMD3<Double>], cerebellum: [SIMD3<Double>], deepBrain: [SIMD3<Double>]) {
+        let step = max(1, Int(ceil(pow(Double(max(1, fixed.width * fixed.height * fixed.depth)) / 90_000.0, 1.0 / 3.0))))
+        var cortex: [SIMD3<Double>] = []
+        var cerebellum: [SIMD3<Double>] = []
+        var deepBrain: [SIMD3<Double>] = []
+        cortex.reserveCapacity(8_000)
+        cerebellum.reserveCapacity(3_000)
+        deepBrain.reserveCapacity(3_000)
+
+        for z in Swift.stride(from: 0, to: fixed.depth, by: step) {
+            for y in Swift.stride(from: 0, to: fixed.height, by: step) {
+                for x in Swift.stride(from: 0, to: fixed.width, by: step) {
+                    let value = fixed.intensity(z: z, y: y, x: x)
+                    guard value.isFinite,
+                          value >= model.fixedLower,
+                          value <= model.fixedUpper else { continue }
+                    let point = fixed.worldPoint(z: z, y: y, x: x)
+                    let normalized = normalizedPoint(point, in: box)
+                    guard normalized.x >= 0, normalized.x <= 1,
+                          normalized.y >= 0, normalized.y <= 1,
+                          normalized.z >= 0, normalized.z <= 1 else { continue }
+                    let boundaryDistance = min(
+                        min(normalized.x, 1 - normalized.x),
+                        min(min(normalized.y, 1 - normalized.y),
+                            min(normalized.z, 1 - normalized.z))
+                    )
+                    if boundaryDistance <= 0.17,
+                       normalized.z >= 0.12,
+                       normalized.z <= 0.96 {
+                        cortex.append(point)
+                    }
+                    if normalized.x >= 0.18,
+                       normalized.x <= 0.82,
+                       normalized.y >= 0.50,
+                       normalized.z <= 0.45 {
+                        cerebellum.append(point)
+                    }
+                    if boundaryDistance >= 0.28,
+                       normalized.y >= 0.22,
+                       normalized.y <= 0.78,
+                       normalized.z >= 0.30,
+                       normalized.z <= 0.82 {
+                        deepBrain.append(point)
+                    }
+                }
+            }
+        }
+
+        return (
+            evenlyDecimated(cortex, limit: 1_600),
+            evenlyDecimated(cerebellum, limit: 800),
+            evenlyDecimated(deepBrain, limit: 800)
+        )
+    }
+
+    private static func normalizedPoint(
+        _ point: SIMD3<Double>,
+        in box: (min: SIMD3<Double>, max: SIMD3<Double>, center: SIMD3<Double>, extent: SIMD3<Double>)
+    ) -> SIMD3<Double> {
+        SIMD3<Double>(
+            (point.x - box.min.x) / max(0.001, box.extent.x),
+            (point.y - box.min.y) / max(0.001, box.extent.y),
+            (point.z - box.min.z) / max(0.001, box.extent.z)
+        )
+    }
+
+    private static func evenlyDecimated(_ values: [SIMD3<Double>],
+                                        limit: Int) -> [SIMD3<Double>] {
+        guard values.count > limit, limit > 0 else { return values }
+        let stride = Double(values.count - 1) / Double(max(1, limit - 1))
+        return (0..<limit).map { values[Int((Double($0) * stride).rounded())] }
+    }
+
+    private static func centroid(of points: [SIMD3<Double>]) -> SIMD3<Double>? {
+        guard !points.isEmpty else { return nil }
+        var sum = SIMD3<Double>(0, 0, 0)
+        for point in points {
+            sum += point
+        }
+        return sum / Double(points.count)
     }
 
     private static func intensityBoundingBox(for volume: ImageVolume,
@@ -1186,16 +1781,16 @@ public enum PETMRRegistrationEngine {
         guard isLikelyBrainMR(fixed) else { return nil }
         guard let fixedP20 = sampledPercentile(fixed, percentile: 20, positiveOnly: true),
               let fixedP998 = sampledPercentile(fixed, percentile: 99.8, positiveOnly: true),
-              let movingP90 = sampledPercentile(moving, percentile: 90, positiveOnly: true),
-              let movingP998 = sampledPercentile(moving, percentile: 99.8, positiveOnly: true) else {
+              let movingP85 = sampledPercentile(moving, percentile: 85, positiveOnly: true),
+              let movingP995 = sampledPercentile(moving, percentile: 99.5, positiveOnly: true) else {
             return nil
         }
         let fixedSpan = max(1, fixed.intensityRange.max - fixed.intensityRange.min)
         let movingSpan = max(1, moving.intensityRange.max - moving.intensityRange.min)
         let fixedLower = max(fixedP20, fixed.intensityRange.min + fixedSpan * 0.06)
-        let movingLower = max(movingP90, moving.intensityRange.min + movingSpan * 0.08)
-        let fixedUpper = max(fixedLower, fixedP998)
-        let movingUpper = max(movingLower, movingP998)
+        let movingLower = max(movingP85, moving.intensityRange.min + movingSpan * 0.08)
+        let fixedUpper = max(fixedLower + fixedSpan * 0.04, fixedP998)
+        let movingUpper = max(movingLower + movingSpan * 0.04, movingP995)
         guard fixedUpper > fixedLower,
               movingUpper > movingLower else { return nil }
         return BrainMaskModel(fixedLower: fixedLower,
@@ -1442,6 +2037,33 @@ private struct SegmentationPolishCandidate {
     let translationMM: SIMD3<Double>
     let rotationRadians: SIMD3<Double>
     let score: Double
+}
+
+private struct BrainLandmarkScore {
+    let total: Double
+    let cortex: Double
+    let cerebellum: Double
+    let containment: Double
+    let centroidResidualMM: Double
+    let nmi: Double
+    let edge: Double
+}
+
+private struct BrainLandmarkCandidate {
+    let transform: Transform3D
+    let baseTransform: Transform3D
+    let orientationLabel: String
+    let orientationPenalty: Double
+    let translationMM: SIMD3<Double>
+    let rotationRadians: SIMD3<Double>
+    let scale: SIMD3<Double>
+    let score: BrainLandmarkScore
+}
+
+private struct BrainOrientationCandidate {
+    let label: String
+    let transform: Transform3D
+    let penalty: Double
 }
 
 private struct BrainMaskModel {

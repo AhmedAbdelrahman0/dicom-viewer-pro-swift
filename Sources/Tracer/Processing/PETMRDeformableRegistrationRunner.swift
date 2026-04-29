@@ -5,6 +5,7 @@ public enum PETMRDeformableBackend: String, CaseIterable, Identifiable, Codable,
     case internalBodyEnvelope
     case simpleITKMI
     case brainsFit
+    case itkSnapGreedy
     case antsSyN
     case synthMorph
     case voxelMorph
@@ -17,6 +18,7 @@ public enum PETMRDeformableBackend: String, CaseIterable, Identifiable, Codable,
         case .internalBodyEnvelope: return "Internal body warp"
         case .simpleITKMI: return "SimpleITK MI"
         case .brainsFit: return "3D Slicer BRAINSFit"
+        case .itkSnapGreedy: return "ITK-SNAP Greedy"
         case .antsSyN: return "ANTs SyN"
         case .synthMorph: return "SynthMorph"
         case .voxelMorph: return "VoxelMorph"
@@ -35,6 +37,9 @@ public enum PETMRDeformableBackend: String, CaseIterable, Identifiable, Codable,
         case .brainsFit:
             let slicerPath = "/Applications/Slicer.app/Contents/lib/Slicer-5.10/cli-modules/BRAINSFit"
             return FileManager.default.isExecutableFile(atPath: slicerPath) ? slicerPath : "BRAINSFit"
+        case .itkSnapGreedy:
+            let itkSnapPath = "/Applications/ITK-SNAP.app/Contents/bin/greedy"
+            return FileManager.default.isExecutableFile(atPath: itkSnapPath) ? itkSnapPath : "greedy"
         case .antsSyN: return "antsRegistration"
         case .synthMorph: return "mri_synthmorph"
         case .voxelMorph: return "python3"
@@ -50,6 +55,8 @@ public enum PETMRDeformableBackend: String, CaseIterable, Identifiable, Codable,
             return "Runs a local Python SimpleITK Mattes mutual-information rigid precision-polish after PET has been prealigned to the MR grid. Add --allow-scale in extra args only when scale is intentional."
         case .brainsFit:
             return "Runs 3D Slicer's BRAINSFit on Tracer's staged orthonormal PET/MR grid. Best used as a rigid, brain-cropped multimodal refinement candidate."
+        case .itkSnapGreedy:
+            return "Runs ITK-SNAP's Greedy affine plus stationary-velocity deformable refinement on Tracer's staged PET/MR grid, then QA-selects the result against the other candidates."
         case .antsSyN:
             return "Runs antsRegistration with rigid/affine/SyN stages and reads the warped PET NIfTI output."
         case .synthMorph:
@@ -137,6 +144,9 @@ public struct PETMRDeformableRegistrationConfiguration: Equatable, Sendable {
         }
         if backend == .brainsFit {
             return "BRAINSFit will run via \(exe). Requires 3D Slicer or BRAINSFit on PATH."
+        }
+        if backend == .itkSnapGreedy {
+            return "ITK-SNAP Greedy will run via \(exe). Requires ITK-SNAP's greedy executable or greedy on PATH."
         }
         return "\(backend.displayName) will run via \(exe)."
     }
@@ -455,6 +465,49 @@ public enum PETMRDeformableRegistrationRunner {
                 environment: ResourcePolicy.load().applyingSubprocessDefaults(to: ProcessInfo.processInfo.environment)
             )
 
+        case .itkSnapGreedy:
+            let affineURL = workDir.appendingPathComponent("greedy_affine.mat")
+            let warpURL = workDir.appendingPathComponent("greedy_warp.nii")
+            let scriptURL = workDir.appendingPathComponent("greedy_petmr_registration.sh")
+            let threads = max(1, ResourcePolicy.load().cpuWorkerLimit)
+            let metric = greedyMetric(configuration.metricPreset)
+            let extraText = extra.map(shellQuote).joined(separator: " ")
+            let extraLine = extraText.isEmpty ? "" : " \(extraText)"
+            let script = """
+            #!/bin/zsh
+            set -euo pipefail
+            GREEDY=\(shellQuote(exe))
+            FIXED=\(shellQuote(fixed))
+            MOVING=\(shellQuote(moving))
+            AFFINE=\(shellQuote(affineURL.path))
+            WARP=\(shellQuote(warpURL.path))
+            WARPED=\(shellQuote(warped))
+            QA=\(shellQuote(qaURL.path))
+            START=$(date +%s)
+            "$GREEDY" -d 3 -float -a -m \(metric) -i "$FIXED" "$MOVING" -o "$AFFINE" -dof 7 -ia-identity -n 100x50x20 -e 0.25x0.1x0.05 -threads \(threads) -V 1\(extraLine)
+            "$GREEDY" -d 3 -float -m \(metric) -i "$FIXED" "$MOVING" -it "$AFFINE" -o "$WARP" -n 60x30x10 -e 0.35x0.18x0.08 -s 2mm 1mm -sv -threads \(threads) -V 1\(extraLine)
+            "$GREEDY" -d 3 -float -rf "$FIXED" -ri LINEAR -rt float -rm "$MOVING" "$WARPED" -r "$WARP" "$AFFINE" -threads \(threads) -V 0
+            DURATION=$(($(date +%s)-START))
+            python3 - <<PY
+            import json
+            with open(r"$QA", "w", encoding="utf-8") as handle:
+                json.dump({"notes": [
+                    "ITK-SNAP Greedy affine+SV deformable refinement",
+                    "metric=\(metric)",
+                    "transform=GreedyDOF7+SV",
+                    "durationSeconds=" + str($DURATION)
+                ]}, handle, indent=2)
+            PY
+            echo "ITK-SNAP Greedy PET/MR registration complete"
+            """
+            try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+            return CommandLine(
+                executable: "/bin/zsh",
+                arguments: [scriptURL.path],
+                environment: ResourcePolicy.load().applyingSubprocessDefaults(to: ProcessInfo.processInfo.environment)
+            )
+
         case .antsSyN:
             let prefix = workDir.appendingPathComponent("ants_").path
             let synMetric = antsSyNMetricArguments(configuration.metricPreset, fixed: fixed, moving: moving)
@@ -514,6 +567,15 @@ public enum PETMRDeformableRegistrationRunner {
             return "NC"
         case .multimodalMI, .hybridMIAndCC:
             return "MMI"
+        }
+    }
+
+    private static func greedyMetric(_ preset: PETMRRegistrationMetricPreset) -> String {
+        switch preset {
+        case .sameContrastCC:
+            return "NCC 4x4x4"
+        case .multimodalMI, .hybridMIAndCC:
+            return "NMI"
         }
     }
 
@@ -780,5 +842,9 @@ if __name__ == "__main__":
             result.append(current)
         }
         return result
+    }
+
+    private static func shellQuote(_ text: String) -> String {
+        "'\(text.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 }

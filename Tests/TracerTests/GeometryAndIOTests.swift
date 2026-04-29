@@ -431,6 +431,176 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertGreaterThan(after.maskDice ?? 0, before.maskDice ?? 0)
     }
 
+    func testPETMRBrainLandmarkFitUsesCortexAndCerebellum() {
+        let size = 40
+        let spacing = 4.0
+        let center = SIMD3<Double>(19.5, 19.5, 20.0)
+
+        func brainPatternVolume(modality: String,
+                                description: String,
+                                shiftVoxels: SIMD3<Double>,
+                                flipAP: Bool = false) -> ImageVolume {
+            var pixels = [Float](repeating: 0, count: size * size * size)
+            for z in 0..<size {
+                for y in 0..<size {
+                    for x in 0..<size {
+                        var local = SIMD3<Double>(Double(x), Double(y), Double(z)) - center - shiftVoxels
+                        if flipAP {
+                            local.y *= -1
+                        }
+                        let r = sqrt(pow(local.x / 12.5, 2) +
+                                     pow(local.y / 14.0, 2) +
+                                     pow(local.z / 13.0, 2))
+                        guard r <= 1 else { continue }
+                        let shell = r >= 0.68
+                        let inferiorPosterior = local.y > 2 && local.z < -2 && abs(local.x) < 8
+                        let index = z * size * size + y * size + x
+                        if modality == "MR" {
+                            pixels[index] = Float(inferiorPosterior ? 170 : (shell ? 180 : 90 + (1 - r) * 45))
+                        } else {
+                            pixels[index] = Float(shell ? 5 + 3 * r : 1.5)
+                            if inferiorPosterior {
+                                pixels[index] = 9
+                            }
+                        }
+                    }
+                }
+            }
+            return ImageVolume(
+                pixels: pixels,
+                depth: size,
+                height: size,
+                width: size,
+                spacing: (spacing, spacing, spacing),
+                modality: modality,
+                seriesDescription: description
+            )
+        }
+
+        let mr = brainPatternVolume(modality: "MR",
+                                    description: "Synthetic cortex/cerebellum MRI",
+                                    shiftVoxels: SIMD3<Double>(0, 0, 0))
+        let petShifted = brainPatternVolume(modality: "PT",
+                                            description: "Synthetic shifted FDG PET",
+                                            shiftVoxels: SIMD3<Double>(2, -1, 0))
+
+        let correction = PETMRRegistrationEngine.postResampleBrainLandmarkFit(
+            movingOnFixedGrid: petShifted,
+            fixed: mr
+        )
+
+        guard let correction else {
+            XCTFail("Expected brain cortex/cerebellum landmark correction")
+            return
+        }
+        XCTAssertLessThan(correction.translationMM.x, -4)
+        XCTAssertGreaterThan(correction.translationMM.y, 1)
+        XCTAssertTrue(correction.note.contains("direction-volume-anatomy fit"))
+
+        let corrected = VolumeResampler.resample(source: petShifted,
+                                                 target: mr,
+                                                 transform: correction.sourceToDisplay.inverse,
+                                                 mode: .linear)
+        let before = RegistrationQualityAssurance.evaluate(fixed: mr,
+                                                           movingOnFixedGrid: petShifted,
+                                                           label: "Before")
+        let after = RegistrationQualityAssurance.evaluate(fixed: mr,
+                                                          movingOnFixedGrid: corrected,
+                                                          label: "After")
+        XCTAssertLessThan(after.centroidResidualMM ?? .infinity,
+                          before.centroidResidualMM ?? -.infinity)
+        XCTAssertGreaterThan(after.maskDice ?? 0, before.maskDice ?? 0)
+    }
+
+    func testPETMRBrainLandmarkFitCorrectsAPFlippedPET() {
+        let size = 40
+        let spacing = 4.0
+        let center = SIMD3<Double>(19.5, 19.5, 20.0)
+
+        func brainPatternVolume(modality: String,
+                                description: String,
+                                flipAP: Bool) -> ImageVolume {
+            var pixels = [Float](repeating: 0, count: size * size * size)
+            for z in 0..<size {
+                for y in 0..<size {
+                    for x in 0..<size {
+                        var local = SIMD3<Double>(Double(x), Double(y), Double(z)) - center
+                        if flipAP {
+                            local.y *= -1
+                        }
+                        let r = sqrt(pow(local.x / 12.5, 2) +
+                                     pow(local.y / 14.0, 2) +
+                                     pow(local.z / 13.0, 2))
+                        guard r <= 1 else { continue }
+                        let shell = r >= 0.68
+                        let inferiorPosterior = local.y > 2 && local.z < -2 && abs(local.x) < 8
+                        let index = z * size * size + y * size + x
+                        if modality == "MR" {
+                            pixels[index] = Float(inferiorPosterior ? 170 : (shell ? 180 : 90 + (1 - r) * 45))
+                        } else {
+                            pixels[index] = Float(shell ? 5 + 3 * r : 1.5)
+                            if inferiorPosterior {
+                                pixels[index] = 9
+                            }
+                        }
+                    }
+                }
+            }
+            return ImageVolume(
+                pixels: pixels,
+                depth: size,
+                height: size,
+                width: size,
+                spacing: (spacing, spacing, spacing),
+                modality: modality,
+                seriesDescription: description
+            )
+        }
+
+        let mr = brainPatternVolume(modality: "MR",
+                                    description: "Synthetic MRI anatomical landmarks",
+                                    flipAP: false)
+        let petFlipped = brainPatternVolume(modality: "PT",
+                                            description: "Synthetic AP-flipped FDG PET",
+                                            flipAP: true)
+
+        let correction = PETMRRegistrationEngine.postResampleBrainLandmarkFit(
+            movingOnFixedGrid: petFlipped,
+            fixed: mr
+        )
+
+        guard let correction else {
+            XCTFail("Expected AP-flip brain landmark correction")
+            return
+        }
+        XCTAssertTrue(correction.note.localizedCaseInsensitiveContains("flipped"),
+                      "Expected orientation correction note, got: \(correction.note)")
+
+        let corrected = VolumeResampler.resample(source: petFlipped,
+                                                 target: mr,
+                                                 transform: correction.sourceToDisplay.inverse,
+                                                 mode: .linear)
+        func posteriorInferiorMean(_ volume: ImageVolume) -> Double {
+            var sum = 0.0
+            var count = 0.0
+            for z in 0..<size {
+                for y in 0..<size {
+                    for x in 0..<size {
+                        let local = SIMD3<Double>(Double(x), Double(y), Double(z)) - center
+                        guard local.y > 2,
+                              local.z < -2,
+                              abs(local.x) < 8 else { continue }
+                        sum += Double(volume.intensity(z: z, y: y, x: x))
+                        count += 1
+                    }
+                }
+            }
+            return sum / max(1, count)
+        }
+        XCTAssertGreaterThan(posteriorInferiorMean(corrected),
+                             posteriorInferiorMean(petFlipped) + 0.5)
+    }
+
     func testPETMRRegistrationSearchesInPlaneRotation() {
         func lShapeVolume(modality: String, rotated: Bool, value: Float) -> ImageVolume {
             let size = 32
@@ -841,6 +1011,52 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertTrue(sagittal.flipHorizontal)
         XCTAssertTrue(axial.flipVertical)
         XCTAssertEqual(SliceDisplayTransform.patientLetter(for: SliceDisplayTransform.displayAxes(axis: 2, volume: volume).down), "P")
+    }
+
+    @MainActor
+    func testViewerDisplaysLASPETAndLPSMRIInMatchingPatientOrientation() throws {
+        let mri = ImageVolume(
+            pixels: [Float](repeating: 0, count: 8),
+            depth: 2,
+            height: 2,
+            width: 2,
+            direction: simd_double3x3(
+                SIMD3<Double>(1, 0, 0),
+                SIMD3<Double>(0, 1, 0),
+                SIMD3<Double>(0, 0, 1)
+            ),
+            modality: "MR"
+        )
+        let pet = ImageVolume(
+            pixels: [Float](repeating: 0, count: 8),
+            depth: 2,
+            height: 2,
+            width: 2,
+            direction: simd_double3x3(
+                SIMD3<Double>(1, 0, 0),
+                SIMD3<Double>(0, -1, 0),
+                SIMD3<Double>(0, 0, 1)
+            ),
+            modality: "PT"
+        )
+        let vm = ViewerViewModel()
+
+        for axis in 0..<3 {
+            let mriAxes = SliceDisplayTransform.displayAxes(
+                axis: axis,
+                volume: mri,
+                transform: vm.displayTransform(for: axis, volume: mri)
+            )
+            let petAxes = SliceDisplayTransform.displayAxes(
+                axis: axis,
+                volume: pet,
+                transform: vm.displayTransform(for: axis, volume: pet)
+            )
+            XCTAssertEqual(SliceDisplayTransform.patientLetter(for: mriAxes.right),
+                           SliceDisplayTransform.patientLetter(for: petAxes.right))
+            XCTAssertEqual(SliceDisplayTransform.patientLetter(for: mriAxes.down),
+                           SliceDisplayTransform.patientLetter(for: petAxes.down))
+        }
     }
 
     @MainActor

@@ -3124,6 +3124,97 @@ public final class ViewerViewModel: ObservableObject {
         candidate.label.caseInsensitiveCompare("Scanner geometry") == .orderedSame
     }
 
+    private func isLikelyBrainPETMRFixedVolume(_ volume: ImageVolume) -> Bool {
+        guard Modality.normalize(volume.modality) == .MR else { return false }
+        let extent = SIMD3<Double>(
+            Double(max(1, volume.width - 1)) * volume.spacing.x,
+            Double(max(1, volume.height - 1)) * volume.spacing.y,
+            Double(max(1, volume.depth - 1)) * volume.spacing.z
+        )
+        let largest = max(extent.x, max(extent.y, extent.z))
+        let smallest = min(extent.x, min(extent.y, extent.z))
+        return largest <= 320 && smallest >= 80
+    }
+
+    private func isBodyWarpPETMRCandidate(_ candidate: PETMRFusionCandidate) -> Bool {
+        let label = candidate.label.lowercased()
+        let note = candidate.note.lowercased()
+        return label.contains("body warp") ||
+            label.contains("body-envelope") ||
+            note.contains("body warp") ||
+            note.contains("body-envelope")
+    }
+
+    private func isBrainStagedPETMRCandidate(_ candidate: PETMRFusionCandidate) -> Bool {
+        let label = candidate.label.lowercased()
+        let note = candidate.note.lowercased()
+        return label.contains("direction-volume-anatomy") ||
+            note.contains("direction → volume → anatomy") ||
+            note.contains("direction-volume-anatomy")
+    }
+
+    private func isBrainSafePETMRCandidate(_ candidate: PETMRFusionCandidate) -> Bool {
+        if isBodyWarpPETMRCandidate(candidate) {
+            return false
+        }
+        let label = candidate.label.lowercased()
+        let note = candidate.note.lowercased()
+        return isScannerGeometryPETMRCandidate(candidate) ||
+            label.contains("scanner geometry") ||
+            label.contains("rigid rotation") ||
+            label.contains("simpleitk mi on scanner") ||
+            label.contains("3d slicer brainsfit on scanner") ||
+            label.contains("itk-snap greedy on scanner") ||
+            note.contains("scanner/world geometry") ||
+            note.contains("rigid rotation")
+    }
+
+    private func brainPETMRExternalSeeds(from candidates: [PETMRFusionCandidate]) -> [PETMRFusionCandidate] {
+        var safeSeeds = candidates
+            .filter(isBrainSafePETMRCandidate)
+            .filter { !$0.label.localizedCaseInsensitiveContains("SimpleITK") }
+            .filter { !$0.label.localizedCaseInsensitiveContains("BRAINSFit") }
+            .filter { !$0.label.localizedCaseInsensitiveContains("Greedy") }
+        var pinned: [PETMRFusionCandidate] = []
+        if let geometry = safeSeeds.first(where: isScannerGeometryPETMRCandidate) {
+            pinned.append(geometry)
+            safeSeeds.removeAll { $0.label == geometry.label }
+        }
+        let ranked = safeSeeds.sorted {
+            let lhsScore = petMRFusionCandidateScore($0.quality)
+            let rhsScore = petMRFusionCandidateScore($1.quality)
+            if abs(lhsScore - rhsScore) > 0.01 { return lhsScore > rhsScore }
+            return ($0.quality.centroidResidualMM ?? .greatestFiniteMagnitude) <
+                ($1.quality.centroidResidualMM ?? .greatestFiniteMagnitude)
+        }
+        pinned.append(contentsOf: ranked.prefix(1))
+        return pinned
+    }
+
+    private func brainPETMROrientationSeeds(from candidates: [PETMRFusionCandidate]) -> [PETMRFusionCandidate] {
+        var seeds: [PETMRFusionCandidate] = []
+        if let geometry = candidates.first(where: isScannerGeometryPETMRCandidate) {
+            seeds.append(geometry)
+        }
+        if let rigid = candidates.first(where: {
+            $0.label.localizedCaseInsensitiveContains("Rigid rotation") &&
+                !$0.label.localizedCaseInsensitiveContains("brain landmark")
+        }) {
+            seeds.append(rigid)
+        }
+        if seeds.isEmpty {
+            seeds = topPETMRFusionCandidates(candidates, limit: 1)
+        }
+
+        var seen = Set<String>()
+        return seeds.filter { candidate in
+            let key = candidate.label
+            if seen.contains(key) { return false }
+            seen.insert(key)
+            return true
+        }
+    }
+
     private func petMRAutomaticComplexityPenalty(_ candidate: PETMRFusionCandidate) -> Double {
         let label = candidate.label.lowercased()
         let note = candidate.note.lowercased()
@@ -3143,6 +3234,15 @@ public final class ViewerViewModel: ObservableObject {
         if label.contains("segmentation polish") || note.contains("segmentation polish") {
             penalty += 0.03
         }
+        if label.contains("brain landmark") || note.contains("brain landmark") {
+            penalty += 0.03
+        }
+        if isBodyWarpPETMRCandidate(candidate) {
+            penalty += 0.06
+        }
+        if isBrainStagedPETMRCandidate(candidate) {
+            penalty -= 0.025
+        }
         if label.contains("simpleitk") || note.contains("simpleitk") {
             penalty += 0.03
         }
@@ -3152,7 +3252,7 @@ public final class ViewerViewModel: ObservableObject {
         if candidate.quality.grade == .fail {
             penalty += 0.30
         }
-        return min(0.22, penalty)
+        return max(0, min(0.22, penalty))
     }
 
     private func petMRAutomaticCandidateScore(_ candidate: PETMRFusionCandidate) -> Double {
@@ -3208,7 +3308,9 @@ public final class ViewerViewModel: ObservableObject {
                 candidate.label.localizedCaseInsensitiveContains("SimpleITK") ||
                 candidate.note.localizedCaseInsensitiveContains("SimpleITK") ||
                 candidate.label.localizedCaseInsensitiveContains("segmentation polish") ||
-                candidate.note.localizedCaseInsensitiveContains("segmentation polish")
+                candidate.note.localizedCaseInsensitiveContains("segmentation polish") ||
+                candidate.label.localizedCaseInsensitiveContains("brain landmark") ||
+                candidate.note.localizedCaseInsensitiveContains("brain landmark")
             if isPrecisionRefinement,
                candidateScore >= geometryScore + 0.025,
                nmiGain >= -0.01,
@@ -3228,20 +3330,16 @@ public final class ViewerViewModel: ObservableObject {
             (nmiGain >= 0.05 && centroidGain >= 10)
     }
 
-    private func bestPETMRAutomaticCandidate(_ candidates: [PETMRFusionCandidate])
+    private func bestPETMRAutomaticCandidate(_ candidates: [PETMRFusionCandidate],
+                                             preferBrainSafe: Bool = false)
         -> (candidate: PETMRFusionCandidate, selectionNote: String?)? {
         guard !candidates.isEmpty else { return nil }
 
-        let adjustedBest = candidates.max { lhs, rhs in
-            let lhsScore = petMRAutomaticCandidateScore(lhs)
-            let rhsScore = petMRAutomaticCandidateScore(rhs)
+        func rawCandidateOrdering(_ lhs: PETMRFusionCandidate, _ rhs: PETMRFusionCandidate) -> Bool {
+            let lhsScore = petMRFusionCandidateScore(lhs.quality)
+            let rhsScore = petMRFusionCandidateScore(rhs.quality)
             if abs(lhsScore - rhsScore) > 0.01 {
                 return lhsScore < rhsScore
-            }
-            let lhsRaw = petMRFusionCandidateScore(lhs.quality)
-            let rhsRaw = petMRFusionCandidateScore(rhs.quality)
-            if abs(lhsRaw - rhsRaw) > 0.01 {
-                return lhsRaw < rhsRaw
             }
             let lhsCentroid = lhs.quality.centroidResidualMM ?? .greatestFiniteMagnitude
             let rhsCentroid = rhs.quality.centroidResidualMM ?? .greatestFiniteMagnitude
@@ -3251,15 +3349,79 @@ public final class ViewerViewModel: ObservableObject {
             return petMRAutomaticComplexityPenalty(lhs) > petMRAutomaticComplexityPenalty(rhs)
         }
 
-        guard let best = adjustedBest else { return nil }
         guard let geometry = candidates.first(where: isScannerGeometryPETMRCandidate) else {
+            guard let best = candidates.max(by: rawCandidateOrdering) else { return nil }
             return (best, nil)
         }
-        guard !isScannerGeometryPETMRCandidate(best) else {
-            return (best, "Scanner/world geometry retained as the lowest-complexity passing fit.")
+
+        func conservativeBrainCandidate() -> PETMRFusionCandidate? {
+            guard preferBrainSafe else { return nil }
+            let safeCandidates = candidates
+                .filter(isBrainSafePETMRCandidate)
+                .filter { $0.quality.grade != .fail }
+            guard !safeCandidates.isEmpty else { return nil }
+            return safeCandidates.max {
+                let lhsScore = petMRAutomaticCandidateScore($0)
+                let rhsScore = petMRAutomaticCandidateScore($1)
+                if isBrainStagedPETMRCandidate($0) != isBrainStagedPETMRCandidate($1),
+                   abs(lhsScore - rhsScore) <= 0.04 {
+                    return !isBrainStagedPETMRCandidate($0)
+                }
+                if abs(lhsScore - rhsScore) > 0.01 {
+                    return lhsScore < rhsScore
+                }
+                let lhsCentroid = $0.quality.centroidResidualMM ?? .greatestFiniteMagnitude
+                let rhsCentroid = $1.quality.centroidResidualMM ?? .greatestFiniteMagnitude
+                if abs(lhsCentroid - rhsCentroid) > 1 {
+                    return lhsCentroid > rhsCentroid
+                }
+                return rawCandidateOrdering($0, $1)
+            }
         }
-        if petMRAutomaticMateriallyImproves(best, over: geometry) {
-            return (best, nil)
+
+        let materiallyBetter = candidates
+            .filter { !isScannerGeometryPETMRCandidate($0) }
+            .filter { petMRAutomaticMateriallyImproves($0, over: geometry) }
+            .max(by: rawCandidateOrdering)
+        if let materiallyBetter {
+            if preferBrainSafe,
+               isBodyWarpPETMRCandidate(materiallyBetter),
+               let conservative = conservativeBrainCandidate(),
+               conservative.quality.grade == .pass,
+               (conservative.quality.normalizedMutualInformation ?? 0) >= 1.02,
+               (conservative.quality.maskDice ?? 0) >= 0.45 {
+                return (
+                    conservative,
+                    "Brain PET/MR retained the best scanner/rigid-space fit because body-envelope deformable candidates can overfit compact brain uptake despite stronger global overlap metrics."
+                )
+            }
+            return (
+                materiallyBetter,
+                "Selected higher-complexity PET/MR fit because it materially improved masked MI, envelope overlap, centroid residual, or edge QA over scanner geometry."
+            )
+        }
+
+        let adjustedBest = candidates.max {
+            let lhsScore = petMRAutomaticCandidateScore($0)
+            let rhsScore = petMRAutomaticCandidateScore($1)
+            if abs(lhsScore - rhsScore) > 0.01 {
+                return lhsScore < rhsScore
+            }
+            return rawCandidateOrdering($0, $1)
+        }
+        if let adjustedBest, !isScannerGeometryPETMRCandidate(adjustedBest) {
+            if preferBrainSafe,
+               isBodyWarpPETMRCandidate(adjustedBest),
+               let conservative = conservativeBrainCandidate() {
+                return (
+                    conservative,
+                    "Brain PET/MR retained the best scanner/rigid-space fit after conservative visual-safety scoring rejected body-envelope overfit."
+                )
+            }
+            return (
+                adjustedBest,
+                "Selected the best complexity-adjusted PET/MR fit; no candidate met the stricter material-improvement threshold."
+            )
         }
         return (
             geometry,
@@ -3268,10 +3430,44 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     private func evaluatePETMRFusionCandidateInputs(_ inputs: [PETMRFusionCandidateInput],
-                                                    fixed mr: ImageVolume) async -> [PETMRFusionCandidate] {
+                                                    fixed mr: ImageVolume,
+                                                    includeLocalPolish: Bool = true) async -> [PETMRFusionCandidate] {
         var candidates: [PETMRFusionCandidate] = []
         candidates.reserveCapacity(inputs.count * 2)
         for input in inputs {
+            func appendBrainLandmarkCandidate(from volume: ImageVolume,
+                                              note: String,
+                                              deformationQuality: DeformationFieldQuality?,
+                                              label: String,
+                                              allowBrainFitInside: Bool) async {
+                guard let landmark = PETMRRegistrationEngine.postResampleBrainLandmarkFit(
+                    movingOnFixedGrid: volume,
+                    fixed: mr
+                ) else {
+                    return
+                }
+                let landmarked = await Task.detached(priority: .userInitiated) {
+                    VolumeResampler.resample(source: volume,
+                                             target: mr,
+                                             transform: landmark.sourceToDisplay.inverse,
+                                             mode: .linear)
+                }.value
+                let landmarkLabel = "\(label) + brain landmark direction-volume-anatomy fit"
+                let landmarkQuality = RegistrationQualityAssurance.evaluate(
+                    fixed: mr,
+                    movingOnFixedGrid: landmarked,
+                    label: landmarkLabel
+                )
+                candidates.append(PETMRFusionCandidate(
+                    volume: landmarked,
+                    note: "\(note). Direction → volume → anatomy staged brain PET/MR fit. \(landmark.note)",
+                    deformationQuality: deformationQuality,
+                    quality: landmarkQuality,
+                    allowBrainFitInside: allowBrainFitInside,
+                    label: landmarkLabel
+                ))
+            }
+
             let quality = RegistrationQualityAssurance.evaluate(
                 fixed: mr,
                 movingOnFixedGrid: input.volume,
@@ -3285,6 +3481,15 @@ public final class ViewerViewModel: ObservableObject {
                 allowBrainFitInside: input.allowBrainFitInside,
                 label: input.label
             ))
+            await appendBrainLandmarkCandidate(from: input.volume,
+                                               note: input.note,
+                                               deformationQuality: input.deformationQuality,
+                                               label: input.label,
+                                               allowBrainFitInside: true)
+
+            guard includeLocalPolish else {
+                continue
+            }
 
             if let polish = PETMRRegistrationEngine.postResampleSegmentationPolish(movingOnFixedGrid: input.volume,
                                                                                    fixed: mr) {
@@ -3308,6 +3513,11 @@ public final class ViewerViewModel: ObservableObject {
                     allowBrainFitInside: true,
                     label: polishedLabel
                 ))
+                await appendBrainLandmarkCandidate(from: polished,
+                                                   note: "\(input.note). \(polish.note)",
+                                                   deformationQuality: input.deformationQuality,
+                                                   label: polishedLabel,
+                                                   allowBrainFitInside: true)
             }
 
             if let correction = PETMRRegistrationEngine.postResampleVisualFit(movingOnFixedGrid: input.volume,
@@ -3361,12 +3571,272 @@ public final class ViewerViewModel: ObservableObject {
         return candidates
     }
 
+    private func evaluatePETMRPrecisionNudges(from candidates: [PETMRFusionCandidate],
+                                              fixed mr: ImageVolume,
+                                              limit: Int) async -> [PETMRFusionCandidate] {
+        let seeds = topPETMRFusionCandidates(candidates, limit: limit)
+            .filter { !$0.label.localizedCaseInsensitiveContains("QA nudge") }
+        var nudged: [PETMRFusionCandidate] = []
+        nudged.reserveCapacity(seeds.count)
+        for seed in seeds {
+            if let candidate = await petMRPrecisionNudgeCandidate(from: seed, fixed: mr) {
+                nudged.append(candidate)
+            }
+        }
+        return nudged
+    }
+
+    private func petMRPrecisionNudgeCandidate(from seed: PETMRFusionCandidate,
+                                              fixed mr: ImageVolume) async -> PETMRFusionCandidate? {
+        let baseScore = petMRFusionCandidateScore(seed.quality)
+        var bestQuality = seed.quality
+        var bestVolume = seed.volume
+        var bestTranslation = SIMD3<Double>(0, 0, 0)
+        var bestRotation = SIMD3<Double>(0, 0, 0)
+        var bestScale = SIMD3<Double>(repeating: 1)
+
+        let center = mr.worldPoint(voxel: SIMD3<Double>(
+            Double(max(0, mr.width - 1)) / 2,
+            Double(max(0, mr.height - 1)) / 2,
+            Double(max(0, mr.depth - 1)) / 2
+        ))
+
+        func fixedAxisOffset(_ x: Double, _ y: Double, _ z: Double) -> SIMD3<Double> {
+            mr.direction * SIMD3<Double>(x, y, z)
+        }
+
+        func correctionTransform(translation: SIMD3<Double>,
+                                 rotation: SIMD3<Double>,
+                                 scale: SIMD3<Double>) -> Transform3D {
+            Transform3D.translation(translation.x, translation.y, translation.z)
+                .concatenate(Transform3D.translation(center.x, center.y, center.z))
+                .concatenate(Transform3D.rotationZ(rotation.z))
+                .concatenate(Transform3D.rotationY(rotation.y))
+                .concatenate(Transform3D.rotationX(rotation.x))
+                .concatenate(Transform3D.scale(scale))
+                .concatenate(Transform3D.translation(-center.x, -center.y, -center.z))
+        }
+
+        func shouldAdopt(_ quality: RegistrationQualitySnapshot) -> Bool {
+            let scoreGain = petMRFusionCandidateScore(quality) - petMRFusionCandidateScore(bestQuality)
+            let centroidGain = (bestQuality.centroidResidualMM ?? .infinity) - (quality.centroidResidualMM ?? .infinity)
+            let edgeGain = (quality.edgeAlignment ?? -.infinity) - (bestQuality.edgeAlignment ?? -.infinity)
+            let nmiGain = (quality.normalizedMutualInformation ?? -.infinity) - (bestQuality.normalizedMutualInformation ?? -.infinity)
+            if quality.grade == .fail { return false }
+            if scoreGain >= 0.004 { return true }
+            if centroidGain >= 0.75, edgeGain >= -0.015, nmiGain >= -0.010 { return true }
+            if edgeGain >= 0.025, centroidGain >= -0.75, nmiGain >= -0.010 { return true }
+            return false
+        }
+
+        func evaluate(translation: SIMD3<Double>,
+                      rotation: SIMD3<Double>,
+                      scale: SIMD3<Double>,
+                      label: String) async {
+            let transform = correctionTransform(translation: translation,
+                                                rotation: rotation,
+                                                scale: scale)
+            let nudgedVolume = await Task.detached(priority: .userInitiated) {
+                VolumeResampler.resample(source: seed.volume,
+                                         target: mr,
+                                         transform: transform.inverse,
+                                         mode: .linear)
+            }.value
+            let quality = RegistrationQualityAssurance.evaluate(
+                fixed: mr,
+                movingOnFixedGrid: nudgedVolume,
+                label: label
+            )
+            if shouldAdopt(quality) {
+                bestQuality = quality
+                bestVolume = nudgedVolume
+                bestTranslation = translation
+                bestRotation = rotation
+                bestScale = scale
+            }
+        }
+
+        for step in [1.5, 0.75] {
+            let anchor = bestTranslation
+            let offsets = [
+                fixedAxisOffset(step, 0, 0),
+                fixedAxisOffset(-step, 0, 0),
+                fixedAxisOffset(0, step, 0),
+                fixedAxisOffset(0, -step, 0),
+                fixedAxisOffset(0, 0, step),
+                fixedAxisOffset(0, 0, -step)
+            ]
+            for offset in offsets {
+                await evaluate(translation: anchor + offset,
+                               rotation: bestRotation,
+                               scale: bestScale,
+                               label: "\(seed.label) + QA nudge")
+            }
+        }
+
+        let finalScoreGain = petMRFusionCandidateScore(bestQuality) - baseScore
+        let finalCentroidGain = (seed.quality.centroidResidualMM ?? .infinity) -
+            (bestQuality.centroidResidualMM ?? .infinity)
+        let finalEdgeGain = (bestQuality.edgeAlignment ?? -.infinity) -
+            (seed.quality.edgeAlignment ?? -.infinity)
+        guard finalScoreGain >= 0.004 ||
+              (finalCentroidGain >= 0.75 && finalEdgeGain >= -0.015) ||
+              finalEdgeGain >= 0.025 else {
+            return nil
+        }
+
+        let rotationDegrees = SIMD3<Double>(
+            bestRotation.x * 180 / Double.pi,
+            bestRotation.y * 180 / Double.pi,
+            bestRotation.z * 180 / Double.pi
+        )
+        let note = String(
+            format: "%@. PET/MR precision QA nudge improved local fit: shift X %.2f / Y %.2f / Z %.2f mm, rotate X %.2f° / Y %.2f° / Z %.2f°, scale %.3fx, score +%.3f.",
+            seed.note,
+            bestTranslation.x,
+            bestTranslation.y,
+            bestTranslation.z,
+            rotationDegrees.x,
+            rotationDegrees.y,
+            rotationDegrees.z,
+            (bestScale.x + bestScale.y + bestScale.z) / 3,
+            finalScoreGain
+        )
+        return PETMRFusionCandidate(
+            volume: bestVolume,
+            note: note,
+            deformationQuality: seed.deformationQuality,
+            quality: bestQuality,
+            allowBrainFitInside: seed.allowBrainFitInside,
+            label: "\(seed.label) + QA nudge"
+        )
+    }
+
+    private func evaluatePETMRAxialQuarterTurnCandidates(from candidates: [PETMRFusionCandidate],
+                                                         fixed mr: ImageVolume,
+                                                         limit: Int) async -> [PETMRFusionCandidate] {
+        let seeds = topPETMRFusionCandidates(candidates, limit: limit)
+            .filter { !$0.label.localizedCaseInsensitiveContains("90°") }
+        var quarterTurns: [PETMRFusionCandidate] = []
+        quarterTurns.reserveCapacity(seeds.count * 4)
+        for seed in seeds {
+            let direct = await petMRAxialQuarterTurnCandidates(from: seed, fixed: mr)
+            quarterTurns += direct
+            for candidate in direct {
+                if let landmark = await petMRBrainLandmarkCandidate(from: candidate, fixed: mr) {
+                    quarterTurns.append(landmark)
+                }
+            }
+        }
+        return quarterTurns
+    }
+
+    private func petMRAxialQuarterTurnCandidates(from seed: PETMRFusionCandidate,
+                                                 fixed mr: ImageVolume) async -> [PETMRFusionCandidate] {
+        let center = mr.worldPoint(voxel: SIMD3<Double>(
+            Double(max(0, mr.width - 1)) / 2,
+            Double(max(0, mr.height - 1)) / 2,
+            Double(max(0, mr.depth - 1)) / 2
+        ))
+        let rotations: [(label: String, angle: Double)] = [
+            ("PET 90° anti-clockwise", Double.pi / 2),
+            ("PET 90° clockwise", -Double.pi / 2)
+        ]
+        var results: [PETMRFusionCandidate] = []
+        for rotation in rotations {
+            let sourceToDisplay = Transform3D.translation(center.x, center.y, center.z)
+                .concatenate(Transform3D.rotationZ(rotation.angle))
+                .concatenate(Transform3D.translation(-center.x, -center.y, -center.z))
+            let rotated = await Task.detached(priority: .userInitiated) {
+                VolumeResampler.resample(source: seed.volume,
+                                         target: mr,
+                                         transform: sourceToDisplay.inverse,
+                                         mode: .linear)
+            }.value
+            let label = "\(seed.label) + \(rotation.label)"
+            let quality = RegistrationQualityAssurance.evaluate(
+                fixed: mr,
+                movingOnFixedGrid: rotated,
+                label: label
+            )
+            results.append(PETMRFusionCandidate(
+                volume: rotated,
+                note: "\(seed.note). Applied \(rotation.label) axial reorientation around the MR brain center before QA.",
+                deformationQuality: seed.deformationQuality,
+                quality: quality,
+                allowBrainFitInside: true,
+                label: label
+            ))
+        }
+        return results.sorted {
+            let lhs = petMRFusionCandidateScore($0.quality)
+            let rhs = petMRFusionCandidateScore($1.quality)
+            if abs(lhs - rhs) > 0.001 { return lhs > rhs }
+            let lhsAntiClockwise = $0.label.localizedCaseInsensitiveContains("anti-clockwise")
+            let rhsAntiClockwise = $1.label.localizedCaseInsensitiveContains("anti-clockwise")
+            if lhsAntiClockwise != rhsAntiClockwise {
+                return lhsAntiClockwise
+            }
+            return ($0.quality.centroidResidualMM ?? .greatestFiniteMagnitude) <
+                ($1.quality.centroidResidualMM ?? .greatestFiniteMagnitude)
+        }
+    }
+
+    private func petMRBrainLandmarkCandidate(from seed: PETMRFusionCandidate,
+                                             fixed mr: ImageVolume) async -> PETMRFusionCandidate? {
+        guard let landmark = PETMRRegistrationEngine.postResampleBrainLandmarkFit(
+            movingOnFixedGrid: seed.volume,
+            fixed: mr
+        ) else {
+            return nil
+        }
+        let landmarked = await Task.detached(priority: .userInitiated) {
+            VolumeResampler.resample(source: seed.volume,
+                                     target: mr,
+                                     transform: landmark.sourceToDisplay.inverse,
+                                     mode: .linear)
+        }.value
+        let label = "\(seed.label) + brain landmark direction-volume-anatomy fit"
+        let quality = RegistrationQualityAssurance.evaluate(
+            fixed: mr,
+            movingOnFixedGrid: landmarked,
+            label: label
+        )
+        return PETMRFusionCandidate(
+            volume: landmarked,
+            note: "\(seed.note). Direction → volume → anatomy staged brain PET/MR fit. \(landmark.note)",
+            deformationQuality: seed.deformationQuality,
+            quality: quality,
+            allowBrainFitInside: true,
+            label: label
+        )
+    }
+
     private func automaticPETMRExternalConfigurations() -> [PETMRDeformableRegistrationConfiguration] {
         var configs: [PETMRDeformableRegistrationConfiguration] = []
         let selectedSimpleITK = petMRDeformableRegistration.backend == .simpleITKMI
         let selectedBRAINSFit = petMRDeformableRegistration.backend == .brainsFit
+        let selectedGreedy = petMRDeformableRegistration.backend == .itkSnapGreedy
         let selectedExtraArguments = petMRDeformableRegistration.extraArguments
             .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        func appendIfReady(_ config: PETMRDeformableRegistrationConfiguration) {
+            guard config.isExternalConfigured else { return }
+            let executable = config.resolvedExecutable
+            if executable.contains("/"),
+               !FileManager.default.isExecutableFile(atPath: executable) {
+                return
+            }
+            guard !configs.contains(where: {
+                $0.backend == config.backend &&
+                $0.resolvedExecutable == config.resolvedExecutable &&
+                $0.extraArguments == config.extraArguments
+            }) else {
+                return
+            }
+            configs.append(config)
+        }
+
         var simpleITK = PETMRDeformableRegistrationConfiguration(
             backend: .simpleITKMI,
             executablePath: selectedSimpleITK ? petMRDeformableRegistration.executablePath : "",
@@ -3376,9 +3846,8 @@ public final class ViewerViewModel: ObservableObject {
         simpleITK.extraArguments = selectedSimpleITK && !selectedExtraArguments.isEmpty
             ? selectedExtraArguments
             : "--sampling 0.05 --iterations 120 --bins 64"
-        if simpleITK.isExternalConfigured {
-            configs.append(simpleITK)
-        }
+        appendIfReady(simpleITK)
+
         if selectedBRAINSFit {
             var brainsFit = PETMRDeformableRegistrationConfiguration(
                 backend: .brainsFit,
@@ -3387,12 +3856,39 @@ public final class ViewerViewModel: ObservableObject {
                 metricPreset: petMRDeformableRegistration.metricPreset
             )
             brainsFit.extraArguments = selectedExtraArguments
-            configs.append(brainsFit)
+            appendIfReady(brainsFit)
+        } else {
+            appendIfReady(PETMRDeformableRegistrationConfiguration(
+                backend: .brainsFit,
+                executablePath: PETMRDeformableBackend.brainsFit.defaultExecutableName,
+                timeoutSeconds: 300,
+                metricPreset: .multimodalMI
+            ))
         }
+
+        if selectedGreedy {
+            var greedy = PETMRDeformableRegistrationConfiguration(
+                backend: .itkSnapGreedy,
+                executablePath: petMRDeformableRegistration.executablePath,
+                timeoutSeconds: min(max(petMRDeformableRegistration.timeoutSeconds, 180), 420),
+                metricPreset: petMRDeformableRegistration.metricPreset
+            )
+            greedy.extraArguments = selectedExtraArguments
+            appendIfReady(greedy)
+        } else {
+            appendIfReady(PETMRDeformableRegistrationConfiguration(
+                backend: .itkSnapGreedy,
+                executablePath: PETMRDeformableBackend.itkSnapGreedy.defaultExecutableName,
+                timeoutSeconds: 420,
+                metricPreset: .multimodalMI
+            ))
+        }
+
         if petMRDeformableRegistration.isExternalConfigured,
            petMRDeformableRegistration.backend != .simpleITKMI,
-           petMRDeformableRegistration.backend != .brainsFit {
-            configs.append(petMRDeformableRegistration)
+           petMRDeformableRegistration.backend != .brainsFit,
+           petMRDeformableRegistration.backend != .itkSnapGreedy {
+            appendIfReady(petMRDeformableRegistration)
         }
         return configs
     }
@@ -3424,6 +3920,8 @@ public final class ViewerViewModel: ObservableObject {
         }
         if best.note.localizedCaseInsensitiveContains("SimpleITK") {
             note += " SimpleITK contributed to the selected fit."
+        } else if best.note.localizedCaseInsensitiveContains("brain landmark") {
+            note += " Brain cortex/cerebellum landmark fit contributed to the selected fit."
         } else if best.note.localizedCaseInsensitiveContains("segmentation polish") {
             note += " Local segmentation polish contributed to the selected fit."
         } else if best.note.localizedCaseInsensitiveContains("brain uptake fit") {
@@ -3501,6 +3999,10 @@ public final class ViewerViewModel: ObservableObject {
         let mode = petMRRegistrationMode
         if mode == .automaticBestFit {
             await fusePETMRAutomatic(mr: mr, pet: pet)
+            return
+        }
+        if mode == .brainMRIDriven {
+            await fusePETMRBrainMRIDriven(mr: mr, pet: pet)
             return
         }
         let alreadyAligned = hasMatchingGrid(mr, pet)
@@ -3638,7 +4140,9 @@ public final class ViewerViewModel: ObservableObject {
         }
 
         if !candidateInputs.isEmpty {
-            let candidates = await evaluatePETMRFusionCandidateInputs(candidateInputs, fixed: mr)
+            var candidates = await evaluatePETMRFusionCandidateInputs(candidateInputs, fixed: mr)
+            candidates += await evaluatePETMRAxialQuarterTurnCandidates(from: candidates, fixed: mr, limit: 1)
+            candidates += await evaluatePETMRPrecisionNudges(from: candidates, fixed: mr, limit: 1)
 
             if let best = bestPETMRFusionCandidate(candidates) {
                 resampled = best.volume
@@ -3677,6 +4181,14 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     private func fusePETMRAutomatic(mr: ImageVolume, pet: ImageVolume) async {
+        let preferBrainSafe = isLikelyBrainPETMRFixedVolume(mr)
+        if preferBrainSafe {
+            await fusePETMRBrainMRIDriven(mr: mr,
+                                          pet: pet,
+                                          statusPrefix: "Auto-registering brain PET/MR")
+            return
+        }
+
         statusMessage = "Auto-registering PET/MR: testing geometry, rigid, body-fit, visual-fit, and segmentation-polish candidates..."
         var inputs: [PETMRFusionCandidateInput] = []
 
@@ -3722,11 +4234,27 @@ public final class ViewerViewModel: ObservableObject {
             ))
         }
 
-        var candidates = await evaluatePETMRFusionCandidateInputs(inputs, fixed: mr)
+        var candidates = await evaluatePETMRFusionCandidateInputs(inputs,
+                                                                  fixed: mr,
+                                                                  includeLocalPolish: false)
+        if preferBrainSafe {
+            for seed in brainPETMROrientationSeeds(from: candidates) {
+                let direct = await petMRAxialQuarterTurnCandidates(from: seed, fixed: mr)
+                candidates += direct
+                for candidate in direct {
+                    if let landmark = await petMRBrainLandmarkCandidate(from: candidate, fixed: mr) {
+                        candidates.append(landmark)
+                    }
+                }
+            }
+        } else {
+            candidates += await evaluatePETMRAxialQuarterTurnCandidates(from: candidates, fixed: mr, limit: 1)
+        }
         var failedEngines: [String] = []
         let externalConfigs = automaticPETMRExternalConfigurations()
         if !externalConfigs.isEmpty {
-            let seeds = topPETMRFusionCandidates(candidates, limit: 1)
+            let brainSeeds = preferBrainSafe ? brainPETMRExternalSeeds(from: candidates) : []
+            let seeds = brainSeeds.isEmpty ? topPETMRFusionCandidates(candidates, limit: 1) : brainSeeds
             for config in externalConfigs {
                 for seed in seeds {
                     statusMessage = "Auto-registering PET/MR: refining \(seed.label) with \(config.backend.displayName)..."
@@ -3743,15 +4271,27 @@ public final class ViewerViewModel: ObservableObject {
                             label: "\(config.backend.displayName) on \(seed.label)",
                             allowBrainFitInside: seed.allowBrainFitInside
                         )]
-                        candidates += await evaluatePETMRFusionCandidateInputs(externalInputs, fixed: mr)
+                        candidates += await evaluatePETMRFusionCandidateInputs(externalInputs,
+                                                                               fixed: mr,
+                                                                               includeLocalPolish: false)
                     } catch {
                         failedEngines.append("\(config.backend.displayName) on \(seed.label): \(error.localizedDescription)")
                     }
                 }
             }
         }
+        if preferBrainSafe {
+            for seed in brainPETMRExternalSeeds(from: candidates) {
+                if let nudged = await petMRPrecisionNudgeCandidate(from: seed, fixed: mr) {
+                    candidates.append(nudged)
+                }
+            }
+        } else {
+            candidates += await evaluatePETMRPrecisionNudges(from: candidates, fixed: mr, limit: 1)
+        }
 
-        guard let selection = bestPETMRAutomaticCandidate(candidates) else {
+        guard let selection = bestPETMRAutomaticCandidate(candidates,
+                                                          preferBrainSafe: preferBrainSafe) else {
             configureFusion(base: mr, overlay: pet, resampledOverlay: nil)
             statusMessage = "PET/MR auto registration failed: no candidate could be scored"
             return
@@ -3776,6 +4316,131 @@ public final class ViewerViewModel: ObservableObject {
         applyHangingProtocol(grid: .threeByTwo, panes: HangingPaneConfiguration.defaultPETMR)
         let qaLabel = pair.registrationQuality?.grade.displayName ?? RegistrationQualityGrade.unknown.displayName
         statusMessage = "PET/MR auto registration selected \(best.label). QA \(qaLabel)"
+    }
+
+    private func fusePETMRBrainMRIDriven(mr: ImageVolume,
+                                         pet: ImageVolume,
+                                         statusPrefix: String = "Brain MRI-driven PET/MR registration") async {
+        statusMessage = "\(statusPrefix): testing scanner geometry, rigid MRI-space alignment, orientation, and precision refinements..."
+        var inputs: [PETMRFusionCandidateInput] = []
+
+        let geometryVolume = hasMatchingGrid(mr, pet)
+            ? pet
+            : await Task.detached(priority: .userInitiated) {
+                VolumeResampler.resample(overlay: pet, toMatch: mr, mode: .linear)
+            }.value
+        let geometryQuality = RegistrationQualityAssurance.evaluate(
+            fixed: mr,
+            movingOnFixedGrid: geometryVolume,
+            label: "Scanner geometry"
+        )
+        inputs.append(PETMRFusionCandidateInput(
+            volume: geometryVolume,
+            note: "Scanner/world geometry brain PET/MR candidate. MRI anatomy is the registration authority.",
+            deformationQuality: nil,
+            label: "Scanner geometry",
+            allowBrainFitInside: false
+        ))
+
+        statusMessage = "\(statusPrefix): testing rigid MRI-anatomy candidate..."
+        let rigidRegistration = await Task.detached(priority: .userInitiated) {
+            PETMRRegistrationEngine.estimatePETToMR(
+                pet: pet,
+                mr: mr,
+                mode: .rigidAnatomical
+            )
+        }.value
+        let rigidVolume = await Task.detached(priority: .userInitiated) {
+            VolumeResampler.resample(source: pet,
+                                     target: mr,
+                                     transform: rigidRegistration.fixedToMoving,
+                                     mode: .linear)
+        }.value
+        inputs.append(PETMRFusionCandidateInput(
+            volume: rigidVolume,
+            note: rigidRegistration.note,
+            deformationQuality: nil,
+            label: PETMRRegistrationMode.rigidAnatomical.displayName,
+            allowBrainFitInside: false
+        ))
+
+        var candidates = await evaluatePETMRFusionCandidateInputs(inputs,
+                                                                  fixed: mr,
+                                                                  includeLocalPolish: false)
+        for seed in brainPETMROrientationSeeds(from: candidates) {
+            let direct = await petMRAxialQuarterTurnCandidates(from: seed, fixed: mr)
+            candidates += direct
+            for candidate in direct {
+                if let landmark = await petMRBrainLandmarkCandidate(from: candidate, fixed: mr) {
+                    candidates.append(landmark)
+                }
+            }
+        }
+
+        var failedEngines: [String] = []
+        let externalConfigs = automaticPETMRExternalConfigurations()
+        if !externalConfigs.isEmpty {
+            let seeds = brainPETMRExternalSeeds(from: candidates)
+            for config in externalConfigs {
+                for seed in seeds {
+                    statusMessage = "\(statusPrefix): refining \(seed.label) with \(config.backend.displayName)..."
+                    do {
+                        let deformable = try await PETMRDeformableRegistrationRunner.register(
+                            fixed: mr,
+                            movingPrealigned: seed.volume,
+                            configuration: config
+                        )
+                        let externalInputs = [PETMRFusionCandidateInput(
+                            volume: deformable.warpedMoving,
+                            note: "\(seed.note). \(config.backend.displayName) refined \(seed.label). \(deformable.note)",
+                            deformationQuality: deformable.deformationQuality,
+                            label: "\(config.backend.displayName) on \(seed.label)",
+                            allowBrainFitInside: seed.allowBrainFitInside
+                        )]
+                        candidates += await evaluatePETMRFusionCandidateInputs(externalInputs,
+                                                                               fixed: mr,
+                                                                               includeLocalPolish: false)
+                    } catch {
+                        failedEngines.append("\(config.backend.displayName) on \(seed.label): \(error.localizedDescription)")
+                    }
+                }
+            }
+        }
+
+        for seed in brainPETMRExternalSeeds(from: candidates) {
+            if let nudged = await petMRPrecisionNudgeCandidate(from: seed, fixed: mr) {
+                candidates.append(nudged)
+            }
+        }
+
+        guard let selection = bestPETMRAutomaticCandidate(candidates,
+                                                          preferBrainSafe: true) else {
+            configureFusion(base: mr, overlay: pet, resampledOverlay: geometryVolume)
+            statusMessage = "Brain PET/MR registration failed: no MRI-safe candidate could be scored"
+            return
+        }
+        let best = selection.candidate
+        let selectionNote = selection.selectionNote ??
+            "Brain MRI-driven registration excluded body-envelope warp and selected among scanner/rigid-space candidates."
+
+        let pair = configureFusion(base: mr, overlay: pet, resampledOverlay: best.volume)
+        pair.registrationNote = concisePETMRAutoNote(best: best,
+                                                     candidateCount: candidates.count,
+                                                     failedEngines: failedEngines,
+                                                     selectionNote: selectionNote)
+        pair.registrationDiagnostics = petMRAutomaticDiagnostics(candidates: candidates,
+                                                                 selected: best,
+                                                                 failedEngines: failedEngines)
+        pair.registrationQuality = RegistrationQualityAssurance.compare(
+            before: geometryQuality,
+            after: best.quality,
+            deformation: best.deformationQuality,
+            allowBrainPETMRFitInside: best.allowBrainFitInside
+        )
+        pair.objectWillChange.send()
+        applyHangingProtocol(grid: .threeByTwo, panes: HangingPaneConfiguration.defaultPETMR)
+        let qaLabel = pair.registrationQuality?.grade.displayName ?? RegistrationQualityGrade.unknown.displayName
+        statusMessage = "Brain PET/MR registration selected \(best.label). QA \(qaLabel)"
     }
 
     private func openIndexedDICOMSeries(_ entry: PACSIndexedSeriesSnapshot,

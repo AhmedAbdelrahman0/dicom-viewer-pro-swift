@@ -172,7 +172,7 @@ final class LocalBrainPETDatasetSmokeTests: XCTestCase {
     }
 
     @MainActor
-    func testAutomaticPETMRRejectsIterativeSimpleITKWhenItDoesNotImproveLocalBrainCase() async throws {
+    func testAutomaticPETMRSelectsMateriallyBetterLocalBrainCandidate() async throws {
         guard simpleITKAvailable() else {
             throw XCTSkip("Python SimpleITK is not installed.")
         }
@@ -204,17 +204,84 @@ final class LocalBrainPETDatasetSmokeTests: XCTestCase {
         await vm.fusePETMR(base: mri, overlay: pet)
 
         let pair = try XCTUnwrap(vm.fusion)
-        XCTAssertTrue(pair.registrationNote.localizedCaseInsensitiveContains("Scanner/world geometry retained"),
-                      "Auto should keep the safer candidate when iterative refinement does not improve QA, note: \(pair.registrationNote)")
+        if ProcessInfo.processInfo.environment["TRACER_DUMP_PETMR_DIAGNOSTICS"] == "1" {
+            print("PET/MR note: \(pair.registrationNote)")
+            print("PET/MR diagnostics:")
+            pair.registrationDiagnostics.forEach { print($0) }
+        }
         XCTAssertFalse(pair.registrationDiagnostics.isEmpty, "Auto PET/MR should expose candidate diagnostics.")
-        XCTAssertTrue(pair.registrationDiagnostics.contains { $0.localizedCaseInsensitiveContains("SELECTED: Scanner geometry") },
-                      "Diagnostics should identify the selected candidate: \(pair.registrationDiagnostics)")
+        XCTAssertFalse(pair.registrationDiagnostics.contains {
+            $0.localizedCaseInsensitiveContains("SELECTED:") &&
+                $0.localizedCaseInsensitiveContains("body warp")
+        }, "Brain PET/MR automatic selection should not pick body-envelope candidates when scanner/rigid-space fits remain anatomically plausible: \(pair.registrationDiagnostics)")
+        XCTAssertTrue(pair.registrationDiagnostics.contains {
+            $0.localizedCaseInsensitiveContains("SELECTED:")
+        }, "Diagnostics should identify the selected PET/MR fit: \(pair.registrationDiagnostics)")
         XCTAssertTrue(pair.registrationDiagnostics.contains { $0.localizedCaseInsensitiveContains("SimpleITK") },
                       "Diagnostics should prove the SimpleITK candidate actually ran: \(pair.registrationDiagnostics)")
+        if subjectID == "sub-control02" {
+            XCTAssertTrue(pair.registrationDiagnostics.contains {
+                $0.localizedCaseInsensitiveContains("90° anti-clockwise") &&
+                $0.localizedCaseInsensitiveContains("brain landmark")
+            }, "sub-control02 must evaluate the anticlockwise quarter-turn through the brain-landmark refinement, not discard it early: \(pair.registrationDiagnostics)")
+        }
         let displayed = pair.displayedOverlay
         let scannerGeometry = VolumeResampler.resample(overlay: pet, toMatch: mri, mode: .linear)
-        XCTAssertLessThan(meanAbsoluteDifference(scannerGeometry, displayed), 1e-6,
-                          "Auto should not display the worse iterative overlay when it fails QA.")
+        let quality = try XCTUnwrap(pair.registrationQuality?.after)
+        XCTAssertTrue(ImageVolumeGeometry.gridsMatch(mri, displayed))
+        if !pair.registrationDiagnostics.contains(where: {
+            $0.localizedCaseInsensitiveContains("SELECTED: Scanner geometry")
+        }) {
+            XCTAssertGreaterThan(meanAbsoluteDifference(scannerGeometry, displayed), 1e-6,
+                                 "Non-geometry selections should change the displayed PET/MR candidate.")
+        }
+        XCTAssertLessThan(quality.centroidResidualMM ?? .greatestFiniteMagnitude, 40,
+                          "Selected PET/MR fit should remain anatomically bounded for segmentation review, quality: \(quality)")
+    }
+
+    func testBrainLandmarkOrientationCorrectionRunsOnLocalSubControl02() async throws {
+        let root = try smokeDirectory()
+        let subjectID = "sub-control02"
+        let petURL = root
+            .appendingPathComponent(subjectID, isDirectory: true)
+            .appendingPathComponent("pet", isDirectory: true)
+            .appendingPathComponent("\(subjectID)_pet.nii.gz")
+        let mriURL = root
+            .appendingPathComponent(subjectID, isDirectory: true)
+            .appendingPathComponent("anat", isDirectory: true)
+            .appendingPathComponent("\(subjectID)_T1w.nii.gz")
+        guard FileManager.default.fileExists(atPath: petURL.path),
+              FileManager.default.fileExists(atPath: mriURL.path) else {
+            throw XCTSkip("Missing local sub-control02 PET/MR files.")
+        }
+
+        let pet = try NIfTILoader.load(petURL, modalityHint: "PT")
+        let mri = try NIfTILoader.load(mriURL, modalityHint: "MR")
+        let scannerGeometry = VolumeResampler.resample(overlay: pet, toMatch: mri, mode: .linear)
+        let correction = PETMRRegistrationEngine.postResampleBrainLandmarkFit(
+            movingOnFixedGrid: scannerGeometry,
+            fixed: mri
+        )
+
+        let fit = try XCTUnwrap(correction, "sub-control02 should produce a brain landmark/orientation correction.")
+        XCTAssertTrue(fit.note.localizedCaseInsensitiveContains("direction-volume-anatomy fit"))
+        XCTAssertTrue(fit.note.localizedCaseInsensitiveContains("orientation"))
+
+        let corrected = VolumeResampler.resample(source: scannerGeometry,
+                                                 target: mri,
+                                                 transform: fit.sourceToDisplay.inverse,
+                                                 mode: .linear)
+        let before = RegistrationQualityAssurance.evaluate(fixed: mri,
+                                                           movingOnFixedGrid: scannerGeometry,
+                                                           label: "Scanner geometry")
+        let after = RegistrationQualityAssurance.evaluate(fixed: mri,
+                                                          movingOnFixedGrid: corrected,
+                                                          label: "Brain landmark orientation")
+        XCTAssertGreaterThan(after.normalizedMutualInformation ?? 0,
+                             (before.normalizedMutualInformation ?? 0) - 0.05)
+        XCTAssertLessThan(after.centroidResidualMM ?? .greatestFiniteMagnitude,
+                          max(35, (before.centroidResidualMM ?? 0) + 5),
+                          "Orientation correction should stay anatomically bounded. Before: \(before), after: \(after), note: \(fit.note)")
     }
 
     private func makeCoarseBrainSmokeAtlas(for volume: ImageVolume) throws -> LabelMap {
