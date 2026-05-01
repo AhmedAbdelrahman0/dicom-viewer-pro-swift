@@ -7,6 +7,7 @@ import AppKit
 
 private enum StudyBrowserMode: String, CaseIterable, Identifiable {
     case worklist
+    case vna
     case archives
     case viewer
 
@@ -15,6 +16,7 @@ private enum StudyBrowserMode: String, CaseIterable, Identifiable {
     var displayName: String {
         switch self {
         case .worklist: return "Worklist"
+        case .vna: return "VNA"
         case .archives: return "Archives"
         case .viewer: return "Viewer"
         }
@@ -23,6 +25,7 @@ private enum StudyBrowserMode: String, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .worklist: return "list.clipboard"
+        case .vna: return "network"
         case .archives: return "externaldrive.connected.to.line.below"
         case .viewer: return "rectangle.3.group"
         }
@@ -50,6 +53,10 @@ struct StudyBrowserView: View {
     @State private var archiveFilterID: String = PACSArchiveScope.allID
     @State private var studyStatuses: [String: WorklistStudyStatus] = [:]
     @State private var expandedStudyIDs: Set<String> = []
+    @State private var expandedVNAStudyIDs: Set<String> = []
+    @State private var vnaConnectionName: String = ""
+    @State private var vnaBaseURL: String = ""
+    @State private var vnaBearerToken: String = ""
     @State private var isDropTargeted: Bool = false
     @State private var fileBrowserCurrentURL: URL?
     @State private var fileBrowserEntries: [LocalFileBrowserEntry] = []
@@ -73,6 +80,8 @@ struct StudyBrowserView: View {
                 switch browserMode {
                 case .worklist:
                     worklistContent
+                case .vna:
+                    vnaContent
                 case .archives:
                     archivesContent
                 case .viewer:
@@ -87,13 +96,18 @@ struct StudyBrowserView: View {
         .task {
             loadStatusOverrides()
             vm.reloadSavedArchiveRoots()
+            vm.reloadVNAConnections()
+            syncVNAConnectionForm()
             reloadIndexResults()
         }
         .onChange(of: searchText) { _, _ in
-            indexFetchLimit = indexPageSize
-            worklistDisplayLimit = worklistDisplayPageSize
-            reloadIndexResults()
+            if browserMode != .vna {
+                indexFetchLimit = indexPageSize
+                worklistDisplayLimit = worklistDisplayPageSize
+                reloadIndexResults()
+            }
         }
+        .onChange(of: vm.activeVNAConnectionID) { _, _ in syncVNAConnectionForm() }
         .onChange(of: statusFilter) { _, _ in worklistDisplayLimit = worklistDisplayPageSize }
         .onChange(of: modalityFilter) { _, _ in worklistDisplayLimit = worklistDisplayPageSize }
         .onChange(of: dateFilter) { _, _ in worklistDisplayLimit = worklistDisplayPageSize }
@@ -347,6 +361,8 @@ struct StudyBrowserView: View {
             switch browserMode {
             case .worklist:
                 worklistControls
+            case .vna:
+                vnaControls
             case .archives:
                 archiveControls
             case .viewer:
@@ -361,6 +377,8 @@ struct StudyBrowserView: View {
         switch browserMode {
         case .worklist:
             return "\(filteredWorklistStudies.count) studies · \(indexedTotalCount) series"
+        case .vna:
+            return "\(vm.vnaConnections.count) VNAs · \(vm.vnaStudies.count) studies"
         case .archives:
             return "\(vm.savedArchiveRoots.count) roots · \(worklistStudies.count) studies"
         case .viewer:
@@ -372,6 +390,8 @@ struct StudyBrowserView: View {
         switch browserMode {
         case .worklist:
             return "Search worklist..."
+        case .vna:
+            return "Search patient, accession, or study date..."
         case .archives:
             return "Search archives..."
         case .viewer:
@@ -467,6 +487,75 @@ struct StudyBrowserView: View {
                 )
             }
         }
+    }
+
+    private var vnaControls: some View {
+        VStack(spacing: 8) {
+            if !vm.vnaConnections.isEmpty {
+                Picker("Connection", selection: activeVNAConnectionBinding) {
+                    ForEach(vm.vnaConnections) { connection in
+                        Text(connection.displayName).tag(connection.id)
+                    }
+                }
+                .labelsHidden()
+                .controlSize(.small)
+            }
+
+            TextField("Name", text: $vnaConnectionName)
+                .textFieldStyle(.roundedBorder)
+                .controlSize(.small)
+
+            TextField("DICOMweb URL", text: $vnaBaseURL)
+                .textFieldStyle(.roundedBorder)
+                .controlSize(.small)
+                .autocorrectionDisabled()
+
+            SecureField("Bearer token", text: $vnaBearerToken)
+                .textFieldStyle(.roundedBorder)
+                .controlSize(.small)
+
+            HStack(spacing: 8) {
+                Button {
+                    saveVNAConnectionFromForm()
+                } label: {
+                    Label("Save", systemImage: "server.rack")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Button {
+                    searchVNA()
+                } label: {
+                    Label("Search", systemImage: "magnifyingglass")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(vm.activeVNAConnection == nil || vm.isVNASearching)
+            }
+
+            if vm.isVNASearching || vm.isVNARetrieving {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text(vm.isVNARetrieving ? "Retrieving" : "Searching")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+            }
+        }
+    }
+
+    private var activeVNAConnectionBinding: Binding<UUID> {
+        Binding(
+            get: { vm.activeVNAConnectionID ?? vm.vnaConnections.first?.id ?? UUID() },
+            set: { id in
+                vm.selectVNAConnection(id: id)
+                syncVNAConnectionForm()
+            }
+        )
     }
 
     private var archiveControls: some View {
@@ -641,6 +730,113 @@ struct StudyBrowserView: View {
                     systemImage: "list.clipboard",
                     title: "No worklist studies",
                     subtitle: "Index a local archive or adjust filters"
+                )
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background(TracerTheme.sidebarBackground)
+    }
+
+    private var vnaContent: some View {
+        List {
+            if let error = vm.vnaLastError, !error.isEmpty {
+                Section("Status") {
+                    Label(error, systemImage: "exclamationmark.triangle")
+                        .font(.system(size: 10))
+                        .foregroundColor(.orange)
+                }
+            }
+
+            if !vm.vnaConnections.isEmpty {
+                Section("Connections") {
+                    ForEach(vm.vnaConnections) { connection in
+                        HStack(spacing: 8) {
+                            Button {
+                                vm.selectVNAConnection(id: connection.id)
+                                syncVNAConnectionForm()
+                            } label: {
+                                VNAConnectionRow(connection: connection,
+                                                 isActive: vm.activeVNAConnectionID == connection.id)
+                            }
+                            .buttonStyle(.plain)
+
+                            Menu {
+                                Button {
+                                    vm.selectVNAConnection(id: connection.id)
+                                    syncVNAConnectionForm()
+                                } label: {
+                                    Label("Select", systemImage: "checkmark.circle")
+                                }
+                                Button(role: .destructive) {
+                                    vm.deleteVNAConnection(id: connection.id)
+                                } label: {
+                                    Label("Remove", systemImage: "trash")
+                                }
+                            } label: {
+                                Image(systemName: "ellipsis.circle")
+                            }
+                            .menuStyle(.borderlessButton)
+                            .frame(width: 24)
+                        }
+                    }
+                }
+            }
+
+            if !vm.vnaStudies.isEmpty {
+                Section("Remote Studies") {
+                    ForEach(vm.vnaStudies) { study in
+                        DisclosureGroup(isExpanded: vnaExpansionBinding(for: study.id)) {
+                            VNAStudyActions(
+                                study: study,
+                                isBusy: vm.isVNASearching || vm.isVNARetrieving,
+                                onOpen: { openVNAStudy(study) },
+                                onSeries: { loadVNASeries(study) }
+                            )
+
+                            let series = vm.vnaSeries(for: study)
+                            if series.isEmpty {
+                                Button {
+                                    loadVNASeries(study)
+                                } label: {
+                                    Label("Load Series", systemImage: "square.stack.3d.up")
+                                        .frame(maxWidth: .infinity)
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .disabled(vm.isVNASearching)
+                            } else {
+                                ForEach(series) { entry in
+                                    Button {
+                                        openVNASeries(entry, study: study)
+                                    } label: {
+                                        VNASeriesRow(series: entry)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .disabled(vm.isVNARetrieving)
+                                }
+                            }
+                        } label: {
+                            VNAStudyRow(study: study)
+                        }
+                        .contextMenu {
+                            Button {
+                                openVNAStudy(study)
+                            } label: {
+                                Label("Open Preferred Series", systemImage: "rectangle.3.group")
+                            }
+                            Button {
+                                loadVNASeries(study)
+                            } label: {
+                                Label("Load Series", systemImage: "square.stack.3d.up")
+                            }
+                        }
+                    }
+                }
+            } else {
+                EmptyBrowserRow(
+                    systemImage: vm.vnaConnections.isEmpty ? "network.slash" : "network",
+                    title: vm.vnaConnections.isEmpty ? "No VNA connection" : "No remote studies",
+                    subtitle: vm.vnaConnections.isEmpty ? "Add a DICOMweb endpoint" : "Search a patient, accession, or date"
                 )
             }
         }
@@ -1087,9 +1283,62 @@ struct StudyBrowserView: View {
         )
     }
 
+    private func vnaExpansionBinding(for id: String) -> Binding<Bool> {
+        Binding(
+            get: { expandedVNAStudyIDs.contains(id) },
+            set: { expanded in
+                if expanded {
+                    expandedVNAStudyIDs.insert(id)
+                } else {
+                    expandedVNAStudyIDs.remove(id)
+                }
+            }
+        )
+    }
+
     private func openStudy(_ study: PACSWorklistStudy) {
         setStatus(.inProgress, for: study)
         Task { await vm.openWorklistStudy(study) }
+    }
+
+    private func saveVNAConnectionFromForm() {
+        _ = vm.upsertVNAConnection(
+            id: vm.activeVNAConnectionID,
+            name: vnaConnectionName,
+            baseURLString: vnaBaseURL,
+            bearerToken: vnaBearerToken
+        )
+        syncVNAConnectionForm()
+    }
+
+    private func syncVNAConnectionForm() {
+        guard let connection = vm.activeVNAConnection else {
+            vnaConnectionName = ""
+            vnaBaseURL = ""
+            vnaBearerToken = ""
+            return
+        }
+        vnaConnectionName = connection.name
+        vnaBaseURL = connection.baseURLString
+        vnaBearerToken = connection.bearerToken
+    }
+
+    private func searchVNA() {
+        Task { await vm.searchVNAStudies(searchText: searchText) }
+    }
+
+    private func loadVNASeries(_ study: VNAStudy) {
+        expandedVNAStudyIDs.insert(study.id)
+        Task { await vm.loadVNASeries(for: study) }
+    }
+
+    private func openVNAStudy(_ study: VNAStudy) {
+        expandedVNAStudyIDs.insert(study.id)
+        Task { await vm.openVNAStudy(study) }
+    }
+
+    private func openVNASeries(_ series: VNASeries, study: VNAStudy) {
+        Task { await vm.openVNASeries(series, study: study) }
     }
 
     private func indexLocalArchive(_ shortcut: LocalArchiveShortcut) {
@@ -1306,6 +1555,181 @@ struct StudyBrowserView: View {
         let raw = studyStatuses.mapValues(\.rawValue)
         if let data = try? JSONEncoder().encode(raw) {
             UserDefaults.standard.set(data, forKey: statusDefaultsKey)
+        }
+    }
+}
+
+private func displayDICOMDate(_ dicomDate: String) -> String {
+    guard dicomDate.count == 8 else { return dicomDate }
+    let year = dicomDate.prefix(4)
+    let monthStart = dicomDate.index(dicomDate.startIndex, offsetBy: 4)
+    let dayStart = dicomDate.index(dicomDate.startIndex, offsetBy: 6)
+    let month = dicomDate[monthStart..<dayStart]
+    let day = dicomDate[dayStart...]
+    return "\(month)/\(day)/\(year)"
+}
+
+private struct VNAConnectionRow: View {
+    let connection: VNAConnection
+    let isActive: Bool
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: isActive ? "checkmark.circle.fill" : "server.rack")
+                .foregroundColor(isActive ? TracerTheme.accentBright : .secondary)
+                .frame(width: 20)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(connection.displayName)
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+                Text(connection.endpointSummary)
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            if connection.bearerToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Image(systemName: "lock.open")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+            } else {
+                Image(systemName: "lock")
+                    .font(.system(size: 10))
+                    .foregroundColor(TracerTheme.accent)
+            }
+        }
+        .padding(.vertical, 3)
+    }
+}
+
+private struct VNAStudyActions: View {
+    let study: VNAStudy
+    let isBusy: Bool
+    let onOpen: () -> Void
+    let onSeries: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button {
+                onOpen()
+            } label: {
+                Label("Open", systemImage: "rectangle.3.group")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .disabled(isBusy)
+
+            Button {
+                onSeries()
+            } label: {
+                Label("Series", systemImage: "square.stack.3d.up")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(isBusy)
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+private struct VNAStudyRow: View {
+    let study: VNAStudy
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 8) {
+                Image(systemName: "network")
+                    .foregroundColor(TracerTheme.accentBright)
+                Text(study.patientName.isEmpty ? "Unknown patient" : study.patientName)
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+                Spacer()
+                Text(study.modalitySummary)
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+
+            HStack(spacing: 6) {
+                Text(study.patientID.isEmpty ? "No MRN" : study.patientID)
+                if !study.accessionNumber.isEmpty {
+                    Text(study.accessionNumber)
+                }
+                if !study.studyDate.isEmpty {
+                    Text(displayDICOMDate(study.studyDate))
+                }
+            }
+            .font(.system(size: 10))
+            .foregroundColor(.secondary)
+            .lineLimit(1)
+
+            Text(study.studyDescription.isEmpty ? "Untitled study" : study.studyDescription)
+                .font(.system(size: 11))
+                .foregroundColor(.primary)
+                .lineLimit(1)
+
+            HStack(spacing: 8) {
+                Text(study.connectionName)
+                Text("\(study.seriesCount) series")
+                Text("\(study.instanceCount) images")
+            }
+            .font(.system(size: 9))
+            .foregroundColor(.secondary)
+            .lineLimit(1)
+        }
+        .padding(.vertical, 3)
+    }
+}
+
+private struct VNASeriesRow: View {
+    let series: VNASeries
+
+    var body: some View {
+        HStack(spacing: 10) {
+            modalityBadge
+            VStack(alignment: .leading, spacing: 2) {
+                Text(series.seriesDescription.isEmpty ? "Series" : series.seriesDescription)
+                    .font(.system(size: 11))
+                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    if !series.bodyPartExamined.isEmpty {
+                        Text(series.bodyPartExamined)
+                    }
+                    if series.seriesNumber > 0 {
+                        Text("#\(series.seriesNumber)")
+                    }
+                    Text("\(series.instanceCount) images")
+                }
+                .font(.system(size: 9))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+            }
+            Spacer()
+            Image(systemName: "arrow.down.circle")
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+        }
+        .padding(.vertical, 2)
+    }
+
+    private var modalityBadge: some View {
+        Text(Modality.normalize(series.modality).displayName)
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundColor(.white)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(badgeColor)
+            .cornerRadius(3)
+    }
+
+    private var badgeColor: Color {
+        switch Modality.normalize(series.modality) {
+        case .CT: return TracerTheme.accent
+        case .MR: return Color(red: 0.56, green: 0.58, blue: 0.82)
+        case .PT: return TracerTheme.pet
+        case .SEG: return TracerTheme.label
+        default: return .gray
         }
     }
 }

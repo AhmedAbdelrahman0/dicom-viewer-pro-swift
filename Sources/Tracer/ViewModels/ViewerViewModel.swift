@@ -620,6 +620,13 @@ public final class ViewerViewModel: ObservableObject {
 
     // DICOM study browser
     @Published public var loadedSeries: [DICOMSeries] = []
+    @Published public private(set) var vnaConnections: [VNAConnection] = []
+    @Published public private(set) var activeVNAConnectionID: UUID?
+    @Published public private(set) var vnaStudies: [VNAStudy] = []
+    @Published public private(set) var vnaSeriesByStudyID: [String: [VNASeries]] = [:]
+    @Published public private(set) var isVNASearching: Bool = false
+    @Published public private(set) var isVNARetrieving: Bool = false
+    @Published public private(set) var vnaLastError: String?
 
     /// Capped LRU list of the last `RecentVolumesStore.maximumEntries`
     /// volumes the user has opened. Persisted across launches. Displayed as
@@ -631,25 +638,38 @@ public final class ViewerViewModel: ObservableObject {
     private let viewerSessionStore: ViewerSessionStore
     private let segmentationRunStore: SegmentationRunRegistryStore
     private let archiveRootStore: PACSArchiveRootStore
+    private let vnaConnectionStore: VNAConnectionStore
+    private let vnaCacheStore: VNACacheStore
     private var viewerPatientSeedBySeriesUID: [String: ViewerPatientSeed] = [:]
     private var viewerPatientSeedByVolumeIdentity: [String: ViewerPatientSeed] = [:]
 
     public init(studySessionStore: StudySessionStore = StudySessionStore(),
                 viewerSessionStore: ViewerSessionStore = ViewerSessionStore(),
                 segmentationRunStore: SegmentationRunRegistryStore = SegmentationRunRegistryStore(),
-                archiveRootStore: PACSArchiveRootStore = PACSArchiveRootStore()) {
+                archiveRootStore: PACSArchiveRootStore = PACSArchiveRootStore(),
+                vnaConnectionStore: VNAConnectionStore = VNAConnectionStore(),
+                vnaCacheStore: VNACacheStore = VNACacheStore()) {
         self.studySessionStore = studySessionStore
         self.viewerSessionStore = viewerSessionStore
         self.segmentationRunStore = segmentationRunStore
         self.archiveRootStore = archiveRootStore
+        self.vnaConnectionStore = vnaConnectionStore
+        self.vnaCacheStore = vnaCacheStore
         self.recentVolumes = recentVolumesStore.load()
         self.savedArchiveRoots = archiveRootStore.load()
+        self.vnaConnections = vnaConnectionStore.load()
+        self.activeVNAConnectionID = vnaConnections.first(where: \.isEnabled)?.id ?? vnaConnections.first?.id
         loadViewerSessions()
     }
 
     public var activeViewerSession: ViewerSessionRecord? {
         guard let activeViewerSessionID else { return nil }
         return viewerSessions.first { $0.id == activeViewerSessionID }
+    }
+
+    public var activeVNAConnection: VNAConnection? {
+        guard let activeVNAConnectionID else { return nil }
+        return vnaConnections.first { $0.id == activeVNAConnectionID }
     }
 
     public var openStudies: [ViewerSessionStudyReference] {
@@ -3523,6 +3543,279 @@ public final class ViewerViewModel: ObservableObject {
     public func cancelIndexing() {
         indexCancellation.cancel()
         JobManager.shared.markCancellationRequested(operationID: "pacs-index")
+    }
+
+    // MARK: - VNA / DICOMweb
+
+    public func reloadVNAConnections() {
+        vnaConnections = vnaConnectionStore.load()
+        if let activeVNAConnectionID,
+           vnaConnections.contains(where: { $0.id == activeVNAConnectionID }) {
+            return
+        }
+        activeVNAConnectionID = vnaConnections.first(where: \.isEnabled)?.id ?? vnaConnections.first?.id
+    }
+
+    @discardableResult
+    public func upsertVNAConnection(id: UUID? = nil,
+                                    name: String,
+                                    baseURLString: String,
+                                    bearerToken: String = "") -> VNAConnection? {
+        let trimmedURL = baseURLString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedURL.isEmpty else {
+            statusMessage = "VNA URL is required"
+            return nil
+        }
+        var connection = VNAConnection(
+            id: id ?? UUID(),
+            name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+            baseURLString: trimmedURL,
+            bearerToken: bearerToken.trimmingCharacters(in: .whitespacesAndNewlines),
+            isEnabled: true
+        )
+        guard connection.baseURL != nil else {
+            statusMessage = "Invalid VNA URL: \(baseURLString)"
+            return nil
+        }
+        if connection.name.isEmpty {
+            connection.name = connection.baseURL?.host ?? "VNA"
+        }
+        vnaConnections = vnaConnectionStore.upsert(connection)
+        let stored = vnaConnections.first {
+            $0.normalizedBaseURLString.caseInsensitiveCompare(connection.normalizedBaseURLString) == .orderedSame
+        } ?? connection
+        activeVNAConnectionID = stored.id
+        statusMessage = "Saved VNA connection: \(stored.displayName)"
+        return stored
+    }
+
+    public func selectVNAConnection(id: UUID) {
+        guard vnaConnections.contains(where: { $0.id == id }) else { return }
+        activeVNAConnectionID = id
+        vnaStudies = []
+        vnaSeriesByStudyID = [:]
+        vnaLastError = nil
+        if let connection = activeVNAConnection {
+            statusMessage = "Selected VNA: \(connection.displayName)"
+        }
+    }
+
+    public func deleteVNAConnection(id: UUID) {
+        let removed = vnaConnections.first { $0.id == id }
+        vnaConnections = vnaConnectionStore.remove(id: id)
+        if activeVNAConnectionID == id {
+            activeVNAConnectionID = vnaConnections.first(where: \.isEnabled)?.id ?? vnaConnections.first?.id
+            vnaStudies = []
+            vnaSeriesByStudyID = [:]
+        }
+        if let removed {
+            statusMessage = "Removed VNA connection: \(removed.displayName)"
+        }
+    }
+
+    public func searchVNAStudies(searchText: String, limit: Int = 50) async {
+        guard let connection = activeVNAConnection else {
+            vnaLastError = "Add a VNA connection first."
+            statusMessage = "Add a VNA connection first."
+            return
+        }
+        do {
+            isVNASearching = true
+            vnaLastError = nil
+            statusMessage = "Searching VNA \(connection.displayName)..."
+            let client = try makeDICOMwebClient(connection: connection)
+            let studies = try await client.searchStudies(
+                query: VNAStudyQuery(searchText: searchText, limit: limit)
+            )
+            vnaStudies = studies
+            vnaSeriesByStudyID = [:]
+            vnaConnections = vnaConnectionStore.markUsed(id: connection.id)
+            activeVNAConnectionID = connection.id
+            statusMessage = "VNA search found \(studies.count) studies"
+        } catch {
+            vnaLastError = error.localizedDescription
+            statusMessage = "VNA search error: \(error.localizedDescription)"
+        }
+        isVNASearching = false
+    }
+
+    public func vnaSeries(for study: VNAStudy) -> [VNASeries] {
+        vnaSeriesByStudyID[study.id] ?? []
+    }
+
+    public func loadVNASeries(for study: VNAStudy) async {
+        guard let connection = vnaConnections.first(where: { $0.id == study.connectionID }) else {
+            statusMessage = "VNA connection is no longer available"
+            return
+        }
+        do {
+            isVNASearching = true
+            vnaLastError = nil
+            statusMessage = "Loading VNA series for \(study.patientName.isEmpty ? study.patientID : study.patientName)..."
+            let client = try makeDICOMwebClient(connection: connection)
+            let series = try await client.searchSeries(study: study)
+            vnaSeriesByStudyID[study.id] = series
+            statusMessage = "Loaded \(series.count) remote series"
+        } catch {
+            vnaLastError = error.localizedDescription
+            statusMessage = "VNA series error: \(error.localizedDescription)"
+        }
+        isVNASearching = false
+    }
+
+    public func openVNAStudy(_ study: VNAStudy) async {
+        prepareViewerSessionForPatient(patientID: study.patientID,
+                                       patientName: study.patientName,
+                                       suggestedName: study.patientName.isEmpty ? study.patientID : study.patientName)
+        if vnaSeries(for: study).isEmpty {
+            await loadVNASeries(for: study)
+        }
+        let selectedSeries = preferredVNASeriesForStudy(study)
+        guard !selectedSeries.isEmpty else {
+            statusMessage = "No retrievable VNA series found for study"
+            return
+        }
+        for series in selectedSeries {
+            await openVNASeries(series, study: study, autoFuse: false)
+        }
+        statusMessage = "Opened VNA study: \(study.patientName.isEmpty ? study.patientID : study.patientName)"
+    }
+
+    public func openVNASeries(_ series: VNASeries,
+                              study: VNAStudy,
+                              autoFuse: Bool = false) async {
+        guard let connection = vnaConnections.first(where: { $0.id == series.connectionID }) else {
+            statusMessage = "VNA connection is no longer available"
+            return
+        }
+        prepareViewerSessionForPatient(patientID: study.patientID,
+                                       patientName: study.patientName,
+                                       suggestedName: study.patientName.isEmpty ? study.patientID : study.patientName,
+                                       seriesUID: series.seriesInstanceUID)
+        isVNARetrieving = true
+        isLoading = true
+        vnaLastError = nil
+        statusMessage = "Retrieving \(series.displayName) from \(connection.displayName)..."
+        defer {
+            isVNARetrieving = false
+            isLoading = false
+        }
+
+        do {
+            let client = try makeDICOMwebClient(connection: connection)
+            let instances = try await client.searchInstances(studyUID: series.studyInstanceUID,
+                                                             seriesUID: series.seriesInstanceUID)
+            guard !instances.isEmpty else {
+                throw DICOMwebClient.ClientError.emptyRetrieveResponse
+            }
+            let filePaths = try await retrieveVNAInstances(instances,
+                                                           series: series,
+                                                           connection: connection,
+                                                           client: client)
+            let dicomSeries = try await Task.detached(priority: .userInitiated) {
+                let files = try filePaths.map { try DICOMLoader.parseHeader(at: URL(fileURLWithPath: $0)) }
+                guard !files.isEmpty else {
+                    throw DICOMError.invalidFile("VNA series has no readable DICOM instances")
+                }
+                return DICOMSeries(
+                    uid: series.seriesInstanceUID,
+                    modality: series.modality,
+                    description: series.seriesDescription,
+                    patientID: study.patientID,
+                    patientName: study.patientName,
+                    accessionNumber: study.accessionNumber,
+                    studyUID: study.studyInstanceUID,
+                    studyDescription: study.studyDescription,
+                    studyDate: study.studyDate,
+                    studyTime: study.studyTime,
+                    referringPhysicianName: study.referringPhysicianName,
+                    bodyPartExamined: series.bodyPartExamined,
+                    files: files
+                )
+            }.value
+            _ = mergeScannedSeries([dicomSeries])
+            await openSeries(dicomSeries, autoFuse: autoFuse)
+            statusMessage = "Opened VNA series: \(series.displayName)"
+        } catch {
+            vnaLastError = error.localizedDescription
+            statusMessage = "VNA retrieve error: \(error.localizedDescription)"
+        }
+    }
+
+    private func makeDICOMwebClient(connection: VNAConnection) throws -> DICOMwebClient {
+        try DICOMwebClient(configuration: DICOMwebClient.Configuration(connection: connection))
+    }
+
+    private func retrieveVNAInstances(_ instances: [VNAInstance],
+                                      series: VNASeries,
+                                      connection: VNAConnection,
+                                      client: DICOMwebClient) async throws -> [String] {
+        var paths: [String] = []
+        for (offset, instance) in instances.enumerated() {
+            let cachedURL = vnaCacheStore.cachedInstanceURL(
+                connectionID: connection.id,
+                studyUID: series.studyInstanceUID,
+                seriesUID: series.seriesInstanceUID,
+                sopInstanceUID: instance.sopInstanceUID
+            )
+            if !FileManager.default.fileExists(atPath: cachedURL.path) {
+                statusMessage = "Retrieving VNA image \(offset + 1)/\(instances.count)..."
+                let data = try await client.retrieveInstance(studyUID: series.studyInstanceUID,
+                                                             seriesUID: series.seriesInstanceUID,
+                                                             sopInstanceUID: instance.sopInstanceUID)
+                _ = try vnaCacheStore.writeInstance(data,
+                                                    connectionID: connection.id,
+                                                    studyUID: series.studyInstanceUID,
+                                                    seriesUID: series.seriesInstanceUID,
+                                                    sopInstanceUID: instance.sopInstanceUID)
+            }
+            paths.append(cachedURL.path)
+        }
+        return paths
+    }
+
+    private func preferredVNASeriesForStudy(_ study: VNAStudy) -> [VNASeries] {
+        let series = vnaSeries(for: study).filter { !$0.seriesInstanceUID.isEmpty }
+        let anatomical = series.filter {
+            let modality = Modality.normalize($0.modality)
+            return modality == .CT || modality == .MR
+        }
+        .max { preferredVNAAnatomicalScore($0) < preferredVNAAnatomicalScore($1) }
+        let pet = series.filter { Modality.normalize($0.modality) == .PT }
+            .max { preferredVNAPETScore($0) < preferredVNAPETScore($1) }
+
+        if let anatomical, let pet {
+            return anatomical.seriesInstanceUID == pet.seriesInstanceUID ? [anatomical] : [anatomical, pet]
+        }
+        if let primary = series.filter({ Modality.normalize($0.modality) != .SEG }).first ?? series.first {
+            return [primary]
+        }
+        return []
+    }
+
+    private func preferredVNAAnatomicalScore(_ series: VNASeries) -> Int {
+        let desc = series.seriesDescription.lowercased()
+        var score = Modality.normalize(series.modality) == .CT ? 100 : 80
+        if desc.contains("resampled") || desc.contains("registered") || desc.contains("ctres") {
+            score += 60
+        }
+        if desc.contains("attenuation") || desc.contains("ac ") || desc.contains("low dose") {
+            score += 20
+        }
+        score += min(series.instanceCount, 1_000) / 20
+        return score
+    }
+
+    private func preferredVNAPETScore(_ series: VNASeries) -> Int {
+        let desc = series.seriesDescription.lowercased()
+        var score = 100 + min(series.instanceCount, 1_000) / 20
+        if desc.contains("nac") || desc.contains("non attenuation") {
+            score -= 20
+        }
+        if desc.contains("wb") || desc.contains("whole") {
+            score += 10
+        }
+        return score
     }
 
     public func openIndexedSeries(_ entry: PACSIndexedSeriesSnapshot, autoFuse: Bool = false) async {
