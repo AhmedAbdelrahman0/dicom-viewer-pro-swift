@@ -858,10 +858,14 @@ public struct ContentView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
                     if let volume = vm.currentVolume {
+                        if let session = vm.activeViewerSession {
+                            StudyMetric(label: "Session", value: session.name)
+                        }
                         StudyMetric(label: "Patient", value: volume.patientName.isEmpty ? "Unknown" : volume.patientName)
                         StudyMetric(label: "Study", value: volume.studyDescription.isEmpty ? "Untitled" : volume.studyDescription)
                         StudyMetric(label: "Series", value: volume.seriesDescription.isEmpty ? "Untitled" : volume.seriesDescription)
                         StudyMetric(label: "Modality", value: Modality.normalize(volume.modality).displayName)
+                        StudyMetric(label: "Open", value: "\(vm.openStudies.count) studies")
                         StudyMetric(label: "W/L", value: "\(Int(vm.window)) / \(Int(vm.level))")
                         StudyMetric(label: "Slices", value: "\(vm.sliceIndices[0]) · \(vm.sliceIndices[1]) · \(vm.sliceIndices[2])")
                     } else {
@@ -1426,7 +1430,7 @@ public struct ContentView: View {
             if let pair = vm.fusion, pair.baseVolume.id != volume.id {
                 return pair.baseVolume
             }
-            return vm.loadedVolumes.first {
+            return vm.activeSessionVolumes.first {
                 $0.id != volume.id
                 && (Modality.normalize($0.modality) == .CT
                     || Modality.normalize($0.modality) == .MR)
@@ -1448,7 +1452,7 @@ public struct ContentView: View {
                Modality.normalize(pair.overlayVolume.modality) == .PT {
                 return pair.overlayVolume
             }
-            if let pet = vm.loadedVolumes.first(where: {
+            if let pet = vm.activeSessionVolumes.first(where: {
                 Modality.normalize($0.modality) == .PT
             }) {
                 return pet
@@ -1472,7 +1476,7 @@ public struct ContentView: View {
                Modality.normalize(pair.baseVolume.modality) != .PT {
                 return pair.baseVolume
             }
-            return vm.loadedVolumes.first {
+            return vm.activeSessionVolumes.first {
                 let m = Modality.normalize($0.modality)
                 return m == .CT || m == .MR
             }

@@ -98,7 +98,7 @@ struct RegistrationPanel: View {
 
                 Button {
                     if let src = vm.currentVolume,
-                       let tgt = vm.fusion?.displayedOverlay ?? vm.loadedVolumes.last(where: { $0.seriesUID != vm.currentVolume?.seriesUID }) {
+                       let tgt = vm.fusion?.displayedOverlay ?? vm.activeSessionVolumes.last(where: { $0.seriesUID != vm.currentVolume?.seriesUID }) {
                         _ = vm.labeling.migrateActiveLabel(sourceVolume: src, toTarget: tgt)
                     }
                 } label: {

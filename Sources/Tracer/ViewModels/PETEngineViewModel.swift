@@ -537,7 +537,7 @@ public final class PETEngineViewModel: ObservableObject {
     private func resolveAuxiliaryVolume(viewer: ViewerViewModel,
                                         preferred: String?) -> ImageVolume? {
         if let preferred,
-           let match = viewer.loadedVolumes.first(where: { $0.sessionIdentity == preferred }) {
+           let match = viewer.activeSessionVolumes.first(where: { $0.sessionIdentity == preferred }) {
             return match
         }
         if let fusion = viewer.fusion {
@@ -546,7 +546,7 @@ public final class PETEngineViewModel: ObservableObject {
         // Last resort: pick a volume with the opposite modality.
         if let currentModality = viewer.currentVolume.map({ Modality.normalize($0.modality) }) {
             let complementary: Modality = currentModality == .PT ? .CT : .PT
-            return viewer.loadedVolumes.first(where: {
+            return viewer.activeSessionVolumes.first(where: {
                 Modality.normalize($0.modality) == complementary
             })
         }

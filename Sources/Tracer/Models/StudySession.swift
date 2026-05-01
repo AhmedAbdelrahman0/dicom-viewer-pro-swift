@@ -40,6 +40,169 @@ public struct StudySessionBundle: Codable, Equatable, Sendable {
     }
 }
 
+public struct ViewerSessionBundle: Codable, Equatable, Sendable {
+    public var version: Int
+    public var generator: String
+    public var sessions: [ViewerSessionRecord]
+    public var activeSessionID: UUID?
+    public var modifiedAt: Date
+
+    public init(version: Int = 1,
+                generator: String = "Tracer",
+                sessions: [ViewerSessionRecord] = [],
+                activeSessionID: UUID? = nil,
+                modifiedAt: Date = Date()) {
+        self.version = version
+        self.generator = generator
+        self.sessions = sessions
+        self.activeSessionID = activeSessionID
+        self.modifiedAt = modifiedAt
+    }
+}
+
+public struct ViewerSessionRecord: Identifiable, Codable, Equatable, Sendable {
+    public var id: UUID
+    public var name: String
+    public var createdAt: Date
+    public var modifiedAt: Date
+    public var activeStudyKey: String?
+    public var activeVolumeIdentity: String?
+    public var studies: [ViewerSessionStudyReference]
+    public var volumes: [ViewerSessionVolumeReference]
+    public var metadata: [String: String]
+
+    public init(id: UUID = UUID(),
+                name: String,
+                createdAt: Date = Date(),
+                modifiedAt: Date = Date(),
+                activeStudyKey: String? = nil,
+                activeVolumeIdentity: String? = nil,
+                studies: [ViewerSessionStudyReference] = [],
+                volumes: [ViewerSessionVolumeReference] = [],
+                metadata: [String: String] = [:]) {
+        self.id = id
+        self.name = name
+        self.createdAt = createdAt
+        self.modifiedAt = modifiedAt
+        self.activeStudyKey = activeStudyKey
+        self.activeVolumeIdentity = activeVolumeIdentity
+        self.studies = studies
+        self.volumes = volumes
+        self.metadata = metadata
+    }
+
+    public var studyCount: Int { studies.count }
+    public var volumeCount: Int { volumes.count }
+
+    public var summary: String {
+        let studyLabel = studyCount == 1 ? "1 study" : "\(studyCount) studies"
+        let volumeLabel = volumeCount == 1 ? "1 series" : "\(volumeCount) series"
+        return "\(studyLabel) · \(volumeLabel)"
+    }
+}
+
+public struct ViewerSessionStudyReference: Identifiable, Codable, Equatable, Hashable, Sendable {
+    public var id: String { studyKey }
+    public var studyKey: String
+    public var studyUID: String
+    public var patientID: String
+    public var patientName: String
+    public var accessionNumber: String
+    public var studyDescription: String
+    public var modalities: [String]
+    public var volumeIdentities: [String]
+
+    public init(studyKey: String,
+                studyUID: String,
+                patientID: String,
+                patientName: String,
+                accessionNumber: String = "",
+                studyDescription: String,
+                modalities: [String],
+                volumeIdentities: [String]) {
+        self.studyKey = studyKey
+        self.studyUID = studyUID
+        self.patientID = patientID
+        self.patientName = patientName
+        self.accessionNumber = accessionNumber
+        self.studyDescription = studyDescription
+        self.modalities = modalities
+        self.volumeIdentities = volumeIdentities
+    }
+
+    public var displayTitle: String {
+        if !patientName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return patientName
+        }
+        if !patientID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return patientID
+        }
+        return "Unknown Patient"
+    }
+
+    public var displaySubtitle: String {
+        let description = studyDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        return description.isEmpty ? "Untitled Study" : description
+    }
+
+    public var modalitySummary: String {
+        modalities.isEmpty ? "Other" : modalities.joined(separator: "/")
+    }
+}
+
+public struct ViewerSessionVolumeReference: Identifiable, Codable, Equatable, Hashable, Sendable {
+    public var id: String { volumeIdentity }
+    public var volumeIdentity: String
+    public var studyKey: String
+    public var kind: RecentVolume.Kind
+    public var modality: String
+    public var seriesDescription: String
+    public var studyDescription: String
+    public var patientID: String
+    public var patientName: String
+    public var sourceFiles: [String]
+
+    public init(volumeIdentity: String,
+                studyKey: String,
+                kind: RecentVolume.Kind,
+                modality: String,
+                seriesDescription: String,
+                studyDescription: String,
+                patientID: String,
+                patientName: String,
+                sourceFiles: [String]) {
+        self.volumeIdentity = volumeIdentity
+        self.studyKey = studyKey
+        self.kind = kind
+        self.modality = modality
+        self.seriesDescription = seriesDescription
+        self.studyDescription = studyDescription
+        self.patientID = patientID
+        self.patientName = patientName
+        self.sourceFiles = sourceFiles
+    }
+
+    public init(volume: ImageVolume, studyKey: String) {
+        let kind: RecentVolume.Kind = volume.sourceFiles
+            .first?
+            .hasSuffix(".nii") == true
+            || volume.sourceFiles.first?.hasSuffix(".nii.gz") == true
+            ? .nifti
+            : .dicom
+        self.init(
+            volumeIdentity: volume.sessionIdentity,
+            studyKey: studyKey,
+            kind: kind,
+            modality: volume.modality,
+            seriesDescription: volume.seriesDescription,
+            studyDescription: volume.studyDescription,
+            patientID: volume.patientID,
+            patientName: volume.patientName,
+            sourceFiles: volume.sourceFiles
+        )
+    }
+}
+
 public struct StudyMeasurementSession: Identifiable, Codable, Equatable, Sendable {
     public var id: UUID
     public var name: String
@@ -337,5 +500,40 @@ public struct StudySessionStore: Sendable {
     private static func sha256Hex(_ string: String) -> String {
         let data = Data(string.utf8)
         return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+public struct ViewerSessionStore: Sendable {
+    public let rootURL: URL
+
+    public init(rootURL: URL = ViewerSessionStore.defaultRootURL()) {
+        self.rootURL = rootURL
+    }
+
+    public static func defaultRootURL() -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        return base.appendingPathComponent("Tracer", isDirectory: true)
+            .appendingPathComponent("ViewerSessions", isDirectory: true)
+    }
+
+    public var bundleURL: URL {
+        rootURL.appendingPathComponent("viewer-sessions.json")
+    }
+
+    public func loadBundle() throws -> ViewerSessionBundle {
+        guard FileManager.default.fileExists(atPath: bundleURL.path) else {
+            return ViewerSessionBundle()
+        }
+        let data = try Data(contentsOf: bundleURL)
+        return try JSONDecoder().decode(ViewerSessionBundle.self, from: data)
+    }
+
+    public func saveBundle(_ bundle: ViewerSessionBundle) throws {
+        try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true, attributes: nil)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(bundle)
+        try data.write(to: bundleURL, options: [.atomic])
     }
 }

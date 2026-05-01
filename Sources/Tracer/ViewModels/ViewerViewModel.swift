@@ -436,6 +436,12 @@ private struct SliceRenderCacheKey: Hashable {
     let suvSignature: String
 }
 
+private struct ViewerPatientSeed {
+    let patientID: String
+    let patientName: String
+    let suggestedName: String?
+}
+
 @MainActor
 public final class ViewerViewModel: ObservableObject {
 
@@ -496,6 +502,8 @@ public final class ViewerViewModel: ObservableObject {
     @Published public var lastSUVROIMeasurement: SUVROIMeasurement?
     @Published public var intensityROIMeasurements: [IntensityROIMeasurement] = []
     @Published public var lastIntensityROIMeasurement: IntensityROIMeasurement?
+    @Published public private(set) var viewerSessions: [ViewerSessionRecord] = []
+    @Published public private(set) var activeViewerSessionID: UUID?
     @Published public private(set) var studySessions: [StudyMeasurementSession] = []
     @Published public private(set) var activeStudySessionID: UUID?
     @Published public private(set) var activeStudySessionKey: String?
@@ -620,17 +628,48 @@ public final class ViewerViewModel: ObservableObject {
     @Published public private(set) var savedArchiveRoots: [PACSArchiveRoot] = []
     private let recentVolumesStore = RecentVolumesStore()
     private let studySessionStore: StudySessionStore
+    private let viewerSessionStore: ViewerSessionStore
     private let segmentationRunStore: SegmentationRunRegistryStore
     private let archiveRootStore: PACSArchiveRootStore
+    private var viewerPatientSeedBySeriesUID: [String: ViewerPatientSeed] = [:]
+    private var viewerPatientSeedByVolumeIdentity: [String: ViewerPatientSeed] = [:]
 
     public init(studySessionStore: StudySessionStore = StudySessionStore(),
+                viewerSessionStore: ViewerSessionStore = ViewerSessionStore(),
                 segmentationRunStore: SegmentationRunRegistryStore = SegmentationRunRegistryStore(),
                 archiveRootStore: PACSArchiveRootStore = PACSArchiveRootStore()) {
         self.studySessionStore = studySessionStore
+        self.viewerSessionStore = viewerSessionStore
         self.segmentationRunStore = segmentationRunStore
         self.archiveRootStore = archiveRootStore
         self.recentVolumes = recentVolumesStore.load()
         self.savedArchiveRoots = archiveRootStore.load()
+        loadViewerSessions()
+    }
+
+    public var activeViewerSession: ViewerSessionRecord? {
+        guard let activeViewerSessionID else { return nil }
+        return viewerSessions.first { $0.id == activeViewerSessionID }
+    }
+
+    public var openStudies: [ViewerSessionStudyReference] {
+        if let activeViewerSession {
+            return activeViewerSession.studies
+        }
+        return makeStudyReferences(from: loadedVolumes)
+    }
+
+    public var activeSessionVolumes: [ImageVolume] {
+        guard let activeViewerSession else { return loadedVolumes }
+        let identities = Set(activeViewerSession.volumes.map(\.volumeIdentity))
+        guard !identities.isEmpty else { return [] }
+        return loadedVolumes.filter { identities.contains($0.sessionIdentity) }
+    }
+
+    public var activeOpenStudy: ViewerSessionStudyReference? {
+        guard let currentVolume else { return nil }
+        let key = viewerStudyKey(for: currentVolume)
+        return openStudies.first { $0.studyKey == key }
     }
 
     public var activeStudySession: StudyMeasurementSession? {
@@ -672,15 +711,15 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     public var loadedCTVolumes: [ImageVolume] {
-        loadedVolumes.filter { Modality.normalize($0.modality) == .CT }
+        activeSessionVolumes.filter { Modality.normalize($0.modality) == .CT }
     }
 
     public var loadedPETVolumes: [ImageVolume] {
-        loadedVolumes.filter { Modality.normalize($0.modality) == .PT }
+        activeSessionVolumes.filter { Modality.normalize($0.modality) == .PT }
     }
 
     public var loadedMRVolumes: [ImageVolume] {
-        loadedVolumes.filter { Modality.normalize($0.modality) == .MR }
+        activeSessionVolumes.filter { Modality.normalize($0.modality) == .MR }
     }
 
     public var currentStudyVolumes: [ImageVolume] {
@@ -695,7 +734,7 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     public var loadedAnatomicalVolumes: [ImageVolume] {
-        loadedVolumes.filter {
+        activeSessionVolumes.filter {
             let modality = Modality.normalize($0.modality)
             return modality == .CT || modality == .MR
         }
@@ -1689,6 +1728,191 @@ public final class ViewerViewModel: ObservableObject {
         autosaveActiveStudySession()
     }
 
+    public func saveCurrentViewerSession(named name: String? = nil) {
+        if hasGeneratedStudySessionContent {
+            saveOrUpdateCurrentStudySession(announce: false, includeLabelMaps: true)
+        }
+        let id = ensureActiveViewerSession()
+        guard let index = viewerSessions.firstIndex(where: { $0.id == id }) else { return }
+        let existing = viewerSessions[index]
+        let trimmedName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sessionName = (trimmedName?.isEmpty == false ? trimmedName : nil)
+            ?? existing.name
+        let activeVolume = currentVolume
+        let updated = makeCurrentViewerSessionRecord(
+            id: existing.id,
+            name: sessionName,
+            createdAt: existing.createdAt,
+            fallback: existing,
+            activeVolume: activeVolume
+        )
+        viewerSessions[index] = updated
+        activeViewerSessionID = updated.id
+        persistViewerSessions()
+        statusMessage = "Saved viewer session: \(updated.name) (\(updated.summary))"
+    }
+
+    public func newViewerSession(named name: String? = nil) {
+        if !activeSessionVolumes.isEmpty || hasGeneratedStudySessionContent {
+            saveCurrentViewerSession()
+        }
+        let trimmedName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sessionName = (trimmedName?.isEmpty == false ? trimmedName : nil)
+            ?? "Session \(viewerSessions.count + 1)"
+        let session = ViewerSessionRecord(name: sessionName)
+        viewerSessions.append(session)
+        activeViewerSessionID = session.id
+        currentVolume = nil
+        fusion = nil
+        activeStudySessionKey = nil
+        activeStudySessionID = nil
+        studySessions = []
+        segmentationRuns = []
+        clearCurrentStudySessionState()
+        clearSliceRenderCache()
+        clearPETMIPRenderedImageCache()
+        persistViewerSessions()
+        statusMessage = "Started viewer session: \(session.name)"
+    }
+
+    public func openViewerSession(id: UUID) async {
+        guard let session = viewerSessions.first(where: { $0.id == id }) else {
+            statusMessage = "Viewer session is no longer available"
+            return
+        }
+        if hasGeneratedStudySessionContent {
+            saveOrUpdateCurrentStudySession(announce: false, includeLabelMaps: true)
+        }
+        activeViewerSessionID = session.id
+        isLoading = true
+        statusMessage = "Opening viewer session: \(session.name)..."
+        var restored = 0
+        var failed = 0
+        for reference in session.volumes {
+            if await loadViewerSessionVolume(reference) != nil {
+                restored += 1
+            } else {
+                failed += 1
+            }
+        }
+        isLoading = false
+
+        let sessionVolumes = activeSessionVolumes
+        let sessionIdentities = Set(sessionVolumes.map(\.sessionIdentity))
+        if let pair = fusion,
+           !sessionIdentities.contains(pair.baseVolume.sessionIdentity) ||
+           !sessionIdentities.contains(pair.overlayVolume.sessionIdentity) {
+            fusion = nil
+            fusionAdjustmentTask?.cancel()
+            fusionAdjustmentTask = nil
+        }
+        let preferred = session.activeVolumeIdentity.flatMap { identity in
+            sessionVolumes.first { $0.sessionIdentity == identity }
+        } ?? sessionVolumes.first
+        if let preferred {
+            displayVolume(preferred)
+        } else {
+            currentVolume = nil
+            activeStudySessionKey = nil
+            activeStudySessionID = nil
+            studySessions = []
+            segmentationRuns = []
+            clearCurrentStudySessionState()
+        }
+        persistViewerSessions()
+        let failureSuffix = failed == 0 ? "" : " · \(failed) missing"
+        statusMessage = "Opened viewer session: \(session.name) (\(session.studyCount) studies, \(restored) series\(failureSuffix))"
+    }
+
+    public func deleteViewerSession(id: UUID) {
+        guard let index = viewerSessions.firstIndex(where: { $0.id == id }) else { return }
+        let removed = viewerSessions.remove(at: index)
+        if activeViewerSessionID == id {
+            activeViewerSessionID = viewerSessions.first?.id
+            currentVolume = activeViewerSession?.activeVolumeIdentity.flatMap { identity in
+                activeSessionVolumes.first { $0.sessionIdentity == identity }
+            } ?? activeSessionVolumes.first
+            if let currentVolume {
+                displayVolume(currentVolume)
+            } else {
+                fusion = nil
+                activeStudySessionKey = nil
+                activeStudySessionID = nil
+                studySessions = []
+                segmentationRuns = []
+                clearCurrentStudySessionState()
+            }
+        }
+        persistViewerSessions()
+        statusMessage = "Deleted viewer session: \(removed.name)"
+    }
+
+    @discardableResult
+    public func prepareViewerSessionForPatient(patientID: String,
+                                               patientName: String,
+                                               suggestedName: String? = nil,
+                                               seriesUID: String? = nil,
+                                               volumeIdentity: String? = nil) -> UUID {
+        let seed = ViewerPatientSeed(patientID: patientID,
+                                     patientName: patientName,
+                                     suggestedName: suggestedName)
+        if let seriesUID,
+           !seriesUID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            viewerPatientSeedBySeriesUID[seriesUID] = seed
+        }
+        if let volumeIdentity,
+           !volumeIdentity.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            viewerPatientSeedByVolumeIdentity[volumeIdentity] = seed
+        }
+        return ensureActiveViewerSession(patientID: patientID,
+                                         patientName: patientName,
+                                         suggestedName: suggestedName)
+    }
+
+    public func displayOpenStudy(id studyKey: String) {
+        let candidates = activeSessionVolumes.filter { viewerStudyKey(for: $0) == studyKey }
+        guard let volume = preferredDisplayVolume(in: candidates) else {
+            statusMessage = "Study is not loaded in the active session"
+            return
+        }
+        displayVolume(volume)
+        statusMessage = "Showing study: \(volume.patientName.isEmpty ? volume.patientID : volume.patientName)"
+    }
+
+    public func closeOpenStudy(id studyKey: String) {
+        let volumes = activeSessionVolumes.filter { viewerStudyKey(for: $0) == studyKey }
+        guard !volumes.isEmpty else { return }
+        if hasGeneratedStudySessionContent {
+            saveOrUpdateCurrentStudySession(announce: false, includeLabelMaps: true)
+        }
+        let identities = Set(volumes.map(\.sessionIdentity))
+        loadedVolumes.removeAll { identities.contains($0.sessionIdentity) }
+        if let pair = fusion,
+           identities.contains(pair.baseVolume.sessionIdentity) ||
+           identities.contains(pair.overlayVolume.sessionIdentity) ||
+           identities.contains(pair.displayedOverlay.sessionIdentity) {
+            fusion = nil
+            fusionAdjustmentTask?.cancel()
+            fusionAdjustmentTask = nil
+        }
+        removeVolumeIdentitiesFromActiveViewerSession(identities)
+        if currentVolume.map({ identities.contains($0.sessionIdentity) }) == true {
+            if let replacement = activeSessionVolumes.first {
+                displayVolume(replacement)
+            } else {
+                currentVolume = nil
+                activeStudySessionKey = nil
+                activeStudySessionID = nil
+                studySessions = []
+                segmentationRuns = []
+                clearCurrentStudySessionState()
+            }
+        }
+        clearSliceRenderCache()
+        clearPETMIPRenderedImageCache()
+        statusMessage = "Closed study with \(volumes.count) loaded series"
+    }
+
     public func saveCurrentStudySession(named name: String? = nil) {
         saveOrUpdateCurrentStudySession(named: name, announce: true, includeLabelMaps: true)
     }
@@ -2231,7 +2455,7 @@ public final class ViewerViewModel: ObservableObject {
                                       backend: String,
                                       modelID: String,
                                       metadata: [String: String] = [:]) -> SegmentationRunRecord? {
-        let volumes = currentVolume.map { studyVolumes(anchoredAt: $0) } ?? loadedVolumes
+        let volumes = currentVolume.map { studyVolumes(anchoredAt: $0) } ?? activeSessionVolumes
         guard !volumes.isEmpty else {
             statusMessage = "Load a study before saving a segmentation run"
             return nil
@@ -2309,7 +2533,7 @@ public final class ViewerViewModel: ObservableObject {
     public func deleteSegmentationRun(id: UUID) {
         guard let index = segmentationRuns.firstIndex(where: { $0.id == id }) else { return }
         let removed = segmentationRuns.remove(at: index)
-        let volumes = currentVolume.map { studyVolumes(anchoredAt: $0) } ?? loadedVolumes
+        let volumes = currentVolume.map { studyVolumes(anchoredAt: $0) } ?? activeSessionVolumes
         let key = activeStudySessionKey ?? removed.studyKey
         segmentationRunStore.deletePayload(for: removed)
         persistSegmentationRuns(studyKey: key, volumes: volumes)
@@ -2335,14 +2559,369 @@ public final class ViewerViewModel: ObservableObject {
         }
     }
 
+    private func loadViewerSessions() {
+        do {
+            let bundle = try viewerSessionStore.loadBundle()
+            let splitSessions = splitMixedPatientViewerSessions(bundle.sessions)
+            viewerSessions = splitSessions
+            activeViewerSessionID = bundle.activeSessionID.flatMap { activeID in
+                splitSessions.first(where: { $0.id == activeID })?.id
+            } ?? splitSessions.first?.id
+            if splitSessions != bundle.sessions {
+                persistViewerSessions()
+            }
+        } catch {
+            viewerSessions = []
+            activeViewerSessionID = nil
+            statusMessage = "Viewer session registry load failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func splitMixedPatientViewerSessions(_ sessions: [ViewerSessionRecord]) -> [ViewerSessionRecord] {
+        sessions.flatMap { session -> [ViewerSessionRecord] in
+            let patientKeys = Set(
+                session.studies.compactMap { patientSessionKey(patientID: $0.patientID, patientName: $0.patientName) } +
+                session.volumes.compactMap { patientSessionKey(patientID: $0.patientID, patientName: $0.patientName) }
+            )
+            guard patientKeys.count > 1 else { return [session] }
+
+            var split: [ViewerSessionRecord] = []
+            for (offset, key) in patientKeys.sorted().enumerated() {
+                let studies = session.studies.filter {
+                    patientSessionKey(patientID: $0.patientID, patientName: $0.patientName) == key
+                }
+                let volumes = session.volumes.filter {
+                    patientSessionKey(patientID: $0.patientID, patientName: $0.patientName) == key
+                }
+                guard !studies.isEmpty || !volumes.isEmpty else { continue }
+                let displayName = studies.first?.displayTitle
+                    ?? volumes.first?.patientName
+                    ?? session.name
+                split.append(ViewerSessionRecord(
+                    id: offset == 0 ? session.id : UUID(),
+                    name: displayName.isEmpty ? "\(session.name) \(offset + 1)" : displayName,
+                    createdAt: session.createdAt,
+                    modifiedAt: Date(),
+                    activeStudyKey: studies.first?.studyKey,
+                    activeVolumeIdentity: volumes.first?.volumeIdentity,
+                    studies: studies,
+                    volumes: volumes,
+                    metadata: session.metadata
+                ))
+            }
+            return split.isEmpty ? [session] : split
+        }
+    }
+
+    private func persistViewerSessions() {
+        let bundle = ViewerSessionBundle(
+            sessions: viewerSessions,
+            activeSessionID: activeViewerSessionID,
+            modifiedAt: Date()
+        )
+        do {
+            try viewerSessionStore.saveBundle(bundle)
+        } catch {
+            statusMessage = "Viewer session save failed: \(error.localizedDescription)"
+        }
+    }
+
+    @discardableResult
+    private func ensureActiveViewerSession(for volume: ImageVolume? = nil) -> UUID {
+        guard let volume else {
+            if let activeViewerSessionID,
+               viewerSessions.contains(where: { $0.id == activeViewerSessionID }) {
+                return activeViewerSessionID
+            }
+            let session = ViewerSessionRecord(name: "Session \(viewerSessions.count + 1)")
+            viewerSessions.append(session)
+            activeViewerSessionID = session.id
+            persistViewerSessions()
+            return session.id
+        }
+        let seed = patientSeed(for: volume)
+        return ensureActiveViewerSession(
+            patientID: seed.patientID,
+            patientName: seed.patientName,
+            suggestedName: seed.suggestedName ?? defaultViewerSessionName(for: volume)
+        )
+    }
+
+    @discardableResult
+    private func ensureActiveViewerSession(patientID: String,
+                                           patientName: String,
+                                           suggestedName: String?) -> UUID {
+        let incomingKey = patientSessionKey(patientID: patientID, patientName: patientName)
+        if let activeViewerSessionID,
+           let session = viewerSessions.first(where: { $0.id == activeViewerSessionID }) {
+            let activeHasContent = !session.volumes.isEmpty || !session.studies.isEmpty
+            if !activeHasContent {
+                return activeViewerSessionID
+            }
+            if let incomingKey,
+               patientSessionKey(for: session) == incomingKey {
+                return activeViewerSessionID
+            }
+            if incomingKey == nil {
+                return activeViewerSessionID
+            }
+        }
+
+        if let incomingKey,
+           let matching = viewerSessions.first(where: { patientSessionKey(for: $0) == incomingKey }) {
+            activeViewerSessionID = matching.id
+            persistViewerSessions()
+            return matching.id
+        }
+
+        let session = ViewerSessionRecord(name: suggestedName ?? defaultViewerSessionName(patientID: patientID, patientName: patientName))
+        viewerSessions.append(session)
+        activeViewerSessionID = session.id
+        persistViewerSessions()
+        return session.id
+    }
+
+    private func makeCurrentViewerSessionRecord(id: UUID,
+                                                name: String,
+                                                createdAt: Date,
+                                                fallback: ViewerSessionRecord?,
+                                                activeVolume: ImageVolume?) -> ViewerSessionRecord {
+        let fallbackVolumeRefs = fallback?.volumes ?? []
+        let loadedRefs = activeSessionVolumes.map {
+            viewerVolumeReference(for: $0)
+        }
+        var referencesByID = Dictionary(uniqueKeysWithValues: fallbackVolumeRefs.map { ($0.volumeIdentity, $0) })
+        for reference in loadedRefs {
+            referencesByID[reference.volumeIdentity] = reference
+        }
+        let volumeReferences = referencesByID.values.sorted {
+            $0.seriesDescription.localizedStandardCompare($1.seriesDescription) == .orderedAscending
+        }
+        let loadedStudyReferences = makeStudyReferences(from: activeSessionVolumes)
+        let studies = loadedStudyReferences.isEmpty ? (fallback?.studies ?? []) : loadedStudyReferences
+        let activeStudyKey = activeVolume.map { viewerStudyKey(for: $0) } ?? fallback?.activeStudyKey
+        return ViewerSessionRecord(
+            id: id,
+            name: name,
+            createdAt: createdAt,
+            modifiedAt: Date(),
+            activeStudyKey: activeStudyKey,
+            activeVolumeIdentity: activeVolume?.sessionIdentity ?? fallback?.activeVolumeIdentity,
+            studies: studies,
+            volumes: volumeReferences,
+            metadata: currentGeneratedMetadata()
+        )
+    }
+
+    private func addVolumeToActiveViewerSession(_ volume: ImageVolume) {
+        let id = ensureActiveViewerSession(for: volume)
+        guard let index = viewerSessions.firstIndex(where: { $0.id == id }) else { return }
+        let seed = patientSeed(for: volume)
+        viewerPatientSeedByVolumeIdentity[volume.sessionIdentity] = seed
+        let studyKey = viewerStudyKey(for: volume)
+        let reference = viewerVolumeReference(for: volume)
+        if let volumeIndex = viewerSessions[index].volumes.firstIndex(where: { $0.volumeIdentity == reference.volumeIdentity }) {
+            viewerSessions[index].volumes[volumeIndex] = reference
+        } else {
+            viewerSessions[index].volumes.append(reference)
+        }
+        viewerSessions[index].studies = makeStudyReferences(from: activeSessionVolumes + [volume])
+        viewerSessions[index].activeStudyKey = studyKey
+        viewerSessions[index].activeVolumeIdentity = volume.sessionIdentity
+        viewerSessions[index].modifiedAt = Date()
+        persistViewerSessions()
+    }
+
+    private func defaultViewerSessionName(for volume: ImageVolume) -> String {
+        defaultViewerSessionName(patientID: volume.patientID, patientName: volume.patientName)
+    }
+
+    private func defaultViewerSessionName(patientID: String, patientName: String) -> String {
+        let patient = patientName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !patient.isEmpty { return patient }
+        let patientID = patientID.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !patientID.isEmpty { return "Patient \(patientID)" }
+        return "Session \(viewerSessions.count + 1)"
+    }
+
+    private func patientSeed(for volume: ImageVolume) -> ViewerPatientSeed {
+        if let seed = viewerPatientSeedByVolumeIdentity[volume.sessionIdentity] {
+            return seed
+        }
+        if let seed = viewerPatientSeedBySeriesUID[volume.seriesUID] {
+            return seed
+        }
+        return ViewerPatientSeed(
+            patientID: volume.patientID,
+            patientName: volume.patientName,
+            suggestedName: defaultViewerSessionName(for: volume)
+        )
+    }
+
+    private func patientSessionKey(patientID: String, patientName: String) -> String? {
+        let patientID = patientID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !patientID.isEmpty { return "id:\(patientID)" }
+        let patientName = patientName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !patientName.isEmpty { return "name:\(patientName)" }
+        return nil
+    }
+
+    private func patientSessionKey(for volume: ImageVolume) -> String? {
+        let seed = patientSeed(for: volume)
+        return patientSessionKey(patientID: seed.patientID, patientName: seed.patientName)
+    }
+
+    private func patientSessionKey(for session: ViewerSessionRecord) -> String? {
+        if let study = session.studies.first {
+            let patientID = study.patientID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if !patientID.isEmpty { return "id:\(patientID)" }
+            let patientName = study.patientName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if !patientName.isEmpty { return "name:\(patientName)" }
+        }
+        if let volume = session.volumes.first {
+            let patientID = volume.patientID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if !patientID.isEmpty { return "id:\(patientID)" }
+            let patientName = volume.patientName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if !patientName.isEmpty { return "name:\(patientName)" }
+        }
+        return nil
+    }
+
+    private func updateActiveViewerSessionSelection(volume: ImageVolume) {
+        guard let activeViewerSessionID,
+              let index = viewerSessions.firstIndex(where: { $0.id == activeViewerSessionID }) else { return }
+        viewerSessions[index].activeStudyKey = viewerStudyKey(for: volume)
+        viewerSessions[index].activeVolumeIdentity = volume.sessionIdentity
+        viewerSessions[index].modifiedAt = Date()
+        persistViewerSessions()
+    }
+
+    private func removeVolumeIdentitiesFromActiveViewerSession(_ identities: Set<String>) {
+        guard let activeViewerSessionID,
+              let index = viewerSessions.firstIndex(where: { $0.id == activeViewerSessionID }) else { return }
+        viewerSessions[index].volumes.removeAll { identities.contains($0.volumeIdentity) }
+        viewerSessions[index].studies = makeStudyReferences(from: activeSessionVolumes)
+        if let active = viewerSessions[index].activeVolumeIdentity,
+           identities.contains(active) {
+            viewerSessions[index].activeVolumeIdentity = activeSessionVolumes.first?.sessionIdentity
+            viewerSessions[index].activeStudyKey = activeSessionVolumes.first.map { viewerStudyKey(for: $0) }
+        }
+        viewerSessions[index].modifiedAt = Date()
+        persistViewerSessions()
+    }
+
+    private func loadViewerSessionVolume(_ reference: ViewerSessionVolumeReference) async -> ImageVolume? {
+        if let existing = loadedVolumes.first(where: { $0.sessionIdentity == reference.volumeIdentity }) {
+            addVolumeToActiveViewerSession(existing)
+            return existing
+        }
+        guard !reference.sourceFiles.isEmpty else { return nil }
+        do {
+            let volume: ImageVolume
+            switch reference.kind {
+            case .nifti:
+                guard let path = reference.sourceFiles.first else { return nil }
+                volume = try await Task.detached(priority: .userInitiated) {
+                    try NIfTILoader.load(URL(fileURLWithPath: path))
+                }.value
+            case .dicom:
+                let paths = reference.sourceFiles
+                volume = try await Task.detached(priority: .userInitiated) {
+                    let files = try paths.map { try DICOMLoader.parseHeader(at: URL(fileURLWithPath: $0)) }
+                    return try DICOMLoader.loadSeries(files)
+                }.value
+            }
+            let result = addLoadedVolumeIfNeeded(volume)
+            return result.volume
+        } catch {
+            return nil
+        }
+    }
+
+    private func viewerStudyKey(for volume: ImageVolume) -> String {
+        let studyUID = volume.studyUID.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !studyUID.isEmpty && studyUID != "NIFTI_STUDY" {
+            return "study:\(studyUID)"
+        }
+        if let folder = volume.sourceFiles.first.map({ ($0 as NSString).deletingLastPathComponent }),
+           !folder.isEmpty {
+            return "folder:\(folder)"
+        }
+        return "volume:\(volume.sessionIdentity)"
+    }
+
+    private func viewerVolumeReference(for volume: ImageVolume) -> ViewerSessionVolumeReference {
+        let seed = patientSeed(for: volume)
+        let isNIfTI = volume.sourceFiles.first?.hasSuffix(".nii") == true ||
+            volume.sourceFiles.first?.hasSuffix(".nii.gz") == true
+        return ViewerSessionVolumeReference(
+            volumeIdentity: volume.sessionIdentity,
+            studyKey: viewerStudyKey(for: volume),
+            kind: isNIfTI ? .nifti : .dicom,
+            modality: volume.modality,
+            seriesDescription: volume.seriesDescription,
+            studyDescription: volume.studyDescription,
+            patientID: seed.patientID.isEmpty ? volume.patientID : seed.patientID,
+            patientName: seed.patientName.isEmpty ? volume.patientName : seed.patientName,
+            sourceFiles: volume.sourceFiles
+        )
+    }
+
+    private func makeStudyReferences(from volumes: [ImageVolume]) -> [ViewerSessionStudyReference] {
+        let uniqueVolumes = Dictionary(grouping: volumes, by: \.sessionIdentity)
+            .compactMap { $0.value.first }
+        let grouped = Dictionary(grouping: uniqueVolumes, by: viewerStudyKey(for:))
+        return grouped.compactMap { key, values in
+            guard let first = values.sorted(by: viewerVolumeSort).first else { return nil }
+            let seed = patientSeed(for: first)
+            let modalities = Array(Set(values.map { Modality.normalize($0.modality).displayName })).sorted()
+            let identities = values.map(\.sessionIdentity).sorted()
+            return ViewerSessionStudyReference(
+                studyKey: key,
+                studyUID: first.studyUID,
+                patientID: seed.patientID.isEmpty ? first.patientID : seed.patientID,
+                patientName: seed.patientName.isEmpty ? first.patientName : seed.patientName,
+                studyDescription: first.studyDescription,
+                modalities: modalities,
+                volumeIdentities: identities
+            )
+        }
+        .sorted { lhs, rhs in
+            if lhs.displayTitle != rhs.displayTitle {
+                return lhs.displayTitle.localizedStandardCompare(rhs.displayTitle) == .orderedAscending
+            }
+            return lhs.displaySubtitle.localizedStandardCompare(rhs.displaySubtitle) == .orderedAscending
+        }
+    }
+
+    private func viewerVolumeSort(_ lhs: ImageVolume, _ rhs: ImageVolume) -> Bool {
+        let lhsModality = Modality.normalize(lhs.modality).displayName
+        let rhsModality = Modality.normalize(rhs.modality).displayName
+        if lhsModality != rhsModality {
+            return lhsModality.localizedStandardCompare(rhsModality) == .orderedAscending
+        }
+        return lhs.seriesDescription.localizedStandardCompare(rhs.seriesDescription) == .orderedAscending
+    }
+
+    private func preferredDisplayVolume(in volumes: [ImageVolume]) -> ImageVolume? {
+        if let currentVolume,
+           volumes.contains(where: { $0.sessionIdentity == currentVolume.sessionIdentity }) {
+            return currentVolume
+        }
+        return volumes.first { Modality.normalize($0.modality) == .CT }
+            ?? volumes.first { Modality.normalize($0.modality) == .MR }
+            ?? volumes.first { Modality.normalize($0.modality) == .PT }
+            ?? volumes.first
+    }
+
     private func studyVolumes(anchoredAt anchor: ImageVolume) -> [ImageVolume] {
         let studyUID = anchor.studyUID.trimmingCharacters(in: .whitespacesAndNewlines)
         if !studyUID.isEmpty && studyUID != "NIFTI_STUDY" {
-            let matching = loadedVolumes.filter { $0.studyUID == anchor.studyUID }
+            let matching = activeSessionVolumes.filter { $0.studyUID == anchor.studyUID }
             return matching.isEmpty ? [anchor] : matching
         }
         if let anchorFolder = anchor.sourceFiles.first.map({ ($0 as NSString).deletingLastPathComponent }) {
-            let matching = loadedVolumes.filter { volume in
+            let matching = activeSessionVolumes.filter { volume in
                 volume.sourceFiles.first.map { ($0 as NSString).deletingLastPathComponent } == anchorFolder
             }
             if !matching.isEmpty { return matching }
@@ -2366,13 +2945,13 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     public var dynamicCandidateVolumes: [ImageVolume] {
-        DynamicStudyBuilder.dynamicCandidates(from: loadedVolumes)
+        DynamicStudyBuilder.dynamicCandidates(from: activeSessionVolumes)
     }
 
     @discardableResult
     public func buildDynamicStudyFromLoadedVolumes(frameDurationSeconds: Double = 1.0) -> Bool {
         guard let study = DynamicStudyBuilder.makeStudy(
-            from: loadedVolumes,
+            from: activeSessionVolumes,
             preferredReference: currentVolume,
             frameDurationSeconds: frameDurationSeconds
         ) else {
@@ -2800,6 +3379,12 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     public func openSeries(_ series: DICOMSeries, autoFuse: Bool = false) async {
+        let seriesPatientID = series.patientID.isEmpty ? (series.files.first?.patientID ?? "") : series.patientID
+        let seriesPatientName = series.patientName.isEmpty ? (series.files.first?.patientName ?? "") : series.patientName
+        prepareViewerSessionForPatient(patientID: seriesPatientID,
+                                       patientName: seriesPatientName,
+                                       suggestedName: seriesPatientName.isEmpty ? seriesPatientID : seriesPatientName,
+                                       seriesUID: series.uid)
         if let existing = loadedVolume(seriesUID: series.uid) {
             displayVolume(existing)
             statusMessage = "Already loaded: \(series.displayName)"
@@ -2941,6 +3526,10 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     public func openIndexedSeries(_ entry: PACSIndexedSeriesSnapshot, autoFuse: Bool = false) async {
+        prepareViewerSessionForPatient(patientID: entry.patientID,
+                                       patientName: entry.patientName,
+                                       suggestedName: entry.patientName.isEmpty ? entry.patientID : entry.patientName,
+                                       seriesUID: entry.seriesUID)
         switch entry.kind {
         case .dicom:
             await openIndexedDICOMSeries(entry, autoFuse: autoFuse)
@@ -2951,6 +3540,9 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     public func openWorklistStudy(_ study: PACSWorklistStudy) async {
+        prepareViewerSessionForPatient(patientID: study.patientID,
+                                       patientName: study.patientName,
+                                       suggestedName: study.patientName.isEmpty ? study.patientID : study.patientName)
         let anatomical = study.preferredAnatomicalSeriesForPETCT
         let pet = study.preferredPETSeriesForPETCT
 
@@ -4648,7 +5240,9 @@ public final class ViewerViewModel: ObservableObject {
 
         let wasCurrent = currentVolume?.id == volume.id
         let closedStudyUID = volume.studyUID
+        let closedIdentity = volume.sessionIdentity
         loadedVolumes.removeAll { $0.id == volume.id }
+        removeVolumeIdentitiesFromActiveViewerSession([closedIdentity])
 
         if let pair = fusion,
            pair.baseVolume.id == volume.id ||
@@ -4662,16 +5256,16 @@ public final class ViewerViewModel: ObservableObject {
         clearSliceRenderCache()
         clearPETMIPRenderedImageCache()
 
-        if loadedVolumes.isEmpty {
+        if activeSessionVolumes.isEmpty {
             currentVolume = nil
             activeStudySessionKey = nil
             activeStudySessionID = nil
             studySessions = []
             clearCurrentStudySessionState()
         } else if wasCurrent {
-            let replacement = loadedVolumes.first {
+            let replacement = activeSessionVolumes.first {
                 !closedStudyUID.isEmpty && $0.studyUID == closedStudyUID
-            } ?? loadedVolumes.first
+            } ?? activeSessionVolumes.first
             if let replacement {
                 displayVolume(replacement)
             }
@@ -4681,12 +5275,15 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     public func closeAllVolumes() {
-        guard !loadedVolumes.isEmpty else { return }
+        let volumesToClose = activeViewerSession == nil ? loadedVolumes : activeSessionVolumes
+        guard !volumesToClose.isEmpty else { return }
         if hasGeneratedStudySessionContent {
             saveOrUpdateCurrentStudySession(announce: false, includeLabelMaps: true)
         }
-        let count = loadedVolumes.count
-        loadedVolumes.removeAll()
+        let count = volumesToClose.count
+        let identities = Set(volumesToClose.map(\.sessionIdentity))
+        loadedVolumes.removeAll { identities.contains($0.sessionIdentity) }
+        removeVolumeIdentitiesFromActiveViewerSession(identities)
         fusion = nil
         fusionAdjustmentTask?.cancel()
         fusionAdjustmentTask = nil
@@ -4914,10 +5511,12 @@ public final class ViewerViewModel: ObservableObject {
             // Even re-openings bump the recent-list timestamp so the chip
             // stays at the head of the strip.
             recordRecent(volume: existing)
+            addVolumeToActiveViewerSession(existing)
             return (existing, false)
         }
         loadedVolumes.append(volume)
         recordRecent(volume: volume)
+        addVolumeToActiveViewerSession(volume)
         return (volume, true)
     }
 
@@ -5380,7 +5979,9 @@ public final class ViewerViewModel: ObservableObject {
            hasGeneratedStudySessionContent {
             persistStudySessions()
         }
+        addVolumeToActiveViewerSession(volume)
         currentVolume = volume
+        updateActiveViewerSessionSelection(volume: volume)
         sliceIndices = [volume.width / 2, volume.height / 2, volume.depth / 2]
         let center = volume.worldPoint(voxel: SIMD3<Double>(
             Double(sliceIndices[0]),
@@ -6395,7 +6996,7 @@ public final class ViewerViewModel: ObservableObject {
         if let currentVolume, sameGrid(currentVolume, labelMap) {
             return currentVolume
         }
-        return loadedVolumes.first { sameGrid($0, labelMap) }
+        return activeSessionVolumes.first { sameGrid($0, labelMap) }
     }
 
     private func activePETVolumeMatching(_ labelMap: LabelMap) -> ImageVolume? {
@@ -6443,7 +7044,7 @@ public final class ViewerViewModel: ObservableObject {
             if normalized == .CT { return (currentVolume, .ctHU) }
             return (currentVolume, .intensity)
         }
-        return loadedVolumes.first(where: { sameGrid($0, labelMap) }).map { volume in
+        return activeSessionVolumes.first(where: { sameGrid($0, labelMap) }).map { volume in
             let normalized = Modality.normalize(volume.modality)
             let source: VolumeMeasurementSource = normalized == .PT
                 ? .petSUV

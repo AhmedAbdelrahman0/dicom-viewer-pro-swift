@@ -314,7 +314,7 @@ public struct PETEnginePanel: View {
     // MARK: - Availability
 
     private var auxiliaryCandidates: [ImageVolume] {
-        viewer.loadedVolumes
+        viewer.activeSessionVolumes
     }
 
     private var canRun: Bool {

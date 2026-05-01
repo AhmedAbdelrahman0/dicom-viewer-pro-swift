@@ -4613,6 +4613,194 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(vm.annotations.first?.points.last?.x, 1)
     }
 
+    @MainActor
+    func testLiveViewerSessionsGroupMultipleStudiesByPatient() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracer-live-viewer-session-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let vm = ViewerViewModel(
+            studySessionStore: StudySessionStore(rootURL: root.appendingPathComponent("study", isDirectory: true)),
+            viewerSessionStore: ViewerSessionStore(rootURL: root.appendingPathComponent("viewer", isDirectory: true))
+        )
+
+        let baseline = ImageVolume(
+            pixels: [Float](repeating: 1, count: 4),
+            depth: 1,
+            height: 2,
+            width: 2,
+            modality: "CT",
+            seriesUID: "ct-baseline",
+            studyUID: "study-baseline",
+            patientID: "P1",
+            patientName: "Doe^Jane",
+            seriesDescription: "Baseline CT",
+            studyDescription: "Baseline"
+        )
+        let followup = ImageVolume(
+            pixels: [Float](repeating: 2, count: 4),
+            depth: 1,
+            height: 2,
+            width: 2,
+            modality: "PT",
+            seriesUID: "pet-followup",
+            studyUID: "study-followup",
+            patientID: "P1",
+            patientName: "Doe^Jane",
+            seriesDescription: "Follow-up PET",
+            studyDescription: "Follow-up"
+        )
+        let otherPatient = ImageVolume(
+            pixels: [Float](repeating: 3, count: 4),
+            depth: 1,
+            height: 2,
+            width: 2,
+            modality: "MR",
+            seriesUID: "mr-other",
+            studyUID: "study-other",
+            patientID: "P2",
+            patientName: "Roe^John",
+            seriesDescription: "Other MR",
+            studyDescription: "Other Patient"
+        )
+
+        vm.displayVolume(vm.addLoadedVolumeIfNeeded(baseline).volume)
+        vm.displayVolume(vm.addLoadedVolumeIfNeeded(followup).volume)
+        let firstSessionID = try XCTUnwrap(vm.activeViewerSessionID)
+
+        XCTAssertEqual(vm.viewerSessions.count, 1)
+        XCTAssertEqual(vm.openStudies.count, 2)
+        XCTAssertEqual(vm.activeSessionVolumes.count, 2)
+        XCTAssertEqual(Set(vm.activeSessionVolumes.map(\.patientID)), ["P1"])
+
+        vm.displayVolume(vm.addLoadedVolumeIfNeeded(otherPatient).volume)
+
+        XCTAssertEqual(vm.viewerSessions.count, 2)
+        XCTAssertEqual(vm.activeSessionVolumes.count, 1)
+        XCTAssertEqual(vm.activeSessionVolumes.first?.patientID, "P2")
+
+        await vm.openViewerSession(id: firstSessionID)
+
+        XCTAssertEqual(vm.activeViewerSessionID, firstSessionID)
+        XCTAssertEqual(vm.openStudies.count, 2)
+        XCTAssertEqual(vm.activeSessionVolumes.count, 2)
+        XCTAssertEqual(Set(vm.activeSessionVolumes.map(\.patientID)), ["P1"])
+        XCTAssertEqual(vm.loadedVolumes.count, 3)
+    }
+
+    @MainActor
+    func testPACSMetadataPreventsDifferentPatientsSharingLiveSession() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracer-live-pacs-patient-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let vm = ViewerViewModel(
+            studySessionStore: StudySessionStore(rootURL: root.appendingPathComponent("study", isDirectory: true)),
+            viewerSessionStore: ViewerSessionStore(rootURL: root.appendingPathComponent("viewer", isDirectory: true))
+        )
+
+        let firstPatient = ImageVolume(
+            pixels: [Float](repeating: 1, count: 4),
+            depth: 1,
+            height: 2,
+            width: 2,
+            modality: "CT",
+            seriesUID: "ct-patient-one",
+            studyUID: "study-patient-one",
+            patientID: "P1",
+            patientName: "Patient^One",
+            seriesDescription: "Patient One CT",
+            studyDescription: "Patient One Baseline"
+        )
+        vm.displayVolume(vm.addLoadedVolumeIfNeeded(firstPatient).volume)
+        let firstSessionID = try XCTUnwrap(vm.activeViewerSessionID)
+
+        vm.prepareViewerSessionForPatient(patientID: "P2",
+                                          patientName: "Patient^Two",
+                                          suggestedName: "Patient^Two",
+                                          seriesUID: "nifti:/tmp/patient-two.nii")
+        let secondPatientVolumeWithGenericHeader = ImageVolume(
+            pixels: [Float](repeating: 2, count: 4),
+            depth: 1,
+            height: 2,
+            width: 2,
+            modality: "MR",
+            seriesUID: "nifti:/tmp/patient-two.nii",
+            studyUID: "NIFTI_STUDY",
+            patientID: "NIFTI_Import",
+            patientName: "NIfTI Import",
+            seriesDescription: "Patient Two MR",
+            studyDescription: "Imported Follow-up",
+            sourceFiles: ["/tmp/patient-two.nii"]
+        )
+        vm.displayVolume(vm.addLoadedVolumeIfNeeded(secondPatientVolumeWithGenericHeader).volume)
+
+        XCTAssertEqual(vm.viewerSessions.count, 2)
+        XCTAssertEqual(vm.activeViewerSession?.name, "Patient^Two")
+        XCTAssertEqual(vm.openStudies.first?.patientID, "P2")
+        XCTAssertEqual(vm.activeSessionVolumes.count, 1)
+        XCTAssertEqual(vm.activeSessionVolumes.first?.seriesUID, "nifti:/tmp/patient-two.nii")
+
+        let firstSession = try XCTUnwrap(vm.viewerSessions.first { $0.id == firstSessionID })
+        XCTAssertEqual(firstSession.studies.map(\.patientID), ["P1"])
+        XCTAssertFalse(firstSession.volumes.contains { $0.volumeIdentity == secondPatientVolumeWithGenericHeader.sessionIdentity })
+    }
+
+    @MainActor
+    func testSavedMixedPatientViewerSessionIsSplitOnLoad() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracer-live-session-migration-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let viewerStore = ViewerSessionStore(rootURL: root.appendingPathComponent("viewer", isDirectory: true))
+        let mixed = ViewerSessionRecord(
+            name: "Mixed",
+            studies: [
+                ViewerSessionStudyReference(studyKey: "study:one",
+                                            studyUID: "one",
+                                            patientID: "P1",
+                                            patientName: "Patient^One",
+                                            studyDescription: "One",
+                                            modalities: ["CT"],
+                                            volumeIdentities: ["series:one"]),
+                ViewerSessionStudyReference(studyKey: "study:two",
+                                            studyUID: "two",
+                                            patientID: "P2",
+                                            patientName: "Patient^Two",
+                                            studyDescription: "Two",
+                                            modalities: ["MR"],
+                                            volumeIdentities: ["series:two"])
+            ],
+            volumes: [
+                ViewerSessionVolumeReference(volumeIdentity: "series:one",
+                                             studyKey: "study:one",
+                                             kind: .dicom,
+                                             modality: "CT",
+                                             seriesDescription: "One CT",
+                                             studyDescription: "One",
+                                             patientID: "P1",
+                                             patientName: "Patient^One",
+                                             sourceFiles: ["/tmp/one.dcm"]),
+                ViewerSessionVolumeReference(volumeIdentity: "series:two",
+                                             studyKey: "study:two",
+                                             kind: .dicom,
+                                             modality: "MR",
+                                             seriesDescription: "Two MR",
+                                             studyDescription: "Two",
+                                             patientID: "P2",
+                                             patientName: "Patient^Two",
+                                             sourceFiles: ["/tmp/two.dcm"])
+            ]
+        )
+        try viewerStore.saveBundle(ViewerSessionBundle(sessions: [mixed], activeSessionID: mixed.id))
+
+        let vm = ViewerViewModel(
+            studySessionStore: StudySessionStore(rootURL: root.appendingPathComponent("study", isDirectory: true)),
+            viewerSessionStore: viewerStore
+        )
+
+        XCTAssertEqual(vm.viewerSessions.count, 2)
+        XCTAssertEqual(Set(vm.viewerSessions.map { $0.studies.first?.patientID ?? "" }), ["P1", "P2"])
+        XCTAssertTrue(vm.viewerSessions.allSatisfy { Set($0.studies.map(\.patientID)).count == 1 })
+    }
+
     func testDynamicStudyBuilderUsesMatchingNuclearFrames() throws {
         let frameA = ImageVolume(
             pixels: [1, 2, 3, 4],

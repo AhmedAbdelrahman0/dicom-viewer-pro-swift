@@ -364,7 +364,7 @@ struct StudyBrowserView: View {
         case .archives:
             return "\(vm.savedArchiveRoots.count) roots · \(worklistStudies.count) studies"
         case .viewer:
-            return "\(vm.loadedVolumes.count) volumes · \(vm.loadedSeries.count) scanned"
+            return "\(vm.viewerSessions.count) sessions · \(vm.openStudies.count) studies · \(vm.activeSessionVolumes.count) series"
         }
     }
 
@@ -770,12 +770,90 @@ struct StudyBrowserView: View {
                 }
             }
 
+            if !vm.viewerSessions.isEmpty || vm.activeViewerSession != nil {
+                Section("Live Sessions") {
+                    HStack(spacing: 8) {
+                        Button {
+                            vm.saveCurrentViewerSession()
+                        } label: {
+                            Label("Save", systemImage: "tray.and.arrow.down")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+
+                        Button {
+                            vm.newViewerSession()
+                        } label: {
+                            Label("New", systemImage: "plus.rectangle.on.rectangle")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+
+                    ForEach(vm.viewerSessions) { session in
+                        HStack(spacing: 8) {
+                            Button {
+                                Task { await vm.openViewerSession(id: session.id) }
+                            } label: {
+                                ViewerSessionRow(session: session,
+                                                 isActive: vm.activeViewerSessionID == session.id)
+                            }
+                            .buttonStyle(.plain)
+
+                            Menu {
+                                Button {
+                                    Task { await vm.openViewerSession(id: session.id) }
+                                } label: {
+                                    Label("Open Session", systemImage: "rectangle.3.group")
+                                }
+                                Button(role: .destructive) {
+                                    vm.deleteViewerSession(id: session.id)
+                                } label: {
+                                    Label("Delete Session", systemImage: "trash")
+                                }
+                            } label: {
+                                Image(systemName: "ellipsis.circle")
+                            }
+                            .menuStyle(.borderlessButton)
+                            .frame(width: 24)
+                        }
+                    }
+                }
+            }
+
+            if !vm.openStudies.isEmpty {
+                Section("Open Studies") {
+                    ForEach(vm.openStudies) { study in
+                        HStack(spacing: 8) {
+                            Button {
+                                vm.displayOpenStudy(id: study.studyKey)
+                            } label: {
+                                OpenStudyRow(study: study,
+                                             isActive: vm.activeOpenStudy?.studyKey == study.studyKey)
+                            }
+                            .buttonStyle(.plain)
+
+                            Button(role: .destructive) {
+                                vm.closeOpenStudy(id: study.studyKey)
+                            } label: {
+                                Image(systemName: "xmark.circle")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Close this study in the active session")
+                        }
+                    }
+                }
+            }
+
             if !filteredLoadedVolumes.isEmpty {
-                Section("Viewer Volumes") {
+                Section("Session Series") {
                     Button(role: .destructive) {
                         vm.closeAllVolumes()
                     } label: {
-                        Label("Close All Loaded Series", systemImage: "xmark.square")
+                        Label("Close Active Session Series", systemImage: "xmark.square")
                     }
                     .buttonStyle(.plain)
 
@@ -910,8 +988,8 @@ struct StudyBrowserView: View {
     }
 
     private var filteredLoadedVolumes: [ImageVolume] {
-        if searchText.isEmpty { return vm.loadedVolumes }
-        return vm.loadedVolumes.filter {
+        if searchText.isEmpty { return vm.activeSessionVolumes }
+        return vm.activeSessionVolumes.filter {
             $0.seriesDescription.localizedCaseInsensitiveContains(searchText) ||
             $0.patientName.localizedCaseInsensitiveContains(searchText) ||
             $0.studyDescription.localizedCaseInsensitiveContains(searchText) ||
@@ -1925,5 +2003,56 @@ private struct VolumeRow: View {
         case .SEG: return TracerTheme.label
         default: return .gray
         }
+    }
+}
+
+private struct ViewerSessionRow: View {
+    let session: ViewerSessionRecord
+    let isActive: Bool
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: isActive ? "checkmark.circle.fill" : "circle")
+                .foregroundColor(isActive ? TracerTheme.accent : .secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(session.name)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+                Text(session.summary)
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+private struct OpenStudyRow: View {
+    let study: ViewerSessionStudyReference
+    let isActive: Bool
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(study.modalitySummary)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(.white)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(isActive ? TracerTheme.accent : Color.secondary.opacity(0.55))
+                .cornerRadius(3)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(study.displayTitle)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+                Text("\(study.displaySubtitle) · \(study.volumeIdentities.count) series")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 2)
     }
 }

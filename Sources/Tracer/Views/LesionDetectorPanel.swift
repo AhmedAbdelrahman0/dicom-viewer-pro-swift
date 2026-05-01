@@ -347,7 +347,7 @@ public struct LesionDetectorPanel: View {
                pair.baseVolume.id != vol.id {
                 return pair.baseVolume
             }
-            return viewer.loadedVolumes.first {
+            return viewer.activeSessionVolumes.first {
                 $0.id != vol.id
                 && (Modality.normalize($0.modality) == .CT
                     || Modality.normalize($0.modality) == .MR)

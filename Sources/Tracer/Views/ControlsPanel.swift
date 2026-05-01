@@ -1383,6 +1383,77 @@ private struct StudySessionPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
+                Text("Live Viewer Session")
+                    .font(.system(size: 11, weight: .semibold))
+                Spacer()
+                if let active = vm.activeViewerSession {
+                    Text(active.name)
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+            }
+
+            HStack(spacing: 6) {
+                Button {
+                    vm.saveCurrentViewerSession()
+                } label: {
+                    Label("Save", systemImage: "tray.and.arrow.down")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Button {
+                    vm.newViewerSession()
+                } label: {
+                    Label("New", systemImage: "plus.rectangle.on.rectangle")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+
+            if !vm.viewerSessions.isEmpty {
+                VStack(spacing: 6) {
+                    ForEach(vm.viewerSessions) { session in
+                        Button {
+                            Task { await vm.openViewerSession(id: session.id) }
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: vm.activeViewerSessionID == session.id ? "checkmark.circle.fill" : "circle")
+                                    .foregroundColor(vm.activeViewerSessionID == session.id ? TracerTheme.accent : .secondary)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(session.name)
+                                        .font(.system(size: 11, weight: .medium))
+                                        .lineLimit(1)
+                                    Text(session.summary)
+                                        .font(.system(size: 10))
+                                        .foregroundColor(.secondary)
+                                        .lineLimit(1)
+                                }
+                                Spacer(minLength: 0)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .padding(6)
+                        .background(vm.activeViewerSessionID == session.id ? TracerTheme.accent.opacity(0.10) : Color.clear)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                }
+            }
+
+            if !vm.openStudies.isEmpty {
+                Text((vm.openStudies.count == 1 ? "1 open study" : "\(vm.openStudies.count) open studies")
+                     + " · \(vm.activeSessionVolumes.count) loaded series")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Divider()
+
+            HStack {
                 Text("Study Sessions")
                     .font(.system(size: 11, weight: .semibold))
                 Spacer()

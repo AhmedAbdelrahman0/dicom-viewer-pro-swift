@@ -210,7 +210,7 @@ public struct PETACPanel: View {
            Modality.normalize(pair.overlayVolume.modality) == .PT {
             return pair.overlayVolume
         }
-        if let pet = viewer.loadedVolumes.first(where: { Modality.normalize($0.modality) == .PT }) {
+        if let pet = viewer.activeSessionVolumes.first(where: { Modality.normalize($0.modality) == .PT }) {
             return pet
         }
         if let cur = viewer.currentVolume,
@@ -226,7 +226,7 @@ public struct PETACPanel: View {
            Modality.normalize(pair.baseVolume.modality) != .PT {
             return pair.baseVolume
         }
-        return viewer.loadedVolumes.first {
+        return viewer.activeSessionVolumes.first {
             let m = Modality.normalize($0.modality)
             return m == .CT || m == .MR
         }

@@ -61,7 +61,7 @@ public struct NuclearToolsPanel: View {
         .frame(minWidth: 520)
         .background(TracerTheme.panelBackground)
         .onAppear(perform: seedTimePointSelection)
-        .onChange(of: viewer.loadedVolumes.count) { _, _ in seedTimePointSelection() }
+        .onChange(of: viewer.activeSessionVolumes.count) { _, _ in seedTimePointSelection() }
     }
 
     private var header: some View {
@@ -437,7 +437,7 @@ public struct NuclearToolsPanel: View {
     // MARK: - Data
 
     private var spectCandidates: [ImageVolume] {
-        viewer.loadedVolumes.filter { Modality.normalize($0.modality) == .NM }
+        viewer.activeSessionVolumes.filter { Modality.normalize($0.modality) == .NM }
     }
 
     private var selectedSPECTVolumes: [ImageVolume] {
