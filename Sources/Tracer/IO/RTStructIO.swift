@@ -13,6 +13,7 @@ import simd
 /// Writer exports a LabelMap back to RTSTRUCT by extracting slice contours
 /// from each class's voxel mask.
 public enum RTStructIO {
+    private static let rtStructureSetStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.481.3"
 
     /// Parse a DICOM RTSTRUCT file and rasterize contours onto a voxel grid
     /// aligned with `referenceVolume`.
@@ -59,6 +60,76 @@ public enum RTStructIO {
         }
 
         return label
+    }
+
+    /// Export a voxel label map as a DICOM RT Structure Set.
+    ///
+    /// RTSTRUCT is contour-based, so each axial mask slice is converted into
+    /// closed planar voxel-edge contours. For lossless voxel exchange, prefer
+    /// DICOM SEG; RTSTRUCT is provided for RT planning and PACS workflows that
+    /// expect contour objects.
+    public static func saveRTStruct(_ labelMap: LabelMap,
+                                    parentVolume: ImageVolume,
+                                    to url: URL) throws {
+        let classes = exportClasses(for: labelMap)
+        guard !classes.isEmpty else {
+            throw LabelIO.LabelIOError.invalidLabelPackage("RTSTRUCT export needs at least one label class")
+        }
+
+        let now = DICOMExportWriter.currentDateTime()
+        let studyUID = DICOMExportWriter.dicomUID(parentVolume.studyUID)
+        let seriesUID = DICOMExportWriter.makeUID()
+        let sopUID = DICOMExportWriter.makeUID()
+        let frameOfReferenceUID = DICOMExportWriter.makeUID()
+        let contoursByLabel = Dictionary(uniqueKeysWithValues: classes.map { labelClass in
+            (labelClass.labelID, contours(for: labelMap,
+                                          classID: labelClass.labelID,
+                                          volume: parentVolume))
+        })
+
+        var dataset = Data()
+        dataset.appendDICOMElement(group: 0x0008, element: 0x0008, vr: "CS", strings: ["DERIVED", "PRIMARY"])
+        dataset.appendDICOMElement(group: 0x0008, element: 0x0016, vr: "UI", string: rtStructureSetStorageSOPClassUID)
+        dataset.appendDICOMElement(group: 0x0008, element: 0x0018, vr: "UI", string: sopUID)
+        dataset.appendDICOMElement(group: 0x0008, element: 0x0020, vr: "DA", string: now.date)
+        dataset.appendDICOMElement(group: 0x0008, element: 0x0023, vr: "DA", string: now.date)
+        dataset.appendDICOMElement(group: 0x0008, element: 0x0030, vr: "TM", string: now.time)
+        dataset.appendDICOMElement(group: 0x0008, element: 0x0033, vr: "TM", string: now.time)
+        dataset.appendDICOMElement(group: 0x0008, element: 0x0060, vr: "CS", string: "RTSTRUCT")
+        dataset.appendDICOMElement(group: 0x0008, element: 0x0070, vr: "LO", string: "Tracer")
+        dataset.appendDICOMElement(group: 0x0008, element: 0x1030, vr: "LO", string: parentVolume.studyDescription)
+        dataset.appendDICOMElement(group: 0x0008, element: 0x103E, vr: "LO", string: "\(labelMap.name) RTSTRUCT")
+        dataset.appendDICOMElement(group: 0x0010, element: 0x0010, vr: "PN", string: patientName(parentVolume))
+        dataset.appendDICOMElement(group: 0x0010, element: 0x0020, vr: "LO", string: patientID(parentVolume))
+        dataset.appendDICOMElement(group: 0x0020, element: 0x000D, vr: "UI", string: studyUID)
+        dataset.appendDICOMElement(group: 0x0020, element: 0x000E, vr: "UI", string: seriesUID)
+        dataset.appendDICOMElement(group: 0x0020, element: 0x0011, vr: "IS", string: "901")
+        dataset.appendDICOMElement(group: 0x0020, element: 0x0013, vr: "IS", string: "1")
+        dataset.appendDICOMElement(group: 0x0020, element: 0x0052, vr: "UI", string: frameOfReferenceUID)
+        dataset.appendDICOMElement(group: 0x3006, element: 0x0002, vr: "SH", string: labelMap.name.isEmpty ? "Tracer Labels" : labelMap.name)
+        dataset.appendDICOMElement(group: 0x3006, element: 0x0008, vr: "DA", string: now.date)
+        dataset.appendDICOMElement(group: 0x3006, element: 0x0009, vr: "TM", string: now.time)
+        dataset.appendDICOMSequence(group: 0x3006, element: 0x0010, items: [
+            referencedFrameOfReferenceItem(frameOfReferenceUID: frameOfReferenceUID,
+                                           studyUID: studyUID,
+                                           seriesUID: DICOMExportWriter.dicomUID(parentVolume.seriesUID))
+        ])
+        dataset.appendDICOMSequence(group: 0x3006, element: 0x0020, items: structureSetROIItems(
+            classes,
+            frameOfReferenceUID: frameOfReferenceUID
+        ))
+        dataset.appendDICOMSequence(group: 0x3006, element: 0x0039, items: roiContourItems(
+            classes,
+            contoursByLabel: contoursByLabel
+        ))
+        dataset.appendDICOMSequence(group: 0x3006, element: 0x0080, items: rtROIObservationItems(classes))
+
+        let file = DICOMExportWriter.part10File(
+            sopClassUID: rtStructureSetStorageSOPClassUID,
+            sopInstanceUID: sopUID,
+            dataset: dataset
+        )
+        try file.write(to: url, options: [.atomic])
     }
 
     /// Rasterize a polygon contour onto an axial slice using point-in-polygon test.
@@ -117,6 +188,202 @@ public enum RTStructIO {
             return .rtTarget
         }
         return .rtOAR
+    }
+
+    private struct ExportContour {
+        let points: [SIMD3<Double>]
+    }
+
+    private struct GridPoint: Hashable {
+        let x: Int
+        let y: Int
+    }
+
+    private struct GridEdge {
+        let start: GridPoint
+        let end: GridPoint
+    }
+
+    private static func contours(for labelMap: LabelMap,
+                                 classID: UInt16,
+                                 volume: ImageVolume) -> [ExportContour] {
+        var result: [ExportContour] = []
+        for z in 0..<labelMap.depth {
+            let loops = contourLoops(for: labelMap, classID: classID, z: z)
+            for loop in loops where loop.count >= 4 {
+                let worldPoints = loop.map { point in
+                    volume.worldPoint(voxel: SIMD3<Double>(
+                        Double(point.x),
+                        Double(point.y),
+                        Double(z)
+                    ))
+                }
+                result.append(ExportContour(points: worldPoints))
+            }
+        }
+        return result
+    }
+
+    private static func contourLoops(for labelMap: LabelMap,
+                                     classID: UInt16,
+                                     z: Int) -> [[GridPoint]] {
+        var edges: [GridEdge] = []
+        func isClass(_ x: Int, _ y: Int) -> Bool {
+            guard x >= 0, x < labelMap.width, y >= 0, y < labelMap.height else { return false }
+            return labelMap.value(z: z, y: y, x: x) == classID
+        }
+
+        for y in 0..<labelMap.height {
+            for x in 0..<labelMap.width where isClass(x, y) {
+                if !isClass(x, y - 1) {
+                    edges.append(GridEdge(start: GridPoint(x: x, y: y),
+                                          end: GridPoint(x: x + 1, y: y)))
+                }
+                if !isClass(x + 1, y) {
+                    edges.append(GridEdge(start: GridPoint(x: x + 1, y: y),
+                                          end: GridPoint(x: x + 1, y: y + 1)))
+                }
+                if !isClass(x, y + 1) {
+                    edges.append(GridEdge(start: GridPoint(x: x + 1, y: y + 1),
+                                          end: GridPoint(x: x, y: y + 1)))
+                }
+                if !isClass(x - 1, y) {
+                    edges.append(GridEdge(start: GridPoint(x: x, y: y + 1),
+                                          end: GridPoint(x: x, y: y)))
+                }
+            }
+        }
+
+        var unused = Set(edges.indices)
+        var outgoing: [GridPoint: [Int]] = [:]
+        for (index, edge) in edges.enumerated() {
+            outgoing[edge.start, default: []].append(index)
+        }
+
+        var loops: [[GridPoint]] = []
+        while let firstIndex = unused.first {
+            unused.remove(firstIndex)
+            let firstEdge = edges[firstIndex]
+            let start = firstEdge.start
+            var current = firstEdge.end
+            var loop = [start, current]
+
+            while current != start {
+                guard let nextIndex = outgoing[current]?.first(where: { unused.contains($0) }) else {
+                    break
+                }
+                unused.remove(nextIndex)
+                current = edges[nextIndex].end
+                loop.append(current)
+            }
+
+            if loop.last == start {
+                loop.removeLast()
+                loops.append(loop)
+            }
+        }
+        return loops
+    }
+
+    private static func referencedFrameOfReferenceItem(frameOfReferenceUID: String,
+                                                       studyUID: String,
+                                                       seriesUID: String) -> Data {
+        var seriesItem = Data()
+        seriesItem.appendDICOMElement(group: 0x0020, element: 0x000E, vr: "UI", string: seriesUID)
+
+        var studyItem = Data()
+        studyItem.appendDICOMElement(group: 0x0008, element: 0x1150, vr: "UI", string: "1.2.840.10008.3.1.2.3.1")
+        studyItem.appendDICOMElement(group: 0x0008, element: 0x1155, vr: "UI", string: studyUID)
+        studyItem.appendDICOMSequence(group: 0x3006, element: 0x0014, items: [seriesItem])
+
+        var item = Data()
+        item.appendDICOMElement(group: 0x0020, element: 0x0052, vr: "UI", string: frameOfReferenceUID)
+        item.appendDICOMSequence(group: 0x3006, element: 0x0012, items: [studyItem])
+        return item
+    }
+
+    private static func structureSetROIItems(_ classes: [LabelClass],
+                                             frameOfReferenceUID: String) -> [Data] {
+        classes.enumerated().map { index, labelClass in
+            var item = Data()
+            item.appendDICOMElement(group: 0x3006, element: 0x0022, vr: "IS", string: "\(index + 1)")
+            item.appendDICOMElement(group: 0x3006, element: 0x0024, vr: "UI", string: frameOfReferenceUID)
+            item.appendDICOMElement(group: 0x3006, element: 0x0026, vr: "LO", string: labelClass.name)
+            item.appendDICOMElement(group: 0x3006, element: 0x0036, vr: "CS", string: "SEMIAUTOMATIC")
+            return item
+        }
+    }
+
+    private static func roiContourItems(_ classes: [LabelClass],
+                                        contoursByLabel: [UInt16: [ExportContour]]) -> [Data] {
+        classes.enumerated().map { index, labelClass in
+            let (r, g, b) = DICOMExportWriter.rgbComponents(labelClass.color)
+            var item = Data()
+            item.appendDICOMElement(group: 0x3006, element: 0x002A, vr: "IS", string: "\(r)\\\(g)\\\(b)")
+            item.appendDICOMSequence(group: 0x3006, element: 0x0040, items: (contoursByLabel[labelClass.labelID] ?? []).map(contourItem))
+            item.appendDICOMElement(group: 0x3006, element: 0x0084, vr: "IS", string: "\(index + 1)")
+            return item
+        }
+    }
+
+    private static func contourItem(_ contour: ExportContour) -> Data {
+        var item = Data()
+        item.appendDICOMElement(group: 0x3006, element: 0x0042, vr: "CS", string: "CLOSED_PLANAR")
+        item.appendDICOMElement(group: 0x3006, element: 0x0046, vr: "IS", string: "\(contour.points.count)")
+        let values = contour.points.flatMap { [$0.x, $0.y, $0.z] }
+        item.appendDICOMElement(group: 0x3006, element: 0x0050, vr: "DS", string: DICOMExportWriter.ds(values))
+        return item
+    }
+
+    private static func rtROIObservationItems(_ classes: [LabelClass]) -> [Data] {
+        classes.enumerated().map { index, labelClass in
+            var item = Data()
+            item.appendDICOMElement(group: 0x3006, element: 0x0082, vr: "IS", string: "\(index + 1)")
+            item.appendDICOMElement(group: 0x3006, element: 0x0084, vr: "IS", string: "\(index + 1)")
+            item.appendDICOMElement(group: 0x3006, element: 0x00A4, vr: "CS", string: rtInterpretedType(for: labelClass))
+            item.appendDICOMElement(group: 0x3006, element: 0x00A6, vr: "PN", string: "Tracer")
+            return item
+        }
+    }
+
+    private static func rtInterpretedType(for labelClass: LabelClass) -> String {
+        switch labelClass.category {
+        case .rtTarget, .tumor, .lesion, .petHotspot, .pathology, .nuclearUptake:
+            return "GTV"
+        case .rtOAR, .rtStructure, .organ, .bone, .brain, .muscle, .vessel, .cardiac:
+            return "ORGAN"
+        case .custom:
+            return "CONTROL"
+        }
+    }
+
+    private static func exportClasses(for labelMap: LabelMap) -> [LabelClass] {
+        if !labelMap.classes.isEmpty {
+            return labelMap.classes.sorted { $0.labelID < $1.labelID }
+        }
+        return Set(labelMap.voxels.filter { $0 != 0 })
+            .sorted()
+            .enumerated()
+            .map { index, labelID in
+                LabelClass(labelID: labelID,
+                           name: "Label \(labelID)",
+                           category: .custom,
+                           color: autogeneratedColor(index: index))
+            }
+    }
+
+    private static func autogeneratedColor(index: Int) -> Color {
+        let colors: [Color] = [.red, .green, .blue, .yellow, .orange, .purple, .pink,
+                               .cyan, .mint, .indigo, .teal, .brown]
+        return colors[index % colors.count]
+    }
+
+    private static func patientName(_ volume: ImageVolume) -> String {
+        volume.patientName.isEmpty ? "Anonymous" : volume.patientName
+    }
+
+    private static func patientID(_ volume: ImageVolume) -> String {
+        volume.patientID.isEmpty ? "UNKNOWN" : volume.patientID
     }
 }
 

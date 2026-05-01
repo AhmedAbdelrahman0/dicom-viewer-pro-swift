@@ -10,6 +10,7 @@ import UIKit
 /// A single 2D slice view (axial, sagittal, or coronal) with full tool support.
 public struct SliceView: View {
     @EnvironmentObject var vm: ViewerViewModel
+    @AppStorage("Tracer.Prefs.ImageDetailsOverlay") private var showImageStudyDetailsOverlay = true
     let axis: Int
     let title: String
     let displayMode: SliceDisplayMode
@@ -112,19 +113,24 @@ public struct SliceView: View {
                             .foregroundColor(.gray)
                     }
 
-                    // Info label (top-left) and hover badge (top-right).
-                    VStack {
-                        HStack(alignment: .top) {
-                            infoText
-                            Spacer()
-                            if let sample = hoverSample {
-                                hoverBadge(sample)
-                                    .transition(.opacity)
+                    // Per-image details (top-left) and hover badge (top-right).
+                    if showImageStudyDetailsOverlay || hoverSample != nil {
+                        VStack {
+                            HStack(alignment: .top) {
+                                if showImageStudyDetailsOverlay {
+                                    imageStudyDetailsOverlay
+                                        .transition(.opacity)
+                                }
+                                Spacer()
+                                if let sample = hoverSample {
+                                    hoverBadge(sample)
+                                        .transition(.opacity)
+                                }
                             }
+                            Spacer()
                         }
-                        Spacer()
+                        .padding(6)
                     }
-                    .padding(6)
 
                     if let badge = fusionLayerBadge {
                         VStack {
@@ -300,10 +306,14 @@ public struct SliceView: View {
                     get: { Double(currentIndex) },
                     set: { vm.setSlice(axis: axis, index: Int($0), mode: displayMode) }
                 )
-                Text("\(currentIndex + 1)/\(maxIdx + 1)")
+                Text(sliceScrubberLabel(for: v,
+                                        currentIndex: currentIndex,
+                                        maxIndex: maxIdx))
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.gray)
-                    .frame(width: 60, alignment: .trailing)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                    .frame(width: 82, alignment: .trailing)
                 Slider(value: binding, in: 0...Double(maxIdx), step: 1)
                     .frame(maxWidth: 120)
             }
@@ -312,24 +322,295 @@ public struct SliceView: View {
 
     // MARK: - Info overlay
 
-    private var infoText: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            if let v = vm.volumeForDisplayMode(displayMode) {
-                let (w, h) = sliceDimensions(for: v)
-                Text("\(w)×\(h)")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundColor(.gray)
-                Text(windowLevelInfo(for: v))
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundColor(.gray)
-                Text(String(format: "Zoom: %.0f%%", zoom * 100))
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundColor(.gray)
+    @ViewBuilder
+    private var imageStudyDetailsOverlay: some View {
+        if let volume = vm.volumeForDisplayMode(displayMode) {
+            if vm.hangingGrid.paneCount > 16 {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(shortStudyTitle(for: volume, limit: 34))
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Text("\(compactSeriesTitle(for: volume))  \(sliceDetail(for: volume))")
+                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .foregroundColor(TracerTheme.accentBright)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                .padding(.vertical, 5)
+                .padding(.horizontal, 7)
+                .frame(maxWidth: 320, alignment: .leading)
+                .shadow(color: .black.opacity(0.95), radius: 2, x: 0, y: 1)
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(studyTitle(for: volume))
+                        .font(.system(size: 14, weight: .bold, design: .monospaced))
+                        .foregroundColor(.white)
+                        .lineLimit(2)
+                        .truncationMode(.tail)
+                    if let patientLine = patientLine(for: volume) {
+                        Text(patientLine)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.white.opacity(0.82))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    if let metaLine = studyMetaLine(for: volume) {
+                        Text(metaLine)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    Text(seriesTitle(for: volume))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    if let fusionLine = fusionOverlayLine(for: volume) {
+                        Text(fusionLine)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(TracerTheme.pet)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    Text(sliceDetail(for: volume))
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundColor(TracerTheme.accentBright)
+                        .lineLimit(1)
+                    Text("\(slicePixelDimensions(for: volume))  \(windowLevelInfo(for: volume))  \(String(format: "Z %.0f%%", zoom * 100))")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.gray)
+                        .lineLimit(1)
+                }
+                .padding(.vertical, 7)
+                .padding(.horizontal, 9)
+                .frame(maxWidth: 520, alignment: .leading)
+                .shadow(color: .black.opacity(0.95), radius: 2, x: 0, y: 1)
             }
         }
-        .padding(4)
-        .background(Color.black.opacity(0.5))
-        .cornerRadius(4)
+    }
+
+    private func studyTitle(for volume: ImageVolume) -> String {
+        let study = meaningfulStudyDescription(for: volume)
+        if !study.isEmpty { return study }
+        let sourceFolder = sourceFolderTitle(for: volume)
+        if !sourceFolder.isEmpty { return sourceFolder }
+        let series = meaningfulSeriesDescription(for: volume)
+        if !series.isEmpty { return series }
+        let bodyPart = trimmed(volume.bodyPartExamined)
+        if !bodyPart.isEmpty { return "\(Modality.normalize(volume.modality).displayName) \(bodyPart)" }
+        let uid = shortUID(volume.studyUID)
+        return uid.isEmpty ? "Untitled study" : "Study \(uid)"
+    }
+
+    private func shortStudyTitle(for volume: ImageVolume, limit: Int = 24) -> String {
+        let title = studyTitle(for: volume)
+        if title.count <= limit { return title }
+        return String(title.prefix(max(1, limit - 3))) + "..."
+    }
+
+    private func seriesTitle(for volume: ImageVolume) -> String {
+        let modality = Modality.normalize(volume.modality).displayName
+        let series = meaningfulSeriesDescription(for: volume)
+        var parts = [modality]
+        if volume.seriesNumber > 0 {
+            parts.append("Series \(volume.seriesNumber)")
+        }
+        if !series.isEmpty {
+            parts.append(series)
+        }
+        return parts.joined(separator: " - ")
+    }
+
+    private func compactSeriesTitle(for volume: ImageVolume) -> String {
+        let title = seriesTitle(for: volume)
+        if title.count <= 18 { return title }
+        return String(title.prefix(15)) + "..."
+    }
+
+    private func patientLine(for volume: ImageVolume) -> String? {
+        let name = meaningfulPatientValue(volume.patientName)
+        let id = meaningfulPatientValue(volume.patientID)
+        if !name.isEmpty && !id.isEmpty { return "\(name)  ID \(id)" }
+        if !name.isEmpty { return name }
+        if !id.isEmpty { return "ID \(id)" }
+        return nil
+    }
+
+    private func studyMetaLine(for volume: ImageVolume) -> String? {
+        var parts: [String] = []
+        let date = displayDICOMDate(trimmed(volume.studyDate))
+        if !date.isEmpty { parts.append(date) }
+        let accession = trimmed(volume.accessionNumber)
+        if !accession.isEmpty { parts.append("Acc \(accession)") }
+        let bodyPart = trimmed(volume.bodyPartExamined)
+        if !bodyPart.isEmpty { parts.append(bodyPart) }
+        if parts.isEmpty {
+            let uid = shortUID(volume.studyUID)
+            if !uid.isEmpty { parts.append("Study \(uid)") }
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: "  ")
+    }
+
+    private func fusionOverlayLine(for volume: ImageVolume) -> String? {
+        guard displayMode == .fused,
+              let pair = vm.fusion,
+              pair.overlayVisible,
+              pair.baseVolume.id == volume.id else {
+            return nil
+        }
+        let overlay = pair.displayedOverlay
+        let modality = Modality.normalize(overlay.modality).displayName
+        let series = meaningfulSeriesDescription(for: overlay)
+        let name = series.isEmpty ? studyTitle(for: overlay) : series
+        return "Overlay \(modality) - \(name)"
+    }
+
+    private func sliceDetail(for volume: ImageVolume) -> String {
+        let maxIndex = maxSliceIndex(for: volume)
+        let currentIndex = max(0, min(maxIndex, vm.displayedSliceIndex(axis: axis, mode: displayMode)))
+        let plane = SlicePlane(rawValue: axis)?.shortName ?? title
+        if axis == SlicePlane.axial.axis {
+            return "\(plane) \(sourceImageDetail(for: volume, currentIndex: currentIndex))"
+        }
+        return "\(plane) plane \(currentIndex + 1)/\(maxIndex + 1)  \(sourceImageCountDetail(for: volume))"
+    }
+
+    private func sliceScrubberLabel(for volume: ImageVolume,
+                                    currentIndex: Int,
+                                    maxIndex: Int) -> String {
+        if axis == SlicePlane.axial.axis {
+            return sourceImageDetail(for: volume, currentIndex: currentIndex, compact: true)
+        }
+        let plane = SlicePlane(rawValue: axis)?.shortName ?? title
+        return "\(plane) \(currentIndex + 1)/\(maxIndex + 1)"
+    }
+
+    private func sourceImageDetail(for volume: ImageVolume,
+                                   currentIndex: Int,
+                                   compact: Bool = false) -> String {
+        let imageCount = max(1, volume.sourceImageCount)
+        let ordinal = currentIndex + 1
+        let imageNumber = volume.sourceImageNumber(forSliceIndex: currentIndex)
+        if imageNumber != ordinal {
+            return compact
+                ? "#\(imageNumber) \(ordinal)/\(imageCount)"
+                : "image #\(imageNumber) (\(ordinal)/\(imageCount))"
+        }
+        return compact ? "Img \(ordinal)/\(imageCount)" : "image \(ordinal)/\(imageCount)"
+    }
+
+    private func sourceImageCountDetail(for volume: ImageVolume) -> String {
+        "Source images \(max(1, volume.sourceImageCount))"
+    }
+
+    private func maxSliceIndex(for volume: ImageVolume) -> Int {
+        switch axis {
+        case 0: return max(0, volume.width - 1)
+        case 1: return max(0, volume.height - 1)
+        default: return max(0, volume.depth - 1)
+        }
+    }
+
+    private func slicePixelDimensions(for volume: ImageVolume) -> String {
+        let (width, height) = sliceDimensions(for: volume)
+        return "\(width)x\(height)"
+    }
+
+    private func trimmed(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func sourceFolderTitle(for volume: ImageVolume) -> String {
+        guard let path = volume.sourceFiles.first, !path.isEmpty else { return "" }
+        let url = URL(fileURLWithPath: path)
+        let parent = url.deletingLastPathComponent()
+        let candidates = [
+            parent.lastPathComponent,
+            parent.deletingLastPathComponent().lastPathComponent
+        ]
+        for candidate in candidates {
+            let title = meaningfulHeaderTitle(candidate)
+            if !title.isEmpty { return title }
+        }
+        return meaningfulHeaderTitle(url.lastPathComponent)
+    }
+
+    private func meaningfulStudyDescription(for volume: ImageVolume) -> String {
+        meaningfulHeaderTitle(volume.studyDescription)
+    }
+
+    private func meaningfulSeriesDescription(for volume: ImageVolume) -> String {
+        meaningfulHeaderTitle(volume.seriesDescription)
+    }
+
+    private func meaningfulPatientValue(_ value: String) -> String {
+        let trimmed = trimmed(value)
+        guard !isGenericHeaderTitle(trimmed) else { return "" }
+        return trimmed
+    }
+
+    private func meaningfulHeaderTitle(_ value: String) -> String {
+        let trimmed = stripKnownVolumeExtension(from: trimmed(value))
+        guard !isGenericHeaderTitle(trimmed) else { return "" }
+        return trimmed
+    }
+
+    private func stripKnownVolumeExtension(from value: String) -> String {
+        let lower = value.lowercased()
+        if lower.hasSuffix(".nii.gz") {
+            return String(value.dropLast(7))
+        }
+        if lower.hasSuffix(".nii") || lower.hasSuffix(".mha") || lower.hasSuffix(".mhd") || lower.hasSuffix(".nrrd") {
+            return String(value.dropLast(4))
+        }
+        return value
+    }
+
+    private func isGenericHeaderTitle(_ value: String) -> Bool {
+        let normalized = value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+        guard !normalized.isEmpty else { return true }
+        return [
+            "nifti",
+            "nifti study",
+            "nifti import",
+            "nifti import nii",
+            "untitled",
+            "untitled study",
+            "study",
+            "image",
+            "images",
+            "data",
+            "files",
+            "ct",
+            "pt",
+            "pet",
+            "mr",
+            "mri"
+        ].contains(normalized)
+    }
+
+    private func displayDICOMDate(_ raw: String) -> String {
+        guard raw.count == 8 else { return raw }
+        let year = raw.prefix(4)
+        let monthStart = raw.index(raw.startIndex, offsetBy: 4)
+        let monthEnd = raw.index(monthStart, offsetBy: 2)
+        let dayStart = raw.index(raw.startIndex, offsetBy: 6)
+        return "\(year)-\(raw[monthStart..<monthEnd])-\(raw[dayStart...])"
+    }
+
+    private func shortUID(_ uid: String) -> String {
+        let clean = trimmed(uid)
+        guard !clean.isEmpty else { return "" }
+        return clean.count <= 12 ? clean : String(clean.suffix(12))
     }
 
     private func paneControls(index: Int) -> some View {
@@ -1184,7 +1465,7 @@ public struct SliceView: View {
                 )
                 vm.startPercentOfMaxActiveLabelAroundSeed(
                     seed: (z: z, y: y, x: x),
-                    boxRadius: 30,
+                    boxRadius: vm.labeling.percentOfMaxSearchRadius,
                     percent: vm.labeling.percentOfMax
                 )
                 lastPaintPoint = p

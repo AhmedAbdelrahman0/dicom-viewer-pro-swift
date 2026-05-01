@@ -137,9 +137,13 @@ public enum PETACUtilities {
     /// a fusion picker / volume browser.
     public static func makeACVolume(from pixels: [Float],
                                     sourceNAC: ImageVolume,
-                                    correctorID: String) -> ImageVolume {
-        precondition(pixels.count == sourceNAC.depth * sourceNAC.height * sourceNAC.width,
-                     "AC pixel count must match the NAC volume's voxel count")
+                                    correctorID: String) throws -> ImageVolume {
+        let expectedVoxelCount = sourceNAC.depth * sourceNAC.height * sourceNAC.width
+        guard pixels.count == expectedVoxelCount else {
+            throw PETACError.outputGridMismatch(
+                "model returned \(pixels.count) voxels, expected \(expectedVoxelCount)"
+            )
+        }
         let baseDescription = sourceNAC.seriesDescription.isEmpty
             ? "PET (AC)"
             : "\(sourceNAC.seriesDescription) — AC"

@@ -141,7 +141,7 @@ public final class SubprocessPETACCorrector: PETAttenuationCorrector, @unchecked
             )
         }
 
-        let acResultVolume = PETACUtilities.makeACVolume(
+        let acResultVolume = try PETACUtilities.makeACVolume(
             from: acVolume.pixels,
             sourceNAC: nacPET,
             correctorID: id

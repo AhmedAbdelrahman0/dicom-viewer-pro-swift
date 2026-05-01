@@ -1,5 +1,8 @@
 import SwiftUI
 import UniformTypeIdentifiers
+#if canImport(AppKit)
+import AppKit
+#endif
 
 struct LabelingPanel: View {
     @EnvironmentObject var vm: ViewerViewModel
@@ -261,6 +264,12 @@ struct LabelingPanel: View {
                                     .font(.system(size: 11, design: .monospaced))
                                     .frame(width: 40)
                             }
+
+                            Stepper("Seed box: \(vm.labeling.percentOfMaxSearchRadius) voxels",
+                                    value: $vm.labeling.percentOfMaxSearchRadius,
+                                    in: 5...160)
+                                .font(.system(size: 11))
+                                .help("Local %SUVmax seed search radius for threshold clicks.")
                         }
 
                     case .suvGradient:
@@ -298,6 +307,38 @@ struct LabelingPanel: View {
                             }
                             Text("Click on the seed voxel in any view to grow the region.")
                                 .font(.caption).foregroundColor(.secondary)
+                        }
+
+                    case .lesionSphere:
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("Sphere radius")
+                                Spacer()
+                                Text(String(format: "%.1f mm", vm.labeling.lesionSphereRadiusMM))
+                                    .font(.system(size: 11, design: .monospaced))
+                            }
+                            Slider(value: $vm.labeling.lesionSphereRadiusMM,
+                                   in: 2...60,
+                                   step: 0.5)
+
+                            HStack(spacing: 6) {
+                                Button("5 mm") {
+                                    vm.labeling.lesionSphereRadiusMM = 5
+                                }
+                                Button("10 mm") {
+                                    vm.labeling.lesionSphereRadiusMM = 10
+                                }
+                                Button("20 mm") {
+                                    vm.labeling.lesionSphereRadiusMM = 20
+                                }
+                                Button {
+                                    vm.labeling.clearQuickLesions()
+                                } label: {
+                                    Label("Clear", systemImage: "trash")
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
                         }
 
                     case .landmark:
@@ -448,7 +489,8 @@ struct LabelingPanel: View {
                                     .font(.caption).foregroundColor(.secondary)
                             } else {
                                 StatRow("Voxels", "\(report.voxelCount)")
-                                StatRow("Volume", String(format: "%.1f cm³", report.volumeMM3 / 1000))
+                                StatRow(report.source == .petSUV ? "TTV / MTV" : "Volume",
+                                        String(format: "%.1f cm³", report.volumeMM3 / 1000))
                                 StatRow("Mean", String(format: "%.1f", report.mean))
                                 StatRow("Max",  String(format: "%.1f", report.max))
                                 StatRow("Min",  String(format: "%.1f", report.min))
@@ -507,6 +549,19 @@ struct LabelingPanel: View {
                         .controlSize(.small)
                         .disabled(vm.labeling.activeLabelMap == nil)
                     }
+
+                    Menu {
+                        Button("Summary CSV…") { exportLabelData(.csv) }
+                        Button("Summary TSV…") { exportLabelData(.tsv) }
+                        Button("Full JSON…") { exportLabelData(.json) }
+                        Button("Full XML…") { exportLabelData(.xml) }
+                    } label: {
+                        Label("Export Label Data", systemImage: "tablecells")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(vm.labeling.activeLabelMap == nil)
 
                     Picker("Format", selection: $exportFormat) {
                         ForEach(LabelIO.Format.allCases) { f in
@@ -652,9 +707,11 @@ struct LabelingPanel: View {
                         .frame(width: 42, alignment: .trailing)
                 }
 
-                Text("For focal lesions, choose SUV Gradient and click a seed; the report updates after the contour is written.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                Stepper("Seed box: \(vm.labeling.percentOfMaxSearchRadius) voxels",
+                        value: $vm.labeling.percentOfMaxSearchRadius,
+                        in: 5...160)
+                    .font(.system(size: 11))
+                    .help("Local %SUVmax seed search radius for threshold clicks.")
             }
             .padding(8)
             .background(Color.orange.opacity(0.08))
@@ -713,6 +770,8 @@ struct LabelingPanel: View {
                 VolumeMeasurementReportView(report: report)
             }
 
+            radiomicsTools
+
             HStack {
                 Button(role: .destructive) {
                     let before = vm.labeling.undoDepth
@@ -737,6 +796,45 @@ struct LabelingPanel: View {
             .buttonStyle(.bordered)
             .controlSize(.small)
         }
+    }
+
+    private var radiomicsTools: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label("Radiomics", systemImage: "waveform.path.ecg.rectangle")
+                    .font(.system(size: 12, weight: .semibold))
+                Spacer()
+                if let report = vm.lastRadiomicsFeatureReport {
+                    RadiomicsExportMenu(report: report)
+                }
+            }
+
+            HStack {
+                Button {
+                    _ = vm.extractActiveRadiomics(preferPET: true)
+                } label: {
+                    Label("PET SUV", systemImage: "flame")
+                        .frame(maxWidth: .infinity)
+                }
+
+                Button {
+                    _ = vm.extractActiveRadiomics(preferPET: false)
+                } label: {
+                    Label("CT HU", systemImage: "cube")
+                        .frame(maxWidth: .infinity)
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(vm.labeling.activeLabelMap == nil)
+
+            if let report = vm.lastRadiomicsFeatureReport {
+                RadiomicsFeatureReportView(report: report)
+            }
+        }
+        .padding(8)
+        .background(Color.indigo.opacity(0.07))
+        .cornerRadius(6)
     }
 
     private var defaultExportFilename: String {
@@ -964,7 +1062,8 @@ private struct VolumeMeasurementReportView: View {
                 .foregroundColor(.secondary)
 
             StatRow("Voxels", "\(report.voxelCount)")
-            StatRow("Volume", String(format: "%.2f mL", report.volumeML))
+            StatRow(report.source == .petSUV ? "TTV / MTV" : "Volume",
+                    String(format: "%.2f mL", report.volumeML))
             StatRow(report.source == .ctHU ? "Mean HU" : "Mean", String(format: "%.2f", report.mean))
             StatRow("Range", String(format: "%.1f…%.1f", report.min, report.max))
             if let suvMax = report.suvMax {
@@ -980,6 +1079,123 @@ private struct VolumeMeasurementReportView: View {
         .padding(8)
         .background(Color.secondary.opacity(0.08))
         .cornerRadius(6)
+    }
+}
+
+private struct RadiomicsFeatureReportView: View {
+    let report: RadiomicsFeatureReport
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(report.source.rawValue)
+                    .font(.system(size: 11, weight: .medium))
+                Spacer()
+                Text("\(report.featureCount) features")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+            Text(report.className)
+                .font(.system(size: 11, weight: .medium))
+            StatRow("Bounds", "\(report.bounds.width)x\(report.bounds.height)x\(report.bounds.depth)")
+            ForEach(report.topPreviewFeatures, id: \.0) { name, value in
+                StatRow(shortFeatureName(name), String(format: "%.4g", value))
+            }
+        }
+        .padding(8)
+        .background(Color.secondary.opacity(0.08))
+        .cornerRadius(6)
+    }
+
+    private func shortFeatureName(_ name: String) -> String {
+        name
+            .replacingOccurrences(of: "original_firstorder_", with: "")
+            .replacingOccurrences(of: "original_shape_", with: "")
+            .replacingOccurrences(of: "original_glcm_", with: "GLCM ")
+    }
+}
+
+private struct RadiomicsExportMenu: View {
+    let report: RadiomicsFeatureReport
+
+    var body: some View {
+        Menu {
+            Button("Export JSON…") { export(.json) }
+            Button("Export CSV…") { export(.csv) }
+        } label: {
+            Label("Export", systemImage: "square.and.arrow.up")
+                .font(.system(size: 11))
+        }
+        .menuStyle(.borderlessButton)
+        .controlSize(.small)
+    }
+
+    private enum Format { case json, csv }
+
+    private func export(_ format: Format) {
+        #if canImport(AppKit)
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "radiomics-\(report.source == .petSUV ? "pet" : "ct").\(format == .json ? "json" : "csv")"
+        panel.allowedContentTypes = [format == .json ? .json : .commaSeparatedText]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let data = format == .json ? try report.jsonData() : report.csvData
+            try data.write(to: url, options: [.atomic])
+        } catch {
+            NSLog("Radiomics export failed: \(error)")
+        }
+        #endif
+    }
+}
+
+private extension LabelingPanel {
+    enum LabelDataExportFormat {
+        case json, csv, tsv, xml
+
+        var fileExtension: String {
+            switch self {
+            case .json: return "json"
+            case .csv: return "csv"
+            case .tsv: return "tsv"
+            case .xml: return "xml"
+            }
+        }
+
+        var contentType: UTType {
+            switch self {
+            case .json: return .json
+            case .csv: return .commaSeparatedText
+            case .tsv: return .plainText
+            case .xml: return .xml
+            }
+        }
+    }
+
+    func exportLabelData(_ format: LabelDataExportFormat) {
+        #if canImport(AppKit)
+        guard let report = vm.activeLabelDataExportReport() else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "label-data.\(format.fileExtension)"
+        panel.allowedContentTypes = [format.contentType]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let data: Data
+            switch format {
+            case .json:
+                data = try report.jsonData()
+            case .csv:
+                data = report.csvData
+            case .tsv:
+                data = report.tsvData
+            case .xml:
+                data = report.xmlData
+            }
+            try data.write(to: url, options: [.atomic])
+            vm.statusMessage = "Exported label data to \(url.lastPathComponent)"
+        } catch {
+            vm.statusMessage = "Label data export failed: \(error.localizedDescription)"
+        }
+        #endif
     }
 }
 

@@ -148,9 +148,16 @@ public struct CTDensityCalibration: Equatable, Sendable {
         self.maximumDensityGPerML = maximumDensityGPerML
     }
 
-    public static var standard: CTDensityCalibration {
-        try! CTDensityCalibration()
+    private init(uncheckedMinimumDensityGPerML minimumDensityGPerML: Float,
+                 maximumDensityGPerML: Float) {
+        self.minimumDensityGPerML = minimumDensityGPerML
+        self.maximumDensityGPerML = maximumDensityGPerML
     }
+
+    public static let standard = CTDensityCalibration(
+        uncheckedMinimumDensityGPerML: 0.001,
+        maximumDensityGPerML: 3.0
+    )
 
     /// Conservative HU-to-density ramp for absorbed-dose mass correction.
     /// A site-specific bilinear calibration should replace this for clinical use.
@@ -216,9 +223,31 @@ public struct Lu177MonteCarloOptions: Equatable, Sendable {
         self.randomSeed = randomSeed
     }
 
-    public static var standard: Lu177MonteCarloOptions {
-        try! Lu177MonteCarloOptions()
+    private init(uncheckedHistoriesPerSourceVoxel historiesPerSourceVoxel: Int,
+                 maxTotalHistories: Int,
+                 maximumBetaRangeMM: Double,
+                 meanBetaPathLengthMM: Double,
+                 stepLengthMM: Double,
+                 minimumSourceTIABqHoursPerML: Float,
+                 randomSeed: UInt64) {
+        self.historiesPerSourceVoxel = historiesPerSourceVoxel
+        self.maxTotalHistories = maxTotalHistories
+        self.maximumBetaRangeMM = maximumBetaRangeMM
+        self.meanBetaPathLengthMM = meanBetaPathLengthMM
+        self.stepLengthMM = stepLengthMM
+        self.minimumSourceTIABqHoursPerML = minimumSourceTIABqHoursPerML
+        self.randomSeed = randomSeed
     }
+
+    public static let standard = Lu177MonteCarloOptions(
+        uncheckedHistoriesPerSourceVoxel: 64,
+        maxTotalHistories: 500_000,
+        maximumBetaRangeMM: 1.8,
+        meanBetaPathLengthMM: 0.67,
+        stepLengthMM: 0.25,
+        minimumSourceTIABqHoursPerML: 0,
+        randomSeed: 0x177D051
+    )
 }
 
 public struct Lu177DoseModel: Equatable, Sendable {
@@ -249,17 +278,33 @@ public struct Lu177DoseModel: Equatable, Sendable {
         self.monteCarloOptions = monteCarloOptions
     }
 
-    public static var lu177LocalDeposition: Lu177DoseModel {
-        try! Lu177DoseModel()
+    private init(uncheckedName name: String,
+                 calculationMethod: Lu177DoseCalculationMethod,
+                 meanEnergyMeVPerDecay: Double,
+                 nonLocalContributionFraction: Double,
+                 monteCarloOptions: Lu177MonteCarloOptions?) {
+        self.name = name
+        self.calculationMethod = calculationMethod
+        self.meanEnergyMeVPerDecay = meanEnergyMeVPerDecay
+        self.nonLocalContributionFraction = nonLocalContributionFraction
+        self.monteCarloOptions = monteCarloOptions
     }
 
-    public static var lu177MonteCarloBetaTransport: Lu177DoseModel {
-        try! Lu177DoseModel(
-            name: "Lu-177 Monte Carlo beta transport",
-            calculationMethod: .monteCarloBetaTransport,
-            monteCarloOptions: .standard
-        )
-    }
+    public static let lu177LocalDeposition = Lu177DoseModel(
+        uncheckedName: "Lu-177 local deposition",
+        calculationMethod: .localDeposition,
+        meanEnergyMeVPerDecay: 0.1479,
+        nonLocalContributionFraction: 0,
+        monteCarloOptions: nil
+    )
+
+    public static let lu177MonteCarloBetaTransport = Lu177DoseModel(
+        uncheckedName: "Lu-177 Monte Carlo beta transport",
+        calculationMethod: .monteCarloBetaTransport,
+        meanEnergyMeVPerDecay: 0.1479,
+        nonLocalContributionFraction: 0,
+        monteCarloOptions: .standard
+    )
 
     public var joulesPerDecay: Double {
         meanEnergyMeVPerDecay * 1.602176634e-13 * (1 + nonLocalContributionFraction)
@@ -303,9 +348,34 @@ public struct Lu177DosimetryOptions: Equatable, Sendable {
         self.outputSeriesDescription = outputSeriesDescription
     }
 
-    public static var standard: Lu177DosimetryOptions {
-        try! Lu177DosimetryOptions()
+    private init(uncheckedPhysicalHalfLifeHours physicalHalfLifeHours: Double,
+                 tailModel: Lu177TailModel,
+                 doseModel: Lu177DoseModel,
+                 densityCalibration: CTDensityCalibration,
+                 recoveryCoefficientTable: Lu177RecoveryCoefficientTable?,
+                 registrationWarningThresholdMM: Double,
+                 doseVolumeHistogramBinWidthGy: Double,
+                 outputSeriesDescription: String) {
+        self.physicalHalfLifeHours = physicalHalfLifeHours
+        self.tailModel = tailModel
+        self.doseModel = doseModel
+        self.densityCalibration = densityCalibration
+        self.recoveryCoefficientTable = recoveryCoefficientTable
+        self.registrationWarningThresholdMM = registrationWarningThresholdMM
+        self.doseVolumeHistogramBinWidthGy = doseVolumeHistogramBinWidthGy
+        self.outputSeriesDescription = outputSeriesDescription
     }
+
+    public static let standard = Lu177DosimetryOptions(
+        uncheckedPhysicalHalfLifeHours: 159.53,
+        tailModel: .monoExponentialFitWithPhysicalFallback,
+        doseModel: .lu177LocalDeposition,
+        densityCalibration: .standard,
+        recoveryCoefficientTable: nil,
+        registrationWarningThresholdMM: 10,
+        doseVolumeHistogramBinWidthGy: 1,
+        outputSeriesDescription: "Lu-177 absorbed dose map"
+    )
 
     public var physicalDecayConstantPerHour: Double {
         log(2) / physicalHalfLifeHours

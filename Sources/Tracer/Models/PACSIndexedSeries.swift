@@ -269,6 +269,16 @@ public final class PACSIndexedSeries {
 }
 
 public enum PACSIndexBuilder {
+    private struct NIfTIIndexMetadata {
+        var studyUID: String
+        var patientID: String
+        var patientName: String
+        var accessionNumber: String
+        var studyDescription: String
+        var studyDate: String
+        var bodyPartExamined: String
+    }
+
     public static func snapshot(for series: DICOMSeries,
                                 sourcePath: String,
                                 indexedAt: Date = Date()) -> PACSIndexedSeriesSnapshot {
@@ -300,6 +310,20 @@ public enum PACSIndexBuilder {
         PACSIndexedSeries(snapshot: snapshot(for: series, sourcePath: sourcePath, indexedAt: indexedAt))
     }
 
+    public static func loadMetadataForNIfTI(url: URL) -> NIfTILoadMetadata {
+        let metadata = metadataForNIfTI(url: url)
+        return NIfTILoadMetadata(
+            studyUID: metadata.studyUID,
+            patientID: metadata.patientID,
+            patientName: metadata.patientName,
+            accessionNumber: metadata.accessionNumber,
+            studyDate: metadata.studyDate,
+            bodyPartExamined: metadata.bodyPartExamined,
+            seriesDescription: stripVolumeExtension(url.lastPathComponent),
+            studyDescription: metadata.studyDescription
+        )
+    }
+
     public static func snapshotForNIfTI(url: URL,
                                         indexedAt: Date = Date()) -> PACSIndexedSeriesSnapshot {
         let modality = NIfTILoader.inferModality(
@@ -309,25 +333,26 @@ public enum PACSIndexBuilder {
         )
         let sourcePath = NIfTILoader.canonicalSourcePath(for: url)
         let id = "nifti:\(sourcePath)"
-        let bids = bidsMetadata(for: url)
+        let metadata = metadataForNIfTI(url: url)
+        let imageCount = (try? NIfTILoader.headerSummary(url).imageCount) ?? 1
         return PACSIndexedSeriesSnapshot(
             id: id,
             kind: .nifti,
             seriesUID: id,
-            studyUID: bids?.studyUID ?? "NIFTI_STUDY",
+            studyUID: metadata.studyUID,
             modality: modality,
-            patientID: bids?.patientID ?? "NIFTI_Import",
-            patientName: bids?.patientName ?? "NIfTI Import",
-            accessionNumber: "",
-            studyDescription: bids?.studyDescription ?? url.deletingLastPathComponent().lastPathComponent,
-            studyDate: "",
+            patientID: metadata.patientID,
+            patientName: metadata.patientName,
+            accessionNumber: metadata.accessionNumber,
+            studyDescription: metadata.studyDescription,
+            studyDate: metadata.studyDate,
             studyTime: "",
             referringPhysicianName: "",
-            bodyPartExamined: "",
+            bodyPartExamined: metadata.bodyPartExamined,
             seriesDescription: stripVolumeExtension(url.lastPathComponent),
             sourcePath: sourcePath,
             filePaths: [sourcePath],
-            instanceCount: 1,
+            instanceCount: imageCount,
             indexedAt: indexedAt
         )
     }
@@ -349,10 +374,33 @@ public enum PACSIndexBuilder {
         return n
     }
 
-    private static func bidsMetadata(for url: URL) -> (studyUID: String,
-                                                       patientID: String,
-                                                       patientName: String,
-                                                       studyDescription: String)? {
+    private static func metadataForNIfTI(url: URL) -> NIfTIIndexMetadata {
+        if let bids = bidsMetadata(for: url) {
+            return bids
+        }
+        return folderMetadata(for: url)
+    }
+
+    private static func folderMetadata(for url: URL) -> NIfTIIndexMetadata {
+        let studyURL = url.deletingLastPathComponent()
+        let studyPath = ImageVolume.canonicalPath(studyURL.path)
+        let studyFolder = meaningfulFolderTitle(studyURL.lastPathComponent)
+        let patientFolder = meaningfulFolderTitle(studyURL.deletingLastPathComponent().lastPathComponent)
+        let patientID = isLikelyPatientFolder(patientFolder, studyFolder: studyFolder) ? patientFolder : ""
+        let studyDescription = studyFolder.isEmpty ? stripVolumeExtension(url.lastPathComponent) : studyFolder
+        let hash = stableHash(for: studyPath)
+        return NIfTIIndexMetadata(
+            studyUID: "nifti-study:\(hash)",
+            patientID: patientID,
+            patientName: patientID,
+            accessionNumber: "NIFTI-\(String(hash.prefix(12)))",
+            studyDescription: studyDescription,
+            studyDate: dicomDate(from: studyDescription),
+            bodyPartExamined: inferredBodyPart(from: studyDescription)
+        )
+    }
+
+    private static func bidsMetadata(for url: URL) -> NIfTIIndexMetadata? {
         let components = url.standardizedFileURL.pathComponents
         guard let subjectIndex = components.firstIndex(where: { $0.hasPrefix("sub-") }) else {
             return nil
@@ -380,12 +428,115 @@ public enum PACSIndexBuilder {
         }
         let studyKey = studyKeyComponents.joined(separator: "/")
         let description = session.map { "\(datasetName) \($0)" } ?? datasetName
-        return (
+        return NIfTIIndexMetadata(
             studyUID: "bids:\(stableHash(for: studyKey))",
             patientID: subject,
             patientName: subject,
-            studyDescription: description
+            accessionNumber: "",
+            studyDescription: description,
+            studyDate: "",
+            bodyPartExamined: ""
         )
+    }
+
+    private static func meaningfulFolderTitle(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        let normalized = trimmed
+            .lowercased()
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+        let generic = [
+            "tmp",
+            "temp",
+            "users",
+            "desktop",
+            "downloads",
+            "documents",
+            "datasets",
+            "dataset",
+            "data",
+            "archive",
+            "archives",
+            "images",
+            "nifti",
+            "nii",
+            "fdg pet ct lesions",
+        ]
+        return generic.contains(normalized) ? "" : trimmed
+    }
+
+    private static func isLikelyPatientFolder(_ candidate: String, studyFolder: String) -> Bool {
+        guard !candidate.isEmpty, candidate != studyFolder else { return false }
+        let lower = candidate.lowercased()
+        if lower.hasPrefix("petct") ||
+            lower.hasPrefix("patient") ||
+            lower.hasPrefix("subject") ||
+            lower.hasPrefix("sub-") ||
+            lower.hasPrefix("case") ||
+            lower.hasPrefix("pt") ||
+            lower.hasPrefix("anon") {
+            return true
+        }
+        if !dicomDate(from: studyFolder).isEmpty {
+            return true
+        }
+        return candidate.rangeOfCharacter(from: .decimalDigits) != nil &&
+            dicomDate(from: candidate).isEmpty
+    }
+
+    private static func dicomDate(from value: String) -> String {
+        if let ymd = firstDateMatch(in: value,
+                                    pattern: #"(?<!\d)(\d{4})[-_]?(\d{2})[-_]?(\d{2})(?!\d)"#,
+                                    order: (0, 1, 2)) {
+            return ymd
+        }
+        return firstDateMatch(in: value,
+                              pattern: #"(?<!\d)(\d{2})[-_](\d{2})[-_](\d{4})(?!\d)"#,
+                              order: (2, 0, 1)) ?? ""
+    }
+
+    private static func firstDateMatch(in value: String,
+                                       pattern: String,
+                                       order: (year: Int, month: Int, day: Int)) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(value.startIndex..<value.endIndex, in: value)
+        guard let match = regex.firstMatch(in: value, range: range),
+              match.numberOfRanges >= 4 else {
+            return nil
+        }
+        let captures = (1..<match.numberOfRanges).compactMap { index -> Int? in
+            guard let swiftRange = Range(match.range(at: index), in: value) else { return nil }
+            return Int(value[swiftRange])
+        }
+        guard captures.count >= 3 else { return nil }
+        return validDICOMDate(year: captures[order.year],
+                              month: captures[order.month],
+                              day: captures[order.day])
+    }
+
+    private static func validDICOMDate(year: Int, month: Int, day: Int) -> String? {
+        guard (1900...2200).contains(year),
+              (1...12).contains(month),
+              (1...31).contains(day) else {
+            return nil
+        }
+        return String(format: "%04d%02d%02d", year, month, day)
+    }
+
+    private static func inferredBodyPart(from value: String) -> String {
+        let lower = value.lowercased()
+        if lower.contains("brain") { return "BRAIN" }
+        if lower.contains("head") { return "HEAD" }
+        if lower.contains("chest") { return "CHEST" }
+        if lower.contains("abd") { return "ABDOMEN" }
+        if lower.contains("pelvis") { return "PELVIS" }
+        if lower.contains("whole") || lower.contains(" wb") || lower.contains("body") {
+            return "WHOLEBODY"
+        }
+        return ""
     }
 
     private static func stableHash(for value: String) -> String {

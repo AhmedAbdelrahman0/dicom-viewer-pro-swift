@@ -80,6 +80,11 @@ public struct DicomViewerApp: App {
                         NotificationCenter.default.post(name: .toggleFocusMode, object: nil)
                     }
                     .keyboardShortcut("e", modifiers: [.command])
+
+                    Button("Image Details Overlay") {
+                        NotificationCenter.default.post(name: .toggleImageStudyDetailsOverlay, object: nil)
+                    }
+                    .keyboardShortcut("i", modifiers: [.command])
                 }
 
                 CommandMenu("Labels") {
@@ -223,5 +228,6 @@ extension Notification.Name {
     public static let resetEditableChanges = Notification.Name("Tracer.resetEditableChanges")
     public static let toggleLinkedZoomPan = Notification.Name("Tracer.toggleLinkedZoomPan")
     public static let toggleFocusMode = Notification.Name("Tracer.toggleFocusMode")
+    public static let toggleImageStudyDetailsOverlay = Notification.Name("Tracer.toggleImageStudyDetailsOverlay")
     public static let showEngineInspector = Notification.Name("Tracer.showEngineInspector")
 }

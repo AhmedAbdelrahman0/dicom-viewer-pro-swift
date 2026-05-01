@@ -49,12 +49,13 @@ final class GeometryAndIOTests: XCTestCase {
                                      modality: String,
                                      seriesDescription: String,
                                      studyDescription: String = "FDG PET/CT",
-                                     studyDate: String = "20260426") -> PACSIndexedSeriesSnapshot {
+                                     studyDate: String = "20260426",
+                                     studyUID: String = "NIFTI_STUDY") -> PACSIndexedSeriesSnapshot {
         PACSIndexedSeriesSnapshot(
             id: "nifti:\(path)",
             kind: .nifti,
             seriesUID: "nifti:\(path)",
-            studyUID: "NIFTI_STUDY",
+            studyUID: studyUID,
             modality: modality,
             patientID: "NIFTI_Import",
             patientName: "NIfTI Import",
@@ -1060,6 +1061,24 @@ final class GeometryAndIOTests: XCTestCase {
     }
 
     @MainActor
+    func testViewerDefaultsAxialDisplayToAnteriorTopPosteriorBottom() {
+        let vm = ViewerViewModel()
+        let volume = ImageVolume(
+            pixels: [Float](repeating: 0, count: 8),
+            depth: 2,
+            height: 2,
+            width: 2,
+            direction: matrix_identity_double3x3
+        )
+        vm.displayVolume(volume)
+
+        let axes = vm.displayAxes(for: 2, volume: volume)
+        XCTAssertEqual(SliceDisplayTransform.patientLetter(for: -(axes?.down ?? .zero)), "A")
+        XCTAssertEqual(SliceDisplayTransform.patientLetter(for: axes?.down ?? .zero), "P")
+        XCTAssertFalse(vm.correctAnteriorPosteriorDisplay)
+    }
+
+    @MainActor
     func testViewerAPCorrectionCanBeToggledForDisplayOnly() {
         let vm = ViewerViewModel()
         let volume = ImageVolume(
@@ -1071,10 +1090,10 @@ final class GeometryAndIOTests: XCTestCase {
         )
         vm.displayVolume(volume)
 
-        XCTAssertTrue(vm.displayTransform(for: 2).flipVertical)
-
-        vm.correctAnteriorPosteriorDisplay = false
         XCTAssertFalse(vm.displayTransform(for: 2).flipVertical)
+
+        vm.correctAnteriorPosteriorDisplay = true
+        XCTAssertTrue(vm.displayTransform(for: 2).flipVertical)
     }
 
     @MainActor
@@ -1096,7 +1115,7 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(vm.appUndoDepth, 1)
 
         vm.undoLastEdit()
-        XCTAssertTrue(vm.correctAnteriorPosteriorDisplay)
+        XCTAssertFalse(vm.correctAnteriorPosteriorDisplay)
         XCTAssertFalse(vm.correctRightLeftDisplay)
 
         vm.redoLastEdit()
@@ -1333,6 +1352,67 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(reloaded.spacing.z, 4, accuracy: 1e-6)
     }
 
+    func testNIfTIHeaderSummaryCountsSlicesForIndexedSeries() throws {
+        let volume = ImageVolume(
+            pixels: [Float](repeating: 1, count: 3 * 4 * 7),
+            depth: 7,
+            height: 4,
+            width: 3,
+            modality: "CT",
+            seriesDescription: "CTres"
+        )
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("slice-count-\(UUID().uuidString).nii")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try NIfTIWriter.write(volume, to: url)
+
+        let summary = try NIfTILoader.headerSummary(url)
+        XCTAssertEqual(summary.width, 3)
+        XCTAssertEqual(summary.height, 4)
+        XCTAssertEqual(summary.depth, 7)
+        XCTAssertEqual(summary.frameCount, 1)
+        XCTAssertEqual(summary.imageCount, 7)
+        XCTAssertEqual(PACSIndexBuilder.snapshotForNIfTI(url: url).instanceCount, 7)
+    }
+
+    func testCompressedNIfTIHeaderSummaryCountsSlicesWithoutFullLoad() throws {
+        let volume = ImageVolume(
+            pixels: [Float](repeating: 2, count: 2 * 3 * 5),
+            depth: 5,
+            height: 3,
+            width: 2,
+            modality: "PT",
+            seriesDescription: "SUV"
+        )
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("slice-count-\(UUID().uuidString).nii")
+        let gzURL = URL(fileURLWithPath: url.path + ".gz")
+        defer {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(at: gzURL)
+        }
+
+        try NIfTIWriter.write(volume, to: url)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/gzip")
+        process.arguments = ["-c", url.path]
+        let output = Pipe()
+        process.standardOutput = output
+        try process.run()
+        let gzData = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+        try gzData.write(to: gzURL)
+
+        let summary = try NIfTILoader.headerSummary(gzURL)
+        XCTAssertEqual(summary.width, 2)
+        XCTAssertEqual(summary.height, 3)
+        XCTAssertEqual(summary.depth, 5)
+        XCTAssertEqual(summary.imageCount, 5)
+        XCTAssertEqual(PACSIndexBuilder.snapshotForNIfTI(url: gzURL).instanceCount, 5)
+    }
+
     func testCompressedDICOMTransferSyntaxFailsBeforePixelRead() {
         let dcm = DICOMFile()
         dcm.rows = 1
@@ -1383,6 +1463,8 @@ final class GeometryAndIOTests: XCTestCase {
         data.appendDICOMElement(group: 0x0002, element: 0x0010, vr: "UI", string: "1.2.840.10008.1.2.1")
         data.appendDICOMElement(group: 0x0020, element: 0x000D, vr: "UI", string: "study-prefix")
         data.appendDICOMElement(group: 0x0020, element: 0x000E, vr: "UI", string: "series-prefix")
+        data.appendDICOMElement(group: 0x0020, element: 0x0011, vr: "IS", string: "7")
+        data.appendDICOMElement(group: 0x0020, element: 0x0013, vr: "IS", string: "42")
         data.appendDICOMElement(group: 0x0008, element: 0x0060, vr: "CS", string: "CT")
         data.appendDICOMElement(group: 0x0008, element: 0x0018, vr: "UI", string: "sop-prefix")
         data.appendDICOMElement(group: 0x0028, element: 0x0010, vr: "US", uint16: 2)
@@ -1404,11 +1486,16 @@ final class GeometryAndIOTests: XCTestCase {
 
         let dcm = try DICOMLoader.parseHeader(at: url)
         XCTAssertGreaterThan(dcm.pixelDataOffset, 262_144)
+        XCTAssertEqual(dcm.seriesNumber, 7)
+        XCTAssertEqual(dcm.instanceNumber, 42)
 
         let volume = try DICOMLoader.loadSeries([dcm])
         XCTAssertEqual(volume.width, 2)
         XCTAssertEqual(volume.height, 2)
         XCTAssertEqual(volume.pixels, [10, 20, 30, 40])
+        XCTAssertEqual(volume.seriesNumber, 7)
+        XCTAssertEqual(volume.sourceImageCount, 1)
+        XCTAssertEqual(volume.sourceImageNumber(forSliceIndex: 0), 42)
     }
 
     func testPACSIndexBuilderCreatesDICOMSearchableSnapshot() {
@@ -1515,6 +1602,36 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(studies[0].status, .flagged)
         XCTAssertTrue(studies[0].matches(searchText: "acc-1", statusFilter: .flagged, modalityFilter: "PET", dateFilter: .all))
         XCTAssertFalse(studies[0].matches(searchText: "", statusFilter: .complete, modalityFilter: "All", dateFilter: .all))
+    }
+
+    func testPACSWorklistStudyOrderingIsStableForTiedRows() {
+        let paths = [
+            "/archive/patient-c/2026-04-21/CT.nii.gz",
+            "/archive/patient-a/2026-04-21/CT.nii.gz",
+            "/archive/patient-b/2026-04-21/CT.nii.gz",
+        ]
+        let snapshots = paths.map {
+            makeIndexedSnapshot(
+                path: $0,
+                modality: "CT",
+                seriesDescription: "CT",
+                studyDescription: "PET CT",
+                studyDate: "20260421"
+            )
+        }
+
+        let ordered = PACSWorklistStudy.grouped(from: snapshots).map(\.id)
+        let reversed = PACSWorklistStudy.grouped(from: snapshots.reversed()).map(\.id)
+
+        XCTAssertEqual(ordered, reversed)
+        XCTAssertEqual(
+            ordered,
+            [
+                "nifti-folder:/archive/patient-a/2026-04-21",
+                "nifti-folder:/archive/patient-b/2026-04-21",
+                "nifti-folder:/archive/patient-c/2026-04-21",
+            ]
+        )
     }
 
     func testPACSDirectoryIndexerDeduplicatesLargeStudyFolders() throws {
@@ -2156,6 +2273,39 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertThrowsError(try RadiomicsExtractor.extract(
             volume: volume, mask: mask, classID: 1, bounds: bounds
         ))
+    }
+
+    func testRadiomicsExtractorAppliesSUVTransform() throws {
+        let volume = ImageVolume(
+            pixels: [0, 2, 4, 8],
+            depth: 1,
+            height: 2,
+            width: 2,
+            spacing: (1, 1, 1),
+            modality: "PT"
+        )
+        let mask = LabelMap(parentSeriesUID: volume.seriesUID,
+                            depth: 1, height: 2, width: 2)
+        mask.setValue(1, z: 0, y: 1, x: 0)
+        mask.setValue(1, z: 0, y: 1, x: 1)
+        let bounds = MONAITransforms.VoxelBounds(
+            minZ: 0, maxZ: 0,
+            minY: 1, maxY: 1,
+            minX: 0, maxX: 1
+        )
+
+        let features = try RadiomicsExtractor.extract(
+            volume: volume,
+            mask: mask,
+            classID: 1,
+            bounds: bounds,
+            valueTransform: { $0 * 0.5 }
+        )
+
+        XCTAssertEqual(features["original_firstorder_Mean"] ?? 0,
+                       3, accuracy: 1e-6)
+        XCTAssertEqual(features["original_firstorder_Maximum"] ?? 0,
+                       4, accuracy: 1e-6)
     }
 
     func testTreeModelScoresWithAggregation() throws {
@@ -2802,6 +2952,110 @@ final class GeometryAndIOTests: XCTestCase {
     }
 
     @MainActor
+    func testActiveLabelExportsEveryAdvertisedFormat() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracer-label-export-formats-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let volume = ImageVolume(
+            pixels: [Float](repeating: 0, count: 3 * 3 * 2),
+            depth: 2,
+            height: 3,
+            width: 3,
+            spacing: (1.2, 1.3, 2.5),
+            modality: "CT",
+            seriesUID: "1.2.826.0.1.3680043.10.543.100",
+            studyUID: "1.2.826.0.1.3680043.10.543.200",
+            patientID: "FORMAT",
+            patientName: "Format^Patient",
+            seriesDescription: "CT"
+        )
+        let labeling = LabelingViewModel()
+        let map = labeling.createLabelMap(
+            for: volume,
+            presetSet: LabelPresetSet(
+                name: "Formats",
+                description: "",
+                classes: [LabelClass(labelID: 1, name: "Tumor", category: .lesion, color: .orange)]
+            )
+        )
+        map.setValue(1, z: 0, y: 1, x: 1)
+        map.setValue(1, z: 1, y: 1, x: 1)
+
+        for format in LabelIO.Format.allCases {
+            let ext = format.fileExtensions.first ?? "dat"
+            let safeName = format.id
+                .replacingOccurrences(of: " ", with: "-")
+                .replacingOccurrences(of: "/", with: "-")
+            let url = root.appendingPathComponent("labels-\(safeName).\(ext)")
+            XCTAssertNoThrow(try labeling.saveActiveLabel(to: url,
+                                                          format: format,
+                                                          parentVolume: volume,
+                                                          annotations: []),
+                             "Expected \(format.rawValue) export to write without throwing")
+            XCTAssertTrue(FileManager.default.fileExists(atPath: url.path),
+                          "Expected \(format.rawValue) export file to exist")
+        }
+    }
+
+    func testDICOMSEGExportWritesSegmentationObject() throws {
+        let volume = makeTestVolume(modality: "CT", description: "CT", width: 3, height: 2, depth: 2)
+        let map = LabelMap(
+            parentSeriesUID: volume.seriesUID,
+            depth: volume.depth,
+            height: volume.height,
+            width: volume.width,
+            name: "Lesions",
+            classes: [LabelClass(labelID: 1, name: "Tumor", category: .lesion, color: .orange)]
+        )
+        map.setValue(1, z: 0, y: 0, x: 1)
+        map.setValue(1, z: 1, y: 1, x: 2)
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracer-seg-\(UUID().uuidString).dcm")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try DICOMSegIO.saveDICOMSEG(map, parentVolume: volume, to: url)
+
+        let header = try DICOMLoader.parseHeader(at: url)
+        XCTAssertEqual(header.modality, "SEG")
+        XCTAssertEqual(header.rows, 2)
+        XCTAssertEqual(header.columns, 3)
+        XCTAssertEqual(header.bitsAllocated, 1)
+        XCTAssertGreaterThan(header.pixelDataLength, 0)
+        XCTAssertEqual(header.seriesDescription, "Lesions DICOM SEG")
+    }
+
+    func testRTSTRUCTExportRoundTripsContours() throws {
+        let volume = makeTestVolume(modality: "CT", description: "CT", width: 3, height: 3, depth: 1)
+        let map = LabelMap(
+            parentSeriesUID: volume.seriesUID,
+            depth: volume.depth,
+            height: volume.height,
+            width: volume.width,
+            name: "RT Lesions",
+            classes: [LabelClass(labelID: 1, name: "Tumor", category: .lesion, color: .orange)]
+        )
+        map.setValue(1, z: 0, y: 0, x: 0)
+        map.setValue(1, z: 0, y: 0, x: 1)
+        map.setValue(1, z: 0, y: 1, x: 0)
+        map.setValue(1, z: 0, y: 1, x: 1)
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracer-rtstruct-\(UUID().uuidString).dcm")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try RTStructIO.saveRTStruct(map, parentVolume: volume, to: url)
+
+        let header = try DICOMLoader.parseHeader(at: url)
+        XCTAssertEqual(header.modality, "RTSTRUCT")
+        XCTAssertEqual(header.seriesDescription, "RT Lesions RTSTRUCT")
+        let loaded = try RTStructIO.loadRTStruct(from: url, referenceVolume: volume)
+        XCTAssertEqual(loaded.classes.first?.name, "Tumor")
+        XCTAssertEqual(loaded.value(z: 0, y: 0, x: 0), 1)
+        XCTAssertEqual(loaded.value(z: 0, y: 1, x: 1), 1)
+    }
+
+    @MainActor
     func testLabelUndoRedoRestoresVoxelEdits() {
         let volume = ImageVolume(
             pixels: [0, 0, 0, 0],
@@ -3201,6 +3455,66 @@ final class GeometryAndIOTests: XCTestCase {
         let studies = PACSWorklistStudy.grouped(from: [seriesA, seriesB])
         XCTAssertEqual(studies.count, 2,
                        "Each directory-scoped series should surface as its own worklist study")
+    }
+
+    func testNonBIDSNIfTIWorklistGroupsAllChannelsByStudyFolder() {
+        let folder = "/dataset/FDG-PET-CT-Lesions/PETCT_1fcfa34d10/09-19-2003-NA-PET-CT"
+        let series = [
+            makeIndexedSnapshot(path: "\(folder)/CT.nii.gz",
+                                modality: "CT",
+                                seriesDescription: "CT",
+                                studyUID: "legacy-ct"),
+            makeIndexedSnapshot(path: "\(folder)/CTres.nii.gz",
+                                modality: "CT",
+                                seriesDescription: "CTres",
+                                studyUID: "legacy-ctres"),
+            makeIndexedSnapshot(path: "\(folder)/PET.nii.gz",
+                                modality: "PT",
+                                seriesDescription: "PET",
+                                studyUID: "legacy-pet"),
+            makeIndexedSnapshot(path: "\(folder)/SUV.nii.gz",
+                                modality: "PT",
+                                seriesDescription: "SUV",
+                                studyUID: "legacy-suv"),
+            makeIndexedSnapshot(path: "\(folder)/SEG.nii.gz",
+                                modality: "SEG",
+                                seriesDescription: "SEG",
+                                studyUID: "legacy-seg"),
+        ]
+
+        let studies = PACSWorklistStudy.grouped(from: series)
+
+        XCTAssertEqual(studies.count, 1)
+        XCTAssertEqual(studies[0].seriesCount, 5)
+        XCTAssertEqual(studies[0].modalities, ["CT", "PET", "SEG"])
+        XCTAssertEqual(studies[0].preferredAnatomicalSeriesForPETCT?.seriesDescription, "CTres")
+        XCTAssertEqual(studies[0].preferredPETSeriesForPETCT?.seriesDescription, "SUV")
+    }
+
+    func testNIfTIIndexBuilderDerivesDICOMLikeHierarchyFromFolders() {
+        let folder = "/dataset/FDG-PET-CT-Lesions/PETCT_1fcfa34d10/09-19-2003-NA-PET-CT WholeBody"
+        let ct = PACSIndexBuilder.snapshotForNIfTI(
+            url: URL(fileURLWithPath: "\(folder)/CTres.nii.gz"),
+            indexedAt: Date(timeIntervalSince1970: 0)
+        )
+        let suv = PACSIndexBuilder.snapshotForNIfTI(
+            url: URL(fileURLWithPath: "\(folder)/SUV.nii.gz"),
+            indexedAt: Date(timeIntervalSince1970: 0)
+        )
+
+        XCTAssertEqual(ct.patientID, "PETCT_1fcfa34d10")
+        XCTAssertEqual(ct.patientName, "PETCT_1fcfa34d10")
+        XCTAssertEqual(ct.studyDescription, "09-19-2003-NA-PET-CT WholeBody")
+        XCTAssertEqual(ct.studyDate, "20030919")
+        XCTAssertEqual(ct.bodyPartExamined, "WHOLEBODY")
+        XCTAssertTrue(ct.studyUID.hasPrefix("nifti-study:"))
+        XCTAssertEqual(ct.studyUID, suv.studyUID)
+        XCTAssertEqual(ct.accessionNumber, suv.accessionNumber)
+
+        let study = PACSWorklistStudy.grouped(from: [ct, suv]).first
+        XCTAssertEqual(study?.patientID, "PETCT_1fcfa34d10")
+        XCTAssertEqual(study?.seriesCount, 2)
+        XCTAssertEqual(study?.modalities, ["CT", "PET"])
     }
 
     func testPETCTWorklistPrefersResampledCTAndSUVNIfTIChannels() {
@@ -4224,6 +4538,16 @@ final class GeometryAndIOTests: XCTestCase {
         annotation.value = 2
         annotation.unit = "mm"
         vm.addAnnotation(annotation)
+        var editedAnnotation = annotation
+        editedAnnotation.value = 3
+        editedAnnotation.label = "Updated caliper"
+        XCTAssertTrue(vm.updateAnnotation(editedAnnotation))
+        XCTAssertEqual(vm.annotations.first?.value, 3)
+        XCTAssertEqual(vm.annotations.first?.label, "Updated caliper")
+        vm.undoLastEdit()
+        XCTAssertEqual(vm.annotations.first?.value, 2)
+        vm.redoLastEdit()
+        XCTAssertEqual(vm.annotations.first?.value, 3)
         XCTAssertTrue(vm.deleteAnnotation(id: annotation.id))
         XCTAssertTrue(vm.annotations.isEmpty)
         vm.undoLastEdit()
@@ -4355,10 +4679,24 @@ final class GeometryAndIOTests: XCTestCase {
             tlg: 0.005,
             thresholdSummary: "Active label"
         )
+        let radiomics = RadiomicsFeatureReport(
+            source: .petSUV,
+            sourceVolumeIdentity: volume.sessionIdentity,
+            sourceDescription: "PET",
+            classID: 1,
+            className: "Tumor",
+            bounds: MONAITransforms.VoxelBounds(
+                minZ: 1, maxZ: 1,
+                minY: 1, maxY: 1,
+                minX: 1, maxX: 1
+            ),
+            features: ["original_firstorder_Maximum": 5]
+        )
         let session = StudyMeasurementSession(
             name: "Reader A",
             annotations: [annotation],
             volumeReports: [report],
+            radiomicsReports: [radiomics],
             labelMaps: [StudySessionLabelMap(map)],
             metadata: ["intent": "staging"]
         )
@@ -4376,10 +4714,147 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(loaded.sessions.count, 1)
         XCTAssertEqual(loaded.sessions[0].annotations.first?.value, 3)
         XCTAssertEqual(loaded.sessions[0].volumeReports.first?.suvMax, 5)
+        XCTAssertEqual(loaded.sessions[0].radiomicsReports.first?.features["original_firstorder_Maximum"], 5)
         XCTAssertEqual(loaded.sessions[0].metadata["intent"], "staging")
         let restoredMap = try XCTUnwrap(loaded.sessions[0].labelMaps.first?.makeLabelMap())
         XCTAssertEqual(restoredMap.value(z: 1, y: 1, x: 1), 1)
         XCTAssertEqual(restoredMap.classInfo(id: 1)?.name, "Tumor")
+    }
+
+    func testLabelDataExportReportIncludesClassCountsVoxelsAndMetrics() throws {
+        let volume = makeTestVolume(
+            modality: "PT",
+            description: "PET",
+            width: 3,
+            height: 2,
+            depth: 1,
+            spacing: (2, 3, 4)
+        )
+        let map = LabelMap(
+            parentSeriesUID: volume.seriesUID,
+            depth: volume.depth,
+            height: volume.height,
+            width: volume.width,
+            name: "Lesions",
+            classes: [LabelClass(labelID: 1, name: "Tumor", category: .lesion, color: .orange)]
+        )
+        map.setValue(1, z: 0, y: 0, x: 1)
+        map.setValue(1, z: 0, y: 1, x: 1)
+        let volumeReport = VolumeMeasurementReport(
+            source: .petSUV,
+            method: .activeLabel,
+            className: "Tumor",
+            voxelCount: 2,
+            volumeMM3: 48,
+            mean: 4,
+            min: 3,
+            max: 5,
+            std: 1,
+            suvMax: 5,
+            suvMean: 4,
+            suvPeak: 5,
+            tlg: 0.192,
+            thresholdSummary: "Active label"
+        )
+        let radiomics = RadiomicsFeatureReport(
+            source: .petSUV,
+            sourceVolumeIdentity: volume.sessionIdentity,
+            sourceDescription: "PET",
+            classID: 1,
+            className: "Tumor",
+            bounds: MONAITransforms.VoxelBounds(
+                minZ: 0, maxZ: 0,
+                minY: 0, maxY: 1,
+                minX: 1, maxX: 1
+            ),
+            features: ["original_firstorder_Mean": 4]
+        )
+        var annotation = Annotation(
+            type: .distance,
+            points: [CGPoint(x: 0, y: 0), CGPoint(x: 2, y: 0)],
+            axis: 2,
+            sliceIndex: 0
+        )
+        annotation.value = 12
+        annotation.unit = "mm"
+        annotation.label = "Target lesion diameter"
+
+        let export = LabelDataExportReport(
+            labelMap: map,
+            parentVolume: volume,
+            activeVolumeReport: volumeReport,
+            activeRadiomicsReport: radiomics,
+            annotations: [annotation]
+        )
+
+        XCTAssertEqual(export.classes.first?.voxelCount, 2)
+        XCTAssertEqual(export.classes.first?.volumeML ?? 0, 0.048, accuracy: 1e-9)
+        XCTAssertEqual(export.annotations.first?.label, "Target lesion diameter")
+        XCTAssertFalse(export.voxelsRLE.isEmpty)
+        let csv = String(data: export.csvData, encoding: .utf8) ?? ""
+        XCTAssertTrue(csv.contains("suv_max"))
+        XCTAssertTrue(csv.contains("5.000000"))
+        XCTAssertTrue(csv.contains("annotation_id"))
+        XCTAssertTrue(csv.contains("Target lesion diameter"))
+        let tsv = String(data: export.tsvData, encoding: .utf8) ?? ""
+        XCTAssertTrue(tsv.contains("map_name\tsource_series"))
+        XCTAssertTrue(tsv.contains("Target lesion diameter"))
+        let xml = String(data: export.xmlData, encoding: .utf8) ?? ""
+        XCTAssertTrue(xml.contains("<labelData"))
+        XCTAssertTrue(xml.contains("Target lesion diameter"))
+        XCTAssertTrue(xml.contains("original_firstorder_Mean"))
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(LabelDataExportReport.self, from: try export.jsonData())
+        XCTAssertEqual(decoded.classes.first?.name, "Tumor")
+        XCTAssertEqual(decoded.annotations.first?.label, "Target lesion diameter")
+        XCTAssertEqual(decoded.activeRadiomicsReport?.featureCount, 1)
+    }
+
+    @MainActor
+    func testEditedAnnotationsStayWithStudySessionAndLabelDataExport() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracer-edited-annotations-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let volume = makeTestVolume(modality: "CT", description: "CT", width: 2, height: 2, depth: 1)
+        let vm = ViewerViewModel(studySessionStore: StudySessionStore(rootURL: root))
+        vm.displayVolume(volume)
+
+        var annotation = Annotation(
+            type: .distance,
+            points: [CGPoint(x: 0, y: 0), CGPoint(x: 1, y: 0)],
+            axis: 2,
+            sliceIndex: 0
+        )
+        annotation.value = 1
+        vm.addAnnotation(annotation)
+
+        var edited = annotation
+        edited.value = 1.5
+        edited.label = "Avid lesion caliper"
+        XCTAssertTrue(vm.updateAnnotation(edited))
+
+        let map = vm.labeling.createLabelMap(
+            for: volume,
+            presetSet: LabelPresetSet(
+                name: "Lesions",
+                description: "",
+                classes: [LabelClass(labelID: 1, name: "Lesion", category: .lesion, color: .orange)]
+            )
+        )
+        map.setValue(1, z: 0, y: 0, x: 0)
+        vm.saveCurrentStudySession(named: "Reader annotations")
+
+        XCTAssertEqual(vm.activeStudySession?.annotations.first?.label, "Avid lesion caliper")
+        XCTAssertEqual(vm.activeStudySession?.annotations.first?.value, 1.5)
+
+        let export = try XCTUnwrap(vm.activeLabelDataExportReport())
+        XCTAssertEqual(export.annotations.first?.label, "Avid lesion caliper")
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(LabelDataExportReport.self, from: try export.jsonData())
+        XCTAssertEqual(decoded.annotations.first?.value, 1.5)
     }
 
     func testSegmentationRunRegistryRoundTripsByStudy() throws {
@@ -6020,6 +6495,23 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertFalse(LabelingTool.lesionSphere.helpText.isEmpty)
     }
 
+    @MainActor
+    func testPETLabelingToolRadiiAreUserAdjustable() {
+        let labeling = LabelingViewModel()
+
+        XCTAssertEqual(labeling.percentOfMaxSearchRadius, 30)
+        labeling.percentOfMaxSearchRadius = 80
+        XCTAssertEqual(labeling.percentOfMaxSearchRadius, 80)
+
+        XCTAssertEqual(labeling.gradientSearchRadius, 30)
+        labeling.gradientSearchRadius = 90
+        XCTAssertEqual(labeling.gradientSearchRadius, 90)
+
+        XCTAssertEqual(labeling.lesionSphereRadiusMM, 8.0, accuracy: 1e-9)
+        labeling.lesionSphereRadiusMM = 12.5
+        XCTAssertEqual(labeling.lesionSphereRadiusMM, 12.5, accuracy: 1e-9)
+    }
+
     // MARK: - Lesion detection module
 
     func testLesionDetectorCatalogExposesEveryBackend() {
@@ -6570,6 +7062,43 @@ final class GeometryAndIOTests: XCTestCase {
     }
 
     @MainActor
+    func testActivePETRadiomicsUsesSUVScalingAndPersistsToSession() throws {
+        let sessionRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracer-radiomics-session-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: sessionRoot) }
+        let pet = ImageVolume(
+            pixels: [0, 2, 4, 8],
+            depth: 1, height: 2, width: 2,
+            spacing: (1, 1, 1),
+            modality: "PT",
+            seriesDescription: "PET",
+            suvScaleFactor: 0.5
+        )
+        let vm = ViewerViewModel(
+            studySessionStore: StudySessionStore(rootURL: sessionRoot)
+        )
+        vm.displayVolume(pet)
+        vm.suvSettings.mode = .storedSUV
+        let map = vm.labeling.createLabelMap(
+            for: pet,
+            presetSet: LabelPresetSet(
+                name: "Test",
+                description: "",
+                classes: [LabelClass(labelID: 1, name: "Lesion", category: .lesion, color: .orange)]
+            )
+        )
+        map.setValue(1, z: 0, y: 1, x: 0)
+        map.setValue(1, z: 0, y: 1, x: 1)
+
+        let report = try XCTUnwrap(vm.extractActiveRadiomics(preferPET: true))
+
+        XCTAssertEqual(report.source, .petSUV)
+        XCTAssertEqual(report.features["original_firstorder_Mean"] ?? 0, 3, accuracy: 1e-6)
+        XCTAssertEqual(report.features["original_firstorder_Maximum"] ?? 0, 4, accuracy: 1e-6)
+        XCTAssertEqual(vm.activeStudySession?.radiomicsReports.first?.id, report.id)
+    }
+
+    @MainActor
     func testPETMIPProjectionBuildsAsynchronouslyAndCaches() async throws {
         let pet = ImageVolume(
             pixels: [
@@ -6614,6 +7143,9 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(vm.petMIPRotationDegrees, 270, accuracy: 0.0001)
 
         vm.previewPETMIPRotationDegrees(365)
+        XCTAssertEqual(vm.petMIPRotationDegrees, 5, accuracy: 0.0001)
+
+        vm.previewPETMIPRotationDegrees(367)
         XCTAssertEqual(vm.petMIPRotationDegrees, 5, accuracy: 0.0001)
 
         vm.previewPETMIPRotationDegrees(720)
@@ -6677,6 +7209,33 @@ final class GeometryAndIOTests: XCTestCase {
         let image = try XCTUnwrap(vm.cachedPETMIPImage(for: SlicePlane.coronal.axis))
         XCTAssertEqual(image.height, pet.depth)
         XCTAssertFalse(vm.isPETMIPProjectionPending(for: SlicePlane.coronal.axis))
+    }
+
+    @MainActor
+    func testPETMIPCinePreparesFiveDegreeFramesAcrossFullCircle() async throws {
+        let voxelCount = 4 * 4 * 4
+        let pixels = (0..<voxelCount).map { value -> Float in
+            Float((value * 5) % 23)
+        }
+        let pet = ImageVolume(pixels: pixels,
+                              depth: 4,
+                              height: 4,
+                              width: 4,
+                              modality: "PT",
+                              seriesDescription: "PET")
+        let vm = ViewerViewModel()
+        vm.displayVolume(pet)
+        vm.preparePETMIPCine(for: SlicePlane.coronal.axis)
+
+        for _ in 0..<300 where !vm.isPETMIPCineReady(for: SlicePlane.coronal.axis) {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertTrue(vm.isPETMIPCineReady(for: SlicePlane.coronal.axis))
+        for angle in stride(from: 0.0, to: 360.0, by: ViewerViewModel.petMIPRotationStepDegrees) {
+            XCTAssertTrue(vm.isPETMIPRenderedFrameReady(for: SlicePlane.coronal.axis, rotationDegrees: angle),
+                          "Missing PET MIP cine frame at \(angle) degrees")
+        }
     }
 
     @MainActor
@@ -7674,7 +8233,7 @@ final class GeometryAndIOTests: XCTestCase {
         }
     }
 
-    func testPETACMakeACVolumePreservesGeometryAndAssignsFreshSeriesUID() {
+    func testPETACMakeACVolumePreservesGeometryAndAssignsFreshSeriesUID() throws {
         let nac = ImageVolume(
             pixels: (0..<8).map { Float($0) },
             depth: 2, height: 2, width: 2,
@@ -7691,9 +8250,9 @@ final class GeometryAndIOTests: XCTestCase {
             sourceFiles: ["/tmp/nac-pet.dcm"]
         )
         let acPixels: [Float] = (0..<8).map { Float($0) * 2 }
-        let ac = PETACUtilities.makeACVolume(from: acPixels,
-                                             sourceNAC: nac,
-                                             correctorID: "deep-ac-test")
+        let ac = try PETACUtilities.makeACVolume(from: acPixels,
+                                                 sourceNAC: nac,
+                                                 correctorID: "deep-ac-test")
         XCTAssertEqual(ac.depth, nac.depth)
         XCTAssertEqual(ac.height, nac.height)
         XCTAssertEqual(ac.width, nac.width)
@@ -7710,6 +8269,29 @@ final class GeometryAndIOTests: XCTestCase {
                       "Derived AC PET must not reuse NAC source files or the viewer can deduplicate it away.")
         XCTAssertTrue(ac.seriesDescription.contains("AC"))
         XCTAssertTrue(ac.seriesDescription.contains("deep-ac-test"))
+    }
+
+    func testPETACMakeACVolumeRejectsMismatchedPixelCount() {
+        let nac = ImageVolume(
+            pixels: [Float](repeating: 0, count: 8),
+            depth: 2,
+            height: 2,
+            width: 2,
+            modality: "PT",
+            seriesUID: "1.2.3.original"
+        )
+
+        XCTAssertThrowsError(
+            try PETACUtilities.makeACVolume(from: [1, 2, 3],
+                                            sourceNAC: nac,
+                                            correctorID: "deep-ac-test")
+        ) { error in
+            guard case PETACError.outputGridMismatch(let message) = error else {
+                return XCTFail("Expected PETACError.outputGridMismatch, got \(error)")
+            }
+            XCTAssertTrue(message.contains("3 voxels"))
+            XCTAssertTrue(message.contains("8"))
+        }
     }
 
     func testSubprocessACComposesPython3LaunchArguments() {

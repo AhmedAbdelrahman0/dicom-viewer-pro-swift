@@ -171,7 +171,7 @@ public final class RemotePETACCorrector: PETAttenuationCorrector, @unchecked Sen
             )
         }
 
-        let outVolume = PETACUtilities.makeACVolume(
+        let outVolume = try PETACUtilities.makeACVolume(
             from: acVolume.pixels,
             sourceNAC: nacPET,
             correctorID: id

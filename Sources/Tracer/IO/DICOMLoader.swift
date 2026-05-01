@@ -206,8 +206,14 @@ public enum DICOMLoader {
             studyUID: first.studyInstanceUID,
             patientID: first.patientID,
             patientName: first.patientName,
+            accessionNumber: first.accessionNumber,
+            studyDate: first.studyDate,
+            studyTime: first.studyTime,
+            bodyPartExamined: first.bodyPartExamined,
             seriesDescription: first.seriesDescription,
             studyDescription: first.studyDescription,
+            seriesNumber: first.seriesNumber,
+            sourceSliceInstanceNumbers: sorted.map(\.instanceNumber),
             sourceFiles: sorted.map(\.filePath)
         )
     }
@@ -677,9 +683,13 @@ public struct DICOMSeries: Identifiable, Sendable {
     public var bodyPartExamined: String = ""
     public var files: [DICOMFile]
     public var instanceCount: Int { files.count }
+    public var seriesNumber: Int {
+        files.first(where: { $0.seriesNumber > 0 })?.seriesNumber ?? 0
+    }
 
     public var displayName: String {
-        "\(modality) - \(description.isEmpty ? "Series" : description) (\(instanceCount))"
+        let number = seriesNumber > 0 ? " #\(seriesNumber)" : ""
+        return "\(modality) - \(description.isEmpty ? "Series" : description)\(number) (\(instanceCount))"
     }
 }
 

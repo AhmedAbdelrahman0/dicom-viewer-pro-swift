@@ -58,6 +58,7 @@ public struct ContentView: View {
     /// viewport fills the window. Toggled via ⌘E or the toolbar button.
     /// Persists across launches via `@AppStorage`.
     @AppStorage("focusModeEnabled") private var focusModeEnabled = false
+    @AppStorage("Tracer.Prefs.ImageDetailsOverlay") private var showImageStudyDetailsOverlay = true
     @State private var browserVisibility: NavigationSplitViewVisibility = .all
 
     // User-rebindable W/L preset names for ⌘1 / ⌘2 / ⌘3. Defaults are set
@@ -223,8 +224,7 @@ public struct ContentView: View {
             showingDirectoryPicker = true
         }
         .onReceive(NotificationCenter.default.publisher(for: .openNIfTIFile)) { _ in
-            fileImporterMode = .volume
-            showingFileImporter = true
+            requestFileImport(mode: .volume)
         }
         .onReceive(NotificationCenter.default.publisher(for: .showAboutWindow)) { _ in
             showAboutWindow = true
@@ -235,6 +235,9 @@ public struct ContentView: View {
         .modifier(TracerMenuCommandHandler(vm: vm,
                                            toggleFocusMode: toggleFocusMode,
                                            showEngineInspector: showEngineInspector(named:)))
+        .onReceive(NotificationCenter.default.publisher(for: .toggleImageStudyDetailsOverlay)) { _ in
+            toggleImageStudyDetailsOverlay()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .recentVolumesDidChange)) { _ in
             vm.reloadRecentVolumes()
         }
@@ -326,12 +329,10 @@ public struct ContentView: View {
                                  showingDirectoryPicker = true
                              },
                              onImportVolume: {
-                                 fileImporterMode = .volume
-                                 showingFileImporter = true
+                                 requestFileImport(mode: .volume)
                              },
                              onImportOverlay: {
-                                 fileImporterMode = .overlay
-                                 showingFileImporter = true
+                                 requestFileImport(mode: .overlay)
                              })
                 .navigationSplitViewColumnWidth(min: 240, ideal: 320, max: 400)
         } content: {
@@ -347,7 +348,6 @@ public struct ContentView: View {
     private var workstationScaffold: some View {
         VStack(spacing: 0) {
             customToolbar
-            workstationHeader
             MPRLayoutView()
                 .environmentObject(vm)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -490,6 +490,17 @@ public struct ContentView: View {
         .frame(width: 0, height: 0)
         .hidden()
         .accessibilityHidden(true)
+
+        HoverIconButton(
+            systemImage: showImageStudyDetailsOverlay ? "info.square.fill" : "info.square",
+            tooltip: showImageStudyDetailsOverlay
+                ? "Hide Image Details Overlay (⌘I)\nRemoves the study, series, and slice number labels from each image pane."
+                : "Show Image Details Overlay (⌘I)\nDisplays study, series, and slice number labels inside each image pane.",
+            isActive: showImageStudyDetailsOverlay
+        ) {
+            toggleImageStudyDetailsOverlay()
+        }
+        .keyboardShortcut("i", modifiers: [.command])
 
         HoverIconButton(
             systemImage: focusModeEnabled
@@ -793,7 +804,9 @@ public struct ContentView: View {
             if let report = vm.lastVolumeMeasurementReport {
                 Divider()
                 Text(report.className)
-                Text(String(format: "Volume %.2f mL", report.volumeML))
+                Text(String(format: "%@ %.2f mL",
+                            report.source == .petSUV ? "TTV / MTV" : "Volume",
+                            report.volumeML))
                 if let suvMax = report.suvMax {
                     Text(String(format: "SUVmax %.2f", suvMax))
                 }
@@ -1329,6 +1342,12 @@ public struct ContentView: View {
         }
     }
 
+    private func toggleImageStudyDetailsOverlay() {
+        withAnimation(.easeInOut(duration: 0.16)) {
+            showImageStudyDetailsOverlay.toggle()
+        }
+    }
+
     /// Common "close" chip rendered inside each inspector panel. `.inspector`
     /// doesn't provide its own toolbar, so we overlay a small button top-
     /// right of whichever panel is showing.
@@ -1543,14 +1562,55 @@ public struct ContentView: View {
     }
 
     private func handleFileImport(result: Result<[URL], Error>) {
-        guard case .success(let urls) = result, let url = urls.first else { return }
+        switch result {
+        case .success(let urls):
+            guard let url = urls.first else {
+                vm.statusMessage = "No file selected."
+                return
+            }
+            importFile(url: url, mode: fileImporterMode)
+        case .failure(let error):
+            vm.statusMessage = "File import failed: \(error.localizedDescription)"
+        }
+    }
 
-        // macOS / iOS sandboxed access
-        let accessing = url.startAccessingSecurityScopedResource()
-        defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+    private func requestFileImport(mode: FileImporterMode) {
+        fileImporterMode = mode
+        #if os(macOS)
+        presentFileOpenPanel(mode: mode)
+        #else
+        showingFileImporter = true
+        #endif
+    }
 
+    #if os(macOS)
+    private func presentFileOpenPanel(mode: FileImporterMode) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.resolvesAliases = true
+        panel.prompt = mode == .overlay ? "Open Overlay" : "Open"
+        panel.message = mode == .overlay
+            ? "Choose an overlay, label, segmentation, or NIfTI-derived file."
+            : "Choose a NIfTI volume (.nii or .nii.gz) or a DICOM instance."
+        panel.treatsFilePackagesAsDirectories = false
+
+        guard panel.runModal() == .OK else { return }
+        guard let url = panel.url else {
+            vm.statusMessage = "No file selected."
+            return
+        }
+        importFile(url: url, mode: mode)
+    }
+    #endif
+
+    private func importFile(url: URL, mode: FileImporterMode) {
         Task {
-            if fileImporterMode == .overlay {
+            let accessing = url.startAccessingSecurityScopedResource()
+            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+
+            if mode == .overlay {
                 await vm.loadOverlay(url: url)
             } else {
                 if NIfTILoader.isVolumeFile(url) {
@@ -1564,12 +1624,24 @@ public struct ContentView: View {
     }
 
     private func handleDirectoryImport(result: Result<[URL], Error>) {
-        guard case .success(let urls) = result, let url = urls.first else { return }
-        let accessing = url.startAccessingSecurityScopedResource()
-        defer { if accessing { url.stopAccessingSecurityScopedResource() } }
-
+        let url: URL
+        switch result {
+        case .success(let urls):
+            guard let selectedURL = urls.first else {
+                vm.statusMessage = "No directory selected."
+                return
+            }
+            url = selectedURL
+        case .failure(let error):
+            vm.statusMessage = "Directory import failed: \(error.localizedDescription)"
+            return
+        }
+        let mode = directoryImporterMode
         Task {
-            if directoryImporterMode == .index {
+            let accessing = url.startAccessingSecurityScopedResource()
+            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+
+            if mode == .index {
                 await vm.indexDirectory(url: url, modelContext: modelContext)
                 return
             }
@@ -1577,7 +1649,13 @@ public struct ContentView: View {
             // Inspect contents: if NIfTI files present, scan as volumes;
             // otherwise as DICOM directory.
             let fm = FileManager.default
-            let contents = (try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)) ?? []
+            let contents: [URL]
+            do {
+                contents = try fm.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)
+            } catch {
+                vm.statusMessage = "Could not read directory: \(error.localizedDescription)"
+                return
+            }
             let niftiFiles = contents.filter { NIfTILoader.isVolumeFile($0) }
 
             if !niftiFiles.isEmpty {
@@ -1899,6 +1977,7 @@ private struct HangingPaneView: View {
 
 private struct PETMIPPane: View {
     @EnvironmentObject var vm: ViewerViewModel
+    @AppStorage("Tracer.Prefs.ImageDetailsOverlay") private var showImageStudyDetailsOverlay = true
     let index: Int
     let plane: SlicePlane
     @State private var dragStartPan: CGSize?
@@ -1937,6 +2016,18 @@ private struct PETMIPPane: View {
                         orientationMarkers
                             .padding(12)
 
+                        if showImageStudyDetailsOverlay,
+                           let volume = vm.activePETQuantificationVolume {
+                            VStack {
+                                HStack {
+                                    mipStudyDetailsOverlay(for: volume)
+                                    Spacer()
+                                }
+                                Spacer()
+                            }
+                            .padding(8)
+                        }
+
                         VStack {
                             Spacer()
                             HStack {
@@ -1948,7 +2039,10 @@ private struct PETMIPPane: View {
 
                         if !vm.isPETMIPCineReady(for: plane.axis) {
                             VStack {
-                                cineWarmupBadge
+                                HStack {
+                                    Spacer()
+                                    cineWarmupBadge
+                                }
                                 Spacer()
                             }
                             .padding(8)
@@ -2102,23 +2196,18 @@ private struct PETMIPPane: View {
     }
 
     private var mipRotationMenu: some View {
-        Menu {
+        let rotationStep = ViewerViewModel.petMIPRotationStepDegrees
+        return Menu {
             Text(String(format: "Horizontal rotation %.0f°", vm.petMIPRotationDegrees))
             Divider()
-            Button("Rotate -15°") {
-                applyPreparedMIPRotation(vm.petMIPRotationDegrees - 15, commit: true)
-            }
             Button("Rotate -5°") {
-                applyPreparedMIPRotation(vm.petMIPRotationDegrees - 5, commit: true)
+                applyPreparedMIPRotation(vm.petMIPRotationDegrees - rotationStep, commit: true)
             }
             Button("Reset 0°") {
                 applyPreparedMIPRotation(0, commit: true)
             }
             Button("Rotate +5°") {
-                applyPreparedMIPRotation(vm.petMIPRotationDegrees + 5, commit: true)
-            }
-            Button("Rotate +15°") {
-                applyPreparedMIPRotation(vm.petMIPRotationDegrees + 15, commit: true)
+                applyPreparedMIPRotation(vm.petMIPRotationDegrees + rotationStep, commit: true)
             }
             Divider()
             Button("AP MIP") { applyPreparedMIPRotation(0, commit: true) }
@@ -2139,7 +2228,7 @@ private struct PETMIPPane: View {
         Slider(value: Binding(
             get: { vm.petMIPRotationDegrees },
             set: { applyPreparedMIPRotation($0, commit: false) }
-        ), in: 0...360, step: 5)
+        ), in: 0...360, step: ViewerViewModel.petMIPRotationStepDegrees)
         .frame(width: 84)
         .controlSize(.mini)
         .disabled(!vm.isPETMIPCurrentFrameReady(for: plane.axis))
@@ -2157,7 +2246,7 @@ private struct PETMIPPane: View {
         guard steps != 0 else { return }
 
         wheelAccumulator -= CGFloat(steps) * threshold
-        let degreesPerStep = event.hasPreciseScrollingDeltas ? 5.0 : 10.0
+        let degreesPerStep = ViewerViewModel.petMIPRotationStepDegrees
         applyPreparedMIPRotation(vm.petMIPRotationDegrees + Double(steps) * degreesPerStep,
                                  commit: false)
     }
@@ -2221,6 +2310,190 @@ private struct PETMIPPane: View {
         .padding(.horizontal, 7)
         .background(Color.black.opacity(0.58))
         .cornerRadius(5)
+    }
+
+    private func mipStudyDetailsOverlay(for volume: ImageVolume) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(studyTitle(for: volume))
+                .font(.system(size: 14, weight: .bold, design: .monospaced))
+                .foregroundColor(.white)
+                .lineLimit(2)
+                .truncationMode(.tail)
+            if let patientLine = patientLine(for: volume) {
+                Text(patientLine)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.white.opacity(0.82))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            if let metaLine = studyMetaLine(for: volume) {
+                Text(metaLine)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            Text(seriesTitle(for: volume))
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Text(String(format: "MIP %@ - SUV %.1f-%.1f - Rot %.0f°",
+                        plane.shortName,
+                        vm.petMIPRangeMin,
+                        vm.petMIPRangeMax,
+                        vm.petMIPRotationDegrees))
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundColor(TracerTheme.pet)
+                .lineLimit(1)
+        }
+        .padding(.vertical, 7)
+        .padding(.horizontal, 9)
+        .frame(maxWidth: 520, alignment: .leading)
+        .shadow(color: .black.opacity(0.95), radius: 2, x: 0, y: 1)
+    }
+
+    private func studyTitle(for volume: ImageVolume) -> String {
+        let study = meaningfulStudyDescription(for: volume)
+        if !study.isEmpty { return study }
+        let sourceFolder = sourceFolderTitle(for: volume)
+        if !sourceFolder.isEmpty { return sourceFolder }
+        let series = meaningfulSeriesDescription(for: volume)
+        if !series.isEmpty { return series }
+        let bodyPart = trimmed(volume.bodyPartExamined)
+        if !bodyPart.isEmpty { return "\(Modality.normalize(volume.modality).displayName) \(bodyPart)" }
+        let uid = shortUID(volume.studyUID)
+        return uid.isEmpty ? "Untitled study" : "Study \(uid)"
+    }
+
+    private func seriesTitle(for volume: ImageVolume) -> String {
+        let modality = Modality.normalize(volume.modality).displayName
+        let series = meaningfulSeriesDescription(for: volume)
+        var parts = [modality]
+        if volume.seriesNumber > 0 {
+            parts.append("Series \(volume.seriesNumber)")
+        }
+        if !series.isEmpty {
+            parts.append(series)
+        }
+        return parts.joined(separator: " - ")
+    }
+
+    private func patientLine(for volume: ImageVolume) -> String? {
+        let name = meaningfulPatientValue(volume.patientName)
+        let id = meaningfulPatientValue(volume.patientID)
+        if !name.isEmpty && !id.isEmpty { return "\(name)  ID \(id)" }
+        if !name.isEmpty { return name }
+        if !id.isEmpty { return "ID \(id)" }
+        return nil
+    }
+
+    private func studyMetaLine(for volume: ImageVolume) -> String? {
+        var parts: [String] = []
+        let date = displayDICOMDate(trimmed(volume.studyDate))
+        if !date.isEmpty { parts.append(date) }
+        let accession = trimmed(volume.accessionNumber)
+        if !accession.isEmpty { parts.append("Acc \(accession)") }
+        let bodyPart = trimmed(volume.bodyPartExamined)
+        if !bodyPart.isEmpty { parts.append(bodyPart) }
+        if parts.isEmpty {
+            let uid = shortUID(volume.studyUID)
+            if !uid.isEmpty { parts.append("Study \(uid)") }
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: "  ")
+    }
+
+    private func trimmed(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func sourceFolderTitle(for volume: ImageVolume) -> String {
+        guard let path = volume.sourceFiles.first, !path.isEmpty else { return "" }
+        let url = URL(fileURLWithPath: path)
+        let parent = url.deletingLastPathComponent()
+        let candidates = [
+            parent.lastPathComponent,
+            parent.deletingLastPathComponent().lastPathComponent
+        ]
+        for candidate in candidates {
+            let title = meaningfulHeaderTitle(candidate)
+            if !title.isEmpty { return title }
+        }
+        return meaningfulHeaderTitle(url.lastPathComponent)
+    }
+
+    private func meaningfulStudyDescription(for volume: ImageVolume) -> String {
+        meaningfulHeaderTitle(volume.studyDescription)
+    }
+
+    private func meaningfulSeriesDescription(for volume: ImageVolume) -> String {
+        meaningfulHeaderTitle(volume.seriesDescription)
+    }
+
+    private func meaningfulPatientValue(_ value: String) -> String {
+        let trimmed = trimmed(value)
+        guard !isGenericHeaderTitle(trimmed) else { return "" }
+        return trimmed
+    }
+
+    private func meaningfulHeaderTitle(_ value: String) -> String {
+        let trimmed = stripKnownVolumeExtension(from: trimmed(value))
+        guard !isGenericHeaderTitle(trimmed) else { return "" }
+        return trimmed
+    }
+
+    private func stripKnownVolumeExtension(from value: String) -> String {
+        let lower = value.lowercased()
+        if lower.hasSuffix(".nii.gz") {
+            return String(value.dropLast(7))
+        }
+        if lower.hasSuffix(".nii") || lower.hasSuffix(".mha") || lower.hasSuffix(".mhd") || lower.hasSuffix(".nrrd") {
+            return String(value.dropLast(4))
+        }
+        return value
+    }
+
+    private func isGenericHeaderTitle(_ value: String) -> Bool {
+        let normalized = value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+        guard !normalized.isEmpty else { return true }
+        return [
+            "nifti",
+            "nifti study",
+            "nifti import",
+            "untitled",
+            "untitled study",
+            "study",
+            "image",
+            "images",
+            "data",
+            "files",
+            "ct",
+            "pt",
+            "pet",
+            "mr",
+            "mri"
+        ].contains(normalized)
+    }
+
+    private func displayDICOMDate(_ raw: String) -> String {
+        guard raw.count == 8 else { return raw }
+        let year = raw.prefix(4)
+        let monthStart = raw.index(raw.startIndex, offsetBy: 4)
+        let monthEnd = raw.index(monthStart, offsetBy: 2)
+        let dayStart = raw.index(raw.startIndex, offsetBy: 6)
+        return "\(year)-\(raw[monthStart..<monthEnd])-\(raw[dayStart...])"
+    }
+
+    private func shortUID(_ uid: String) -> String {
+        let clean = trimmed(uid)
+        guard !clean.isEmpty else { return "" }
+        return clean.count <= 12 ? clean : String(clean.suffix(12))
     }
 
     private var orientationMarkers: some View {

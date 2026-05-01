@@ -62,6 +62,8 @@ public struct VolumeMeasurementReport: Identifiable, Equatable, Codable, Sendabl
     public let thresholdSummary: String
 
     public var volumeML: Double { volumeMM3 / 1000.0 }
+    public var ttvML: Double { volumeML }
+    public var metabolicTumorVolumeML: Double { volumeML }
 
     public init(id: UUID = UUID(),
                 source: VolumeMeasurementSource,

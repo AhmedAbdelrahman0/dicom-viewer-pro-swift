@@ -89,9 +89,40 @@ public struct SyntheticCTOptions: Equatable, Sendable {
         self.seriesDescription = seriesDescription
     }
 
-    public static var researchDefault: SyntheticCTOptions {
-        try! SyntheticCTOptions()
+    private init(uncheckedMethod method: SyntheticCTMethod,
+                 bodySUVThreshold: Double,
+                 intenseUptakeSUV: Double,
+                 airHU: Float,
+                 softTissueHU: Float,
+                 highUptakeHU: Float,
+                 minimumHU: Float,
+                 maximumHU: Float,
+                 smoothingRadiusVoxels: Int,
+                 seriesDescription: String) {
+        self.method = method
+        self.bodySUVThreshold = bodySUVThreshold
+        self.intenseUptakeSUV = intenseUptakeSUV
+        self.airHU = airHU
+        self.softTissueHU = softTissueHU
+        self.highUptakeHU = highUptakeHU
+        self.minimumHU = minimumHU
+        self.maximumHU = maximumHU
+        self.smoothingRadiusVoxels = smoothingRadiusVoxels
+        self.seriesDescription = seriesDescription
     }
+
+    public static let researchDefault = SyntheticCTOptions(
+        uncheckedMethod: .researchHeuristicPETToCT,
+        bodySUVThreshold: 0.05,
+        intenseUptakeSUV: 12,
+        airHU: -1_000,
+        softTissueHU: 35,
+        highUptakeHU: 110,
+        minimumHU: -1_024,
+        maximumHU: 3_071,
+        smoothingRadiusVoxels: 1,
+        seriesDescription: "Synthetic CT from PET"
+    )
 }
 
 public struct SyntheticCTDimensions: Equatable, Sendable {

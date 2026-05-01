@@ -23,8 +23,14 @@ public final class ImageVolume: Identifiable, ObservableObject, @unchecked Senda
     public let studyUID: String
     public let patientID: String
     public let patientName: String
+    public let accessionNumber: String
+    public let studyDate: String
+    public let studyTime: String
+    public let bodyPartExamined: String
     public let seriesDescription: String
     public let studyDescription: String
+    public let seriesNumber: Int
+    public let sourceSliceInstanceNumbers: [Int]
 
     /// Optional SUV scale factor (for PET).
     public let suvScaleFactor: Double?
@@ -47,8 +53,14 @@ public final class ImageVolume: Identifiable, ObservableObject, @unchecked Senda
                 studyUID: String = UUID().uuidString,
                 patientID: String = "",
                 patientName: String = "",
+                accessionNumber: String = "",
+                studyDate: String = "",
+                studyTime: String = "",
+                bodyPartExamined: String = "",
                 seriesDescription: String = "",
                 studyDescription: String = "",
+                seriesNumber: Int = 0,
+                sourceSliceInstanceNumbers: [Int] = [],
                 suvScaleFactor: Double? = nil,
                 sourceFiles: [String] = []) {
         precondition(pixels.count == depth * height * width,
@@ -65,8 +77,14 @@ public final class ImageVolume: Identifiable, ObservableObject, @unchecked Senda
         self.studyUID = studyUID
         self.patientID = patientID
         self.patientName = patientName
+        self.accessionNumber = accessionNumber
+        self.studyDate = studyDate
+        self.studyTime = studyTime
+        self.bodyPartExamined = bodyPartExamined
         self.seriesDescription = seriesDescription
         self.studyDescription = studyDescription
+        self.seriesNumber = seriesNumber
+        self.sourceSliceInstanceNumbers = sourceSliceInstanceNumbers
         self.suvScaleFactor = suvScaleFactor
         self.sourceFiles = sourceFiles.map(Self.canonicalPath).sorted()
         self.intensityRange = Self.computeIntensityRange(pixels)
@@ -74,6 +92,18 @@ public final class ImageVolume: Identifiable, ObservableObject, @unchecked Senda
 
     /// Size in bytes.
     public var sizeBytes: Int { pixels.count * MemoryLayout<Float>.stride }
+
+    public var sourceImageCount: Int {
+        max(depth, sourceSliceInstanceNumbers.count)
+    }
+
+    public func sourceImageNumber(forSliceIndex index: Int) -> Int {
+        guard sourceSliceInstanceNumbers.indices.contains(index) else {
+            return index + 1
+        }
+        let instanceNumber = sourceSliceInstanceNumbers[index]
+        return instanceNumber > 0 ? instanceNumber : index + 1
+    }
 
     private static func computeIntensityRange(_ pixels: [Float]) -> (min: Float, max: Float) {
         guard !pixels.isEmpty else { return (0, 1) }

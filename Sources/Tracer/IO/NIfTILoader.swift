@@ -1,5 +1,6 @@
 import Foundation
 import Compression
+import Darwin
 import simd
 
 private enum NIfTIByteOrder: Equatable {
@@ -26,7 +27,72 @@ public enum NIfTILoaderError: Error, LocalizedError {
     }
 }
 
+public struct NIfTILoadMetadata: Sendable {
+    public var studyUID: String
+    public var patientID: String
+    public var patientName: String
+    public var accessionNumber: String
+    public var studyDate: String
+    public var studyTime: String
+    public var bodyPartExamined: String
+    public var seriesDescription: String
+    public var studyDescription: String
+
+    public init(studyUID: String = "",
+                patientID: String = "",
+                patientName: String = "",
+                accessionNumber: String = "",
+                studyDate: String = "",
+                studyTime: String = "",
+                bodyPartExamined: String = "",
+                seriesDescription: String = "",
+                studyDescription: String = "") {
+        self.studyUID = studyUID
+        self.patientID = patientID
+        self.patientName = patientName
+        self.accessionNumber = accessionNumber
+        self.studyDate = studyDate
+        self.studyTime = studyTime
+        self.bodyPartExamined = bodyPartExamined
+        self.seriesDescription = seriesDescription
+        self.studyDescription = studyDescription
+    }
+
+    public var isEmpty: Bool {
+        [
+            studyUID,
+            patientID,
+            patientName,
+            accessionNumber,
+            studyDate,
+            studyTime,
+            bodyPartExamined,
+            seriesDescription,
+            studyDescription,
+        ].allSatisfy { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+}
+
+public struct NIfTIHeaderSummary: Equatable, Sendable {
+    public let width: Int
+    public let height: Int
+    public let depth: Int
+    public let frameCount: Int
+
+    public var imageCount: Int {
+        max(1, depth) * max(1, frameCount)
+    }
+}
+
 public enum NIfTILoader {
+    private static let systemGunzipTimeoutSeconds = 120
+    private static let headerPrefixByteCount = 352
+    private static let compressedHeaderReadLimits = [
+        4 * 1024,
+        16 * 1024,
+        64 * 1024,
+        256 * 1024
+    ]
 
     /// Recognized volume file extensions handled by this parser.
     public static let extensions = ["nii", "nii.gz"]
@@ -44,9 +110,19 @@ public enum NIfTILoader {
         "nifti:\(canonicalSourcePath(for: url))"
     }
 
+    public static func headerSummary(_ url: URL) throws -> NIfTIHeaderSummary {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw NIfTILoaderError.fileNotFound(url.path)
+        }
+        let header = try readHeaderPrefix(url)
+        return try parseHeaderSummary(data: header)
+    }
+
     // MARK: - Main entry point
 
-    public static func load(_ url: URL, modalityHint: String = "") throws -> ImageVolume {
+    public static func load(_ url: URL,
+                            modalityHint: String = "",
+                            metadata: NIfTILoadMetadata = NIfTILoadMetadata()) throws -> ImageVolume {
         guard FileManager.default.fileExists(atPath: url.path) else {
             throw NIfTILoaderError.fileNotFound(url.path)
         }
@@ -69,14 +145,102 @@ public enum NIfTILoader {
         }
 
         return try parseNIfTI(data: data, filename: url.lastPathComponent,
-                              modalityHint: modalityHint, sourcePath: url.path)
+                              modalityHint: modalityHint, metadata: metadata,
+                              sourcePath: url.path)
     }
 
     // MARK: - NIfTI parser
 
+    private static func readHeaderPrefix(_ url: URL) throws -> Data {
+        if url.lastPathComponent.lowercased().hasSuffix(".gz") {
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            let fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            var lastError: Error?
+            let readLimits = compressedHeaderReadLimits.reduce(into: [Int]()) { limits, candidate in
+                let bounded = fileSize > 0 ? min(fileSize, candidate) : candidate
+                if !limits.contains(bounded) { limits.append(bounded) }
+            }
+            for readLimit in readLimits {
+                try handle.seek(toOffset: 0)
+                let compressed = try handle.read(upToCount: readLimit) ?? Data()
+                do {
+                    let decoded = try gunzipPrefix(compressed,
+                                                   maxOutputBytes: headerPrefixByteCount,
+                                                   includesTrailer: fileSize > 0 && compressed.count >= fileSize)
+                    if decoded.count >= 348 {
+                        return decoded
+                    }
+                    lastError = NIfTILoaderError.invalidHeader("Compressed NIfTI header is incomplete")
+                } catch {
+                    lastError = error
+                }
+            }
+            throw lastError ?? NIfTILoaderError.invalidHeader("Compressed NIfTI header is incomplete")
+        }
+
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let data = try handle.read(upToCount: headerPrefixByteCount) ?? Data()
+        guard data.count >= 348 else {
+            throw NIfTILoaderError.invalidHeader("File too small for NIfTI header")
+        }
+        return data
+    }
+
+    private static func parseHeaderSummary(data: Data) throws -> NIfTIHeaderSummary {
+        guard data.count >= 348 else {
+            throw NIfTILoaderError.invalidHeader("File too small for NIfTI header")
+        }
+        let littleEndianHeader = data.readInt32(at: 0, byteOrder: .littleEndian)
+        let bigEndianHeader = data.readInt32(at: 0, byteOrder: .bigEndian)
+        let byteOrder: NIfTIByteOrder
+        let sizeofHdr: Int32
+        if littleEndianHeader == 348 {
+            byteOrder = .littleEndian
+            sizeofHdr = littleEndianHeader
+        } else if bigEndianHeader == 348 {
+            byteOrder = .bigEndian
+            sizeofHdr = bigEndianHeader
+        } else {
+            byteOrder = .littleEndian
+            sizeofHdr = littleEndianHeader
+        }
+        guard sizeofHdr == 348 else {
+            throw NIfTILoaderError.invalidHeader("sizeof_hdr != 348 (got \(sizeofHdr))")
+        }
+
+        let magic = String(data: data[344..<348], encoding: .ascii) ?? ""
+        guard magic.hasPrefix("n+1") || magic.hasPrefix("ni1") else {
+            throw NIfTILoaderError.invalidHeader("Bad magic: \(magic)")
+        }
+
+        let dimCount = max(0, min(7, Int(data.readInt16(at: 40, byteOrder: byteOrder))))
+        var dims = [Int](repeating: 1, count: 8)
+        for dim in 1...7 {
+            dims[dim] = Int(data.readInt16(at: 40 + dim * 2, byteOrder: byteOrder))
+        }
+
+        let width = dims[1]
+        let height = dims[2]
+        let depth = max(1, dims[3])
+        guard width > 0, height > 0 else {
+            throw NIfTILoaderError.invalidHeader("Invalid dimensions: nx=\(width), ny=\(height)")
+        }
+
+        let frameCount = dimCount >= 4
+            ? (4...dimCount).reduce(1) { partial, dim in partial * max(1, dims[dim]) }
+            : 1
+        return NIfTIHeaderSummary(width: width,
+                                  height: height,
+                                  depth: depth,
+                                  frameCount: frameCount)
+    }
+
     private static func parseNIfTI(data: Data,
                                    filename: String,
                                    modalityHint: String,
+                                   metadata: NIfTILoadMetadata,
                                    sourcePath: String) throws -> ImageVolume {
         guard data.count >= 348 else {
             throw NIfTILoaderError.invalidHeader("File too small for NIfTI header")
@@ -157,6 +321,7 @@ public enum NIfTILoader {
                                  origin: geometry.origin,
                                  direction: geometry.direction,
                                  filename: filename, modalityHint: modalityHint,
+                                 metadata: metadata,
                                  sourcePath: sourcePath)
     }
 
@@ -174,6 +339,7 @@ public enum NIfTILoader {
                                        direction: simd_double3x3,
                                        filename: String,
                                        modalityHint: String,
+                                       metadata: NIfTILoadMetadata,
                                        sourcePath: String) throws -> ImageVolume {
         let total = depth * height * width
         var pixels = [Float](repeating: 0, count: total)
@@ -189,9 +355,15 @@ public enum NIfTILoader {
                          inter: inter,
                          into: &pixels)
 
-        let modality = inferModality(filename: filename, parentDir: (sourcePath as NSString).deletingLastPathComponent,
+        let parentDir = (sourcePath as NSString).deletingLastPathComponent
+        let modality = inferModality(filename: filename, parentDir: parentDir,
                                      hint: modalityHint)
-        let desc = stripExtension(filename)
+        let desc = firstNonEmpty(meaningfulSeriesDescription(metadata.seriesDescription),
+                                 stripExtension(filename))
+        let parentTitle = sourceStudyTitle(parentDir: parentDir)
+        let studyDescription = firstNonEmpty(meaningfulStudyDescription(metadata.studyDescription),
+                                             parentTitle,
+                                             "NIfTI")
 
         return ImageVolume(
             pixels: pixels,
@@ -203,13 +375,80 @@ public enum NIfTILoader {
             direction: direction,
             modality: modality,
             seriesUID: "nifti:\(ImageVolume.canonicalPath(sourcePath))",
-            studyUID: "NIFTI_STUDY",
-            patientID: "NIFTI_Import",
-            patientName: "NIfTI Import",
+            studyUID: firstNonEmpty(metadata.studyUID, "NIFTI_STUDY"),
+            patientID: firstNonEmpty(metadata.patientID, "NIFTI_Import"),
+            patientName: firstNonEmpty(metadata.patientName, "NIfTI Import"),
+            accessionNumber: metadata.accessionNumber,
+            studyDate: metadata.studyDate,
+            studyTime: metadata.studyTime,
+            bodyPartExamined: metadata.bodyPartExamined,
             seriesDescription: desc,
-            studyDescription: "NIfTI",
+            studyDescription: studyDescription,
             sourceFiles: [sourcePath]
         )
+    }
+
+    private static func firstNonEmpty(_ values: String...) -> String {
+        for value in values {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        return ""
+    }
+
+    private static func meaningfulSeriesDescription(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !isGenericNIfTITitle(trimmed) else { return "" }
+        return trimmed
+    }
+
+    private static func meaningfulStudyDescription(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !isGenericNIfTITitle(trimmed) else { return "" }
+        return trimmed
+    }
+
+    private static func sourceStudyTitle(parentDir: String) -> String {
+        let url = URL(fileURLWithPath: parentDir, isDirectory: true)
+        let candidates = [
+            url.lastPathComponent,
+            url.deletingLastPathComponent().lastPathComponent
+        ]
+        for candidate in candidates {
+            let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty, !isGenericNIfTITitle(trimmed) {
+                return trimmed
+            }
+        }
+        return ""
+    }
+
+    private static func isGenericNIfTITitle(_ value: String) -> Bool {
+        let normalized = value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+        guard !normalized.isEmpty else { return true }
+        return [
+            "nifti",
+            "nifti study",
+            "nifti import",
+            "untitled",
+            "untitled study",
+            "study",
+            "image",
+            "images",
+            "data",
+            "files",
+            "ct",
+            "pt",
+            "pet",
+            "mr",
+            "mri"
+        ].contains(normalized)
     }
 
     private static func bytesPerVoxel(for datatype: Int) -> Int {
@@ -456,6 +695,55 @@ public enum NIfTILoader {
 
     // MARK: - Gzip decompression (using Compression framework)
 
+    private static func gunzipPrefix(_ data: Data,
+                                     maxOutputBytes: Int,
+                                     includesTrailer: Bool) throws -> Data {
+        guard data.count > 10, maxOutputBytes > 0 else {
+            throw NIfTILoaderError.decompressionFailed
+        }
+        guard data[0] == 0x1F, data[1] == 0x8B else {
+            throw NIfTILoaderError.decompressionFailed
+        }
+
+        let flg = data[3]
+        var headerEnd = 10
+
+        if flg & 0x04 != 0 {
+            guard headerEnd + 2 <= data.count else { throw NIfTILoaderError.decompressionFailed }
+            let xlen = Int(data[headerEnd]) | (Int(data[headerEnd + 1]) << 8)
+            headerEnd += 2 + xlen
+        }
+        if flg & 0x08 != 0 {
+            while headerEnd < data.count && data[headerEnd] != 0 { headerEnd += 1 }
+            headerEnd += 1
+        }
+        if flg & 0x10 != 0 {
+            while headerEnd < data.count && data[headerEnd] != 0 { headerEnd += 1 }
+            headerEnd += 1
+        }
+        if flg & 0x02 != 0 { headerEnd += 2 }
+
+        let payloadEnd = includesTrailer ? data.count - 8 : data.count
+        guard headerEnd < payloadEnd else { throw NIfTILoaderError.decompressionFailed }
+        let payload = data.subdata(in: headerEnd..<payloadEnd)
+
+        var decoded = Data(count: maxOutputBytes)
+        let produced = decoded.withUnsafeMutableBytes { dst in
+            payload.withUnsafeBytes { src in
+                compression_decode_buffer(
+                    dst.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                    maxOutputBytes,
+                    src.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                    payload.count,
+                    nil,
+                    COMPRESSION_ZLIB
+                )
+            }
+        }
+        guard produced > 0 else { throw NIfTILoaderError.decompressionFailed }
+        return decoded.prefix(produced)
+    }
+
     private static func gunzip(_ data: Data, sourceURL: URL? = nil) throws -> Data {
         // The gzip format has a 10-byte header; the compressed payload uses raw DEFLATE.
         // Compression framework's COMPRESSION_ZLIB expects zlib wrapper, not gzip.
@@ -566,24 +854,79 @@ public enum NIfTILoader {
         process.standardOutput = stdout
         process.standardError = stderr
 
+        let outputLock = NSLock()
+        var decoded = Data()
+        var stderrData = Data()
+        let stdoutHandle = stdout.fileHandleForReading
+        let stderrHandle = stderr.fileHandleForReading
+        stdoutHandle.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            guard !chunk.isEmpty else {
+                handle.readabilityHandler = nil
+                return
+            }
+            outputLock.lock()
+            decoded.append(chunk)
+            outputLock.unlock()
+        }
+        stderrHandle.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            guard !chunk.isEmpty else {
+                handle.readabilityHandler = nil
+                return
+            }
+            outputLock.lock()
+            stderrData.append(chunk)
+            outputLock.unlock()
+        }
+
+        let finished = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in
+            finished.signal()
+        }
+
         do {
             try process.run()
         } catch {
+            stdoutHandle.readabilityHandler = nil
+            stderrHandle.readabilityHandler = nil
             throw NIfTILoaderError.decompressionFailed
         }
 
-        let decoded = stdout.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
+        if finished.wait(timeout: .now() + .seconds(systemGunzipTimeoutSeconds)) == .timedOut {
+            stdoutHandle.readabilityHandler = nil
+            stderrHandle.readabilityHandler = nil
+            process.terminate()
+            Thread.sleep(forTimeInterval: 0.5)
+            if process.isRunning {
+                kill(process.processIdentifier, SIGKILL)
+            }
+            process.waitUntilExit()
+            NSLog("NIfTI gzip fallback timed out after %d seconds: %@",
+                  systemGunzipTimeoutSeconds,
+                  sourceURL.path)
+            throw NIfTILoaderError.decompressionFailed
+        }
 
-        guard process.terminationStatus == 0, !decoded.isEmpty else {
-            if !stderrData.isEmpty,
-               let message = String(data: stderrData, encoding: .utf8) {
+        stdoutHandle.readabilityHandler = nil
+        stderrHandle.readabilityHandler = nil
+        let remainingOutput = stdoutHandle.readDataToEndOfFile()
+        let remainingError = stderrHandle.readDataToEndOfFile()
+        outputLock.lock()
+        decoded.append(remainingOutput)
+        stderrData.append(remainingError)
+        let finalDecoded = decoded
+        let finalStderr = stderrData
+        outputLock.unlock()
+
+        guard process.terminationStatus == 0, !finalDecoded.isEmpty else {
+            if !finalStderr.isEmpty,
+               let message = String(data: finalStderr, encoding: .utf8) {
                 NSLog("NIfTI gzip fallback failed: %@", message)
             }
             throw NIfTILoaderError.decompressionFailed
         }
-        return decoded
+        return finalDecoded
         #else
         throw NIfTILoaderError.decompressionFailed
         #endif

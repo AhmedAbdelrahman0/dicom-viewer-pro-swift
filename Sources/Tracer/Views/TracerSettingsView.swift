@@ -19,6 +19,7 @@ public struct TracerSettingsView: View {
     @AppStorage(TracerSettings.Keys.wlShortcut3) private var wlShortcut3: String = "Brain"
 
     @AppStorage("focusModeEnabled") private var focusModeEnabled: Bool = false
+    @AppStorage(TracerSettings.Keys.showImageStudyDetailsOverlay) private var showImageStudyDetailsOverlay: Bool = true
 
     // Default backend paths / URLs — pre-populated the first time a user
     // opens MONAI Label / nnU-Net.
@@ -72,6 +73,7 @@ public struct TracerSettingsView: View {
 
             Section("Other shortcuts") {
                 LabeledContent("⌘R", value: "Auto W/L")
+                LabeledContent("⌘I", value: "Toggle image details overlay")
                 LabeledContent("⌘E", value: "Focus Mode (hide side panels)")
                 LabeledContent("⌘O", value: "Open DICOM directory")
                 LabeledContent("⌘N", value: "Open NIfTI file")
@@ -292,6 +294,8 @@ public struct TracerSettingsView: View {
             Section("Layout") {
                 Toggle("Launch in Focus Mode (hide side panels)",
                        isOn: $focusModeEnabled)
+                Toggle("Show study details on image panes",
+                       isOn: $showImageStudyDetailsOverlay)
             }
             Section("Recent volumes") {
                 HStack {
@@ -314,6 +318,7 @@ public enum TracerSettings {
         public static let wlShortcut1 = "Tracer.Prefs.WL.Shortcut1"
         public static let wlShortcut2 = "Tracer.Prefs.WL.Shortcut2"
         public static let wlShortcut3 = "Tracer.Prefs.WL.Shortcut3"
+        public static let showImageStudyDetailsOverlay = "Tracer.Prefs.ImageDetailsOverlay"
         public static let defaultMONAIURL = "Tracer.Prefs.MONAI.DefaultURL"
         public static let defaultNNUnetBinary = "Tracer.Prefs.NNUnet.Binary"
         public static let defaultNNUnetResults = "Tracer.Prefs.NNUnet.Results"

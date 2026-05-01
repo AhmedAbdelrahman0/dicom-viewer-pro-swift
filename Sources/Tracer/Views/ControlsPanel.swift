@@ -1346,7 +1346,7 @@ private struct FusionTab: View {
                 Divider()
                 Text("Active Label: \(report.className)")
                     .font(.system(size: 11, weight: .semibold))
-                ControlStatRow("Volume", String(format: "%.2f mL", report.volumeML))
+                ControlStatRow("TTV / MTV", String(format: "%.2f mL", report.ttvML))
                 if let suvMax = report.suvMax {
                     ControlStatRow("SUVmax", String(format: "%.3f", suvMax))
                 }

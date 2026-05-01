@@ -193,6 +193,20 @@ public struct ReconstructionOptions: Equatable, Sendable {
         self.iterations = iterations
         self.positivityFloor = positivityFloor
     }
+
+    private init(uncheckedAlgorithm algorithm: ReconstructionAlgorithm,
+                 iterations: Int,
+                 positivityFloor: Float) {
+        self.algorithm = algorithm
+        self.iterations = iterations
+        self.positivityFloor = positivityFloor
+    }
+
+    public static let standard = ReconstructionOptions(
+        uncheckedAlgorithm: .filteredBackProjection,
+        iterations: 8,
+        positivityFloor: 0
+    )
 }
 
 public struct ReconstructionImage2D: Sendable {
@@ -286,7 +300,7 @@ public enum SinogramIO {
 public enum NuclearReconstructor {
     public static func reconstruct2D(sinogram: Sinogram2D,
                                      grid: ReconstructionGrid2D,
-                                     options: ReconstructionOptions = try! ReconstructionOptions()) throws -> ReconstructionImage2D {
+                                     options: ReconstructionOptions = .standard) throws -> ReconstructionImage2D {
         let pixels: [Float]
         switch options.algorithm {
         case .filteredBackProjection:

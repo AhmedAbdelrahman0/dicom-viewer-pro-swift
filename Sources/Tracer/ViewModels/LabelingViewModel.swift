@@ -30,6 +30,7 @@ public final class LabelingViewModel: ObservableObject {
     // SUV/threshold controls
     @Published public var thresholdValue: Double = 2.5   // typical SUV cutoff
     @Published public var percentOfMax: Double = 0.4      // 40% of SUV_max (EANM)
+    @Published public var percentOfMaxSearchRadius: Int = 30
     @Published public var gradientCutoffFraction: Double = 0.45
     @Published public var gradientSearchRadius: Int = 30
     @Published public var regionGrowTolerance: Double = 50  // HU/intensity tolerance
@@ -38,7 +39,7 @@ public final class LabelingViewModel: ObservableObject {
     /// typical small (≤ 1 cm) FDG-avid lesion comfortably while leaving
     /// the surrounding background voxels out, which is what the
     /// downstream radiomics features want for a sharp signature.
-    /// Range exposed in the UI: 3 – 30 mm.
+    /// Range exposed in the UI: 2 - 60 mm.
     @Published public var lesionSphereRadiusMM: Double = 8.0
 
     /// Stable id used by `placeLesionSphere` so every quick-lesion
@@ -818,11 +819,10 @@ public final class LabelingViewModel: ObservableObject {
             try LabelIO.saveJSON(labelMap: map, annotations: annotations, to: url)
         case .csv:
             try LabelIO.saveLandmarks(landmarks, to: url)
-        case .dicomSeg, .dicomRTStruct:
-            // TODO: DICOM SEG / RTSTRUCT export is planned (reader is included)
-            throw NSError(domain: "LabelIO", code: 1,
-                          userInfo: [NSLocalizedDescriptionKey:
-                                     "DICOM SEG/RTSTRUCT export not yet implemented; use NIfTI or NRRD"])
+        case .dicomSeg:
+            try DICOMSegIO.saveDICOMSEG(map, parentVolume: parentVolume, to: url)
+        case .dicomRTStruct:
+            try RTStructIO.saveRTStruct(map, parentVolume: parentVolume, to: url)
         }
         markSaved()
     }

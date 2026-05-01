@@ -63,6 +63,95 @@ public struct RecentVolume: Codable, Identifiable, Hashable {
             kind: kind
         )
     }
+
+    public var displaySeriesDescription: String {
+        let series = Self.meaningfulHeaderTitle(seriesDescription)
+        if !series.isEmpty { return series }
+        let source = Self.sourceFileTitle(sourceFiles)
+        return source.isEmpty ? "Series" : source
+    }
+
+    public var displayStudyDescription: String {
+        let study = Self.meaningfulHeaderTitle(studyDescription)
+        if !study.isEmpty { return study }
+        let folder = Self.sourceFolderTitle(sourceFiles)
+        if !folder.isEmpty { return folder }
+        return displaySeriesDescription
+    }
+
+    public var displayPatientName: String {
+        Self.meaningfulHeaderTitle(patientName)
+    }
+
+    public var displayPatientOrStudyTitle: String {
+        let patient = displayPatientName
+        return patient.isEmpty ? displayStudyDescription : patient
+    }
+
+    private static func sourceFolderTitle(_ sourceFiles: [String]) -> String {
+        guard let path = sourceFiles.first, !path.isEmpty else { return "" }
+        let url = URL(fileURLWithPath: path)
+        let parent = url.deletingLastPathComponent()
+        let candidates = [
+            parent.lastPathComponent,
+            parent.deletingLastPathComponent().lastPathComponent
+        ]
+        for candidate in candidates {
+            let title = meaningfulHeaderTitle(candidate)
+            if !title.isEmpty { return title }
+        }
+        return ""
+    }
+
+    private static func sourceFileTitle(_ sourceFiles: [String]) -> String {
+        guard let path = sourceFiles.first, !path.isEmpty else { return "" }
+        return meaningfulHeaderTitle(URL(fileURLWithPath: path).lastPathComponent)
+    }
+
+    private static func meaningfulHeaderTitle(_ value: String) -> String {
+        let trimmed = stripKnownVolumeExtension(from: value.trimmingCharacters(in: .whitespacesAndNewlines))
+        guard !isGenericHeaderTitle(trimmed) else { return "" }
+        return trimmed
+    }
+
+    private static func stripKnownVolumeExtension(from value: String) -> String {
+        let lower = value.lowercased()
+        if lower.hasSuffix(".nii.gz") {
+            return String(value.dropLast(7))
+        }
+        if lower.hasSuffix(".nii") || lower.hasSuffix(".mha") || lower.hasSuffix(".mhd") || lower.hasSuffix(".nrrd") {
+            return String(value.dropLast(4))
+        }
+        return value
+    }
+
+    private static func isGenericHeaderTitle(_ value: String) -> Bool {
+        let normalized = value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+        guard !normalized.isEmpty else { return true }
+        return [
+            "nifti",
+            "nifti study",
+            "nifti import",
+            "untitled",
+            "untitled study",
+            "study",
+            "image",
+            "images",
+            "data",
+            "files",
+            "ct",
+            "pt",
+            "pet",
+            "mr",
+            "mri"
+        ].contains(normalized)
+    }
 }
 
 /// Persists the last N loaded volumes as JSON in `UserDefaults`. Thread-safe

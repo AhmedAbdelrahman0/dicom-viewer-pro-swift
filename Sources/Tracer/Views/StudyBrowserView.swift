@@ -45,7 +45,6 @@ struct StudyBrowserView: View {
     @State private var searchText: String = ""
     @State private var indexedSeries: [PACSIndexedSeriesSnapshot] = []
     @State private var indexedTotalCount: Int = 0
-    @State private var indexFetchLimit: Int = 1_000
     @State private var worklistDisplayLimit: Int = 300
     @State private var statusFilter: WorklistStatusFilter = .all
     @State private var modalityFilter: String = "All"
@@ -54,6 +53,11 @@ struct StudyBrowserView: View {
     @State private var studyStatuses: [String: WorklistStudyStatus] = [:]
     @State private var expandedStudyIDs: Set<String> = []
     @State private var expandedVNAStudyIDs: Set<String> = []
+    @State private var expandedWorklistTreeNodeIDs: Set<String> = []
+    @State private var collapsedWorklistTreeNodeIDs: Set<String> = []
+    @State private var expandedArchiveTreeNodeIDs: Set<String> = []
+    @State private var collapsedArchiveTreeNodeIDs: Set<String> = []
+    @State private var removedWorklistStudyIDs: Set<String> = []
     @State private var vnaConnectionName: String = ""
     @State private var vnaBaseURL: String = ""
     @State private var vnaBearerToken: String = ""
@@ -62,9 +66,21 @@ struct StudyBrowserView: View {
     @State private var fileBrowserEntries: [LocalFileBrowserEntry] = []
     @State private var fileBrowserError: String?
 
-    private let indexPageSize = 1_000
     private let worklistDisplayPageSize = 300
     private let statusDefaultsKey = "Tracer.WorklistStudyStatuses"
+    private let removedWorklistDefaultsKey = "Tracer.WorklistRemovedStudyIDs"
+
+    private struct OpenedWorklistBucket {
+        var id: String
+        var patientID: String
+        var patientName: String
+        var accessionNumber: String
+        var studyUID: String
+        var studyDescription: String
+        var sourcePath: String
+        var series: [String: PACSIndexedSeriesSnapshot]
+        var openedAt: Date
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -95,6 +111,7 @@ struct StudyBrowserView: View {
         .background(TracerTheme.worklistGradient)
         .task {
             loadStatusOverrides()
+            loadRemovedWorklistStudies()
             vm.reloadSavedArchiveRoots()
             vm.reloadVNAConnections()
             syncVNAConnectionForm()
@@ -102,7 +119,6 @@ struct StudyBrowserView: View {
         }
         .onChange(of: searchText) { _, _ in
             if browserMode != .vna {
-                indexFetchLimit = indexPageSize
                 worklistDisplayLimit = worklistDisplayPageSize
                 reloadIndexResults()
             }
@@ -155,15 +171,32 @@ struct StudyBrowserView: View {
     /// are opened via their parent directory (nnU-Net / loader scans the
     /// whole series).  Anything else is skipped with a status message.
     private func handleDrop(providers: [NSItemProvider]) -> Bool {
-        guard let provider = providers.first else { return false }
-        _ = provider.loadObject(ofClass: URL.self) { url, _ in
-            guard let url else { return }
-            let resolved = url
-            Task { @MainActor in
-                await dispatchDroppedURL(resolved)
+        guard !providers.isEmpty else {
+            vm.statusMessage = "Drop did not include any files."
+            return false
+        }
+
+        var acceptedProvider = false
+        for provider in providers where provider.canLoadObject(ofClass: URL.self) {
+            acceptedProvider = true
+            _ = provider.loadObject(ofClass: URL.self) { url, error in
+                Task { @MainActor in
+                    if let error {
+                        vm.statusMessage = "Drop failed: \(error.localizedDescription)"
+                        return
+                    }
+                    guard let url else {
+                        vm.statusMessage = "Drop failed: no file URL was provided."
+                        return
+                    }
+                    await dispatchDroppedURL(url)
+                }
             }
         }
-        return true
+        if !acceptedProvider {
+            vm.statusMessage = "Drop did not include a readable file URL."
+        }
+        return acceptedProvider
     }
 
     @MainActor
@@ -218,7 +251,7 @@ struct StudyBrowserView: View {
                             Button(role: .destructive) {
                                 vm.removeRecent(id: recent.id)
                             } label: {
-                                Label("Remove \(recent.seriesDescription)",
+                                Label("Remove \(recent.displaySeriesDescription)",
                                       systemImage: "minus.circle")
                             }
                         }
@@ -250,7 +283,7 @@ struct StudyBrowserView: View {
             Image(systemName: iconForRecent(recent))
                 .foregroundColor(colorForRecent(recent))
             VStack(alignment: .leading, spacing: 1) {
-                Text(recent.seriesDescription.isEmpty ? "Series" : recent.seriesDescription)
+                Text(recent.displaySeriesDescription)
                     .font(.system(size: 11, weight: .medium))
                     .lineLimit(1)
                 Text(recentSubtitle(recent))
@@ -303,15 +336,15 @@ struct StudyBrowserView: View {
 
     private func recentSubtitle(_ recent: RecentVolume) -> String {
         let modality = Modality.normalize(recent.modality).displayName
-        let patient = recent.patientName.isEmpty ? "—" : recent.patientName
+        let patient = recent.displayPatientOrStudyTitle.isEmpty ? "-" : recent.displayPatientOrStudyTitle
         return "\(modality) · \(patient)"
     }
 
     private func recentTooltip(_ recent: RecentVolume) -> String {
         let lines: [String] = [
-            "Reopen: \(recent.seriesDescription)",
-            "Study: \(recent.studyDescription.isEmpty ? "—" : recent.studyDescription)",
-            "Patient: \(recent.patientName.isEmpty ? "—" : recent.patientName)",
+            "Reopen: \(recent.displaySeriesDescription)",
+            "Study: \(recent.displayStudyDescription.isEmpty ? "-" : recent.displayStudyDescription)",
+            "Patient: \(recent.displayPatientName.isEmpty ? "-" : recent.displayPatientName)",
             "Modality: \(Modality.normalize(recent.modality).displayName)",
             "Opened: \(recent.openedAt.formatted(date: .abbreviated, time: .shortened))"
         ]
@@ -376,11 +409,12 @@ struct StudyBrowserView: View {
     private var headerCountText: String {
         switch browserMode {
         case .worklist:
-            return "\(filteredWorklistStudies.count) studies · \(indexedTotalCount) series"
+            let seriesCount = filteredWorklistStudies.reduce(0) { $0 + $1.seriesCount }
+            return "\(filteredWorklistStudies.count) opened · \(seriesCount) series"
         case .vna:
             return "\(vm.vnaConnections.count) VNAs · \(vm.vnaStudies.count) studies"
         case .archives:
-            return "\(vm.savedArchiveRoots.count) roots · \(worklistStudies.count) studies"
+            return "\(vm.savedArchiveRoots.count) roots · \(indexedArchiveStudies.count) studies · \(indexedTotalCount) series"
         case .viewer:
             return "\(vm.viewerSessions.count) sessions · \(vm.openStudies.count) studies · \(vm.activeSessionVolumes.count) series"
         }
@@ -389,7 +423,7 @@ struct StudyBrowserView: View {
     private var searchPrompt: String {
         switch browserMode {
         case .worklist:
-            return "Search worklist..."
+            return "Search previously opened studies..."
         case .vna:
             return "Search patient, accession, or study date..."
         case .archives:
@@ -445,6 +479,29 @@ struct StudyBrowserView: View {
                     Image(systemName: "externaldrive.connected.to.line.below")
                         .foregroundColor(TracerTheme.accentBright)
                     Text(root.displayName)
+                        .font(.system(size: 10, weight: .medium))
+                        .lineLimit(1)
+                    Spacer()
+                    Button {
+                        archiveFilterID = PACSArchiveScope.allID
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Clear archive filter")
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(TracerTheme.panelRaised)
+                )
+            } else if archiveFilterID != PACSArchiveScope.allID,
+                      let node = selectedWorklistTreeNode ?? selectedArchiveTreeNode {
+                HStack(spacing: 6) {
+                    Image(systemName: node.systemImage)
+                        .foregroundColor(TracerTheme.accent)
+                    Text(node.title)
                         .font(.system(size: 10, weight: .medium))
                         .lineLimit(1)
                     Spacer()
@@ -658,46 +715,18 @@ struct StudyBrowserView: View {
 
     private var worklistContent: some View {
         List {
-            if !filteredWorklistStudies.isEmpty {
-                Section("Studies") {
-                    ForEach(displayedWorklistStudies) { study in
-                        DisclosureGroup(isExpanded: expansionBinding(for: study.id)) {
-                            WorklistStudyActions(
-                                study: study,
-                                onOpen: { openStudy(study) },
-                                onStatus: { setStatus($0, for: study) }
-                            )
-                            ForEach(study.series) { series in
-                                Button {
-                                    setStatus(.inProgress, for: study)
-                                    Task { await vm.openIndexedSeries(series, autoFuse: false) }
-                                } label: {
-                                    WorklistSeriesRow(entry: series)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        } label: {
-                            WorklistStudyRow(study: study)
-                        }
-                        .contextMenu {
-                            Button {
-                                openStudy(study)
-                            } label: {
-                                Label("Open Study", systemImage: "rectangle.3.group")
-                            }
-                            Menu("Status") {
-                                ForEach(WorklistStudyStatus.allCases) { status in
-                                    Button(status.displayName) {
-                                        setStatus(status, for: study)
-                                    }
-                                }
-                            }
-                            Button(role: .destructive) {
-                                deleteIndexedStudy(study)
-                            } label: {
-                                Label("Remove Study from Index", systemImage: "trash")
-                            }
-                        }
+            if !worklistTreeRoots.isEmpty {
+                Section("Previously Opened Studies") {
+                    ForEach(worklistTreeRoots) { node in
+                        ArchiveTreeNodeView(
+                            node: node,
+                            depth: 0,
+                            expansion: worklistTreeExpansionBinding,
+                            onShowBranch: showWorklistTreeBranch,
+                            onOpenStudy: openStudy,
+                            onSetStatus: { status, study in setStatus(status, for: study) },
+                            onRemoveStudy: removeStudyFromWorklist
+                        )
                     }
 
                     if filteredWorklistStudies.count > displayedWorklistStudies.count {
@@ -711,25 +740,12 @@ struct StudyBrowserView: View {
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                     }
-
-                    if indexedTotalCount > indexedSeries.count {
-                        Button {
-                            indexFetchLimit += indexPageSize
-                            reloadIndexResults()
-                        } label: {
-                            Label("Show more (\(indexedSeries.count)/\(indexedTotalCount) series)",
-                                  systemImage: "chevron.down")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                    }
                 }
             } else {
                 EmptyBrowserRow(
                     systemImage: "list.clipboard",
                     title: "No worklist studies",
-                    subtitle: "Index a local archive or adjust filters"
+                    subtitle: "Open a study from Archives, VNA, or local files to populate this worklist"
                 )
             }
         }
@@ -852,7 +868,8 @@ struct StudyBrowserView: View {
                         Button {
                             showSavedArchiveRoot(root)
                         } label: {
-                            SavedArchiveRootRow(root: root)
+                            SavedArchiveRootRow(root: root,
+                                                stats: archiveStats(for: root))
                         }
                         .buttonStyle(.plain)
                         .contextMenu {
@@ -889,7 +906,8 @@ struct StudyBrowserView: View {
                         Button {
                             indexLocalArchive(shortcut)
                         } label: {
-                            LocalArchiveShortcutRow(shortcut: shortcut)
+                            LocalArchiveShortcutRow(shortcut: shortcut,
+                                                    stats: archiveStats(forPath: shortcut.path))
                         }
                         .buttonStyle(.plain)
                         .disabled(vm.isIndexing)
@@ -897,30 +915,18 @@ struct StudyBrowserView: View {
                 }
             }
 
-            if !filteredArchiveScopes.isEmpty {
-                Section("Indexed Archives") {
-                    ForEach(filteredArchiveScopes) { scope in
-                        Button {
-                            archiveFilterID = scope.id
-                            browserMode = .worklist
-                        } label: {
-                            ArchiveScopeRow(scope: scope)
-                        }
-                        .buttonStyle(.plain)
-                        .contextMenu {
-                            Button {
-                                archiveFilterID = scope.id
-                                browserMode = .worklist
-                            } label: {
-                                Label("Show Studies", systemImage: "list.clipboard")
-                            }
-                            Button {
-                                searchText = scope.title
-                                browserMode = .worklist
-                            } label: {
-                                Label("Search This Name", systemImage: "magnifyingglass")
-                            }
-                        }
+            if !filteredArchiveTreeRoots.isEmpty {
+                Section("Dataset Tree") {
+                    ForEach(filteredArchiveTreeRoots) { node in
+                        ArchiveTreeNodeView(
+                            node: node,
+                            depth: 0,
+                            expansion: archiveTreeExpansionBinding,
+                            onShowBranch: showArchiveTreeBranch,
+                            onOpenStudy: openStudy,
+                            onSetStatus: { status, study in setStatus(status, for: study) },
+                            onRemoveStudy: nil
+                        )
                     }
                 }
             } else if filteredSavedArchiveRoots.isEmpty && availableLocalArchiveShortcuts.isEmpty {
@@ -1112,8 +1118,12 @@ struct StudyBrowserView: View {
         .background(TracerTheme.sidebarBackground)
     }
 
-    private var worklistStudies: [PACSWorklistStudy] {
+    private var indexedArchiveStudies: [PACSWorklistStudy] {
         PACSWorklistStudy.grouped(from: indexedSeries, statuses: studyStatuses)
+    }
+
+    private var worklistStudies: [PACSWorklistStudy] {
+        openedHistoryWorklistStudies.filter { !removedWorklistStudyIDs.contains($0.id) }
     }
 
     private var filteredWorklistStudies: [PACSWorklistStudy] {
@@ -1121,6 +1131,8 @@ struct StudyBrowserView: View {
             if archiveFilterID != PACSArchiveScope.allID {
                 if let root = selectedSavedArchiveRoot {
                     guard study($0, belongsTo: root) else { return false }
+                } else if let treePath = PACSArchiveTreeNode.filterPath(from: archiveFilterID) {
+                    guard study($0, belongsToPathPrefix: treePath) else { return false }
                 } else if PACSArchiveScope.scopeID(for: $0) != archiveFilterID {
                     return false
                 }
@@ -1138,8 +1150,322 @@ struct StudyBrowserView: View {
         Array(filteredWorklistStudies.prefix(worklistDisplayLimit))
     }
 
+    private var allWorklistTreeRoots: [PACSArchiveTreeNode] {
+        PACSArchiveTreeBuilder.roots(
+            from: worklistStudies,
+            savedRoots: vm.savedArchiveRoots,
+            shortcuts: LocalArchiveShortcut.known
+        )
+    }
+
+    private var worklistTreeRoots: [PACSArchiveTreeNode] {
+        PACSArchiveTreeBuilder.roots(
+            from: displayedWorklistStudies,
+            savedRoots: vm.savedArchiveRoots,
+            shortcuts: LocalArchiveShortcut.known
+        )
+    }
+
+    private var openedHistoryWorklistStudies: [PACSWorklistStudy] {
+        var buckets: [String: OpenedWorklistBucket] = [:]
+        var knownSnapshotIDs = Set<String>()
+
+        for session in vm.viewerSessions {
+            let studyByKey = session.studies.reduce(into: [String: ViewerSessionStudyReference]()) { result, study in
+                result[study.studyKey] = study
+            }
+            let volumesByStudy = Dictionary(grouping: session.volumes, by: \.studyKey)
+
+            for (studyKey, references) in volumesByStudy {
+                let usableReferences = references.filter { !$0.sourceFiles.isEmpty }
+                guard !usableReferences.isEmpty else { continue }
+
+                let studyReference = studyByKey[studyKey]
+                let id = historyWorklistID(forStudyKey: studyKey)
+                var bucket = buckets[id] ?? makeOpenedBucket(
+                    id: id,
+                    studyKey: studyKey,
+                    study: studyReference,
+                    fallback: usableReferences.first,
+                    openedAt: session.modifiedAt
+                )
+                mergeHistoryMetadata(
+                    into: &bucket,
+                    study: studyReference,
+                    fallback: usableReferences.first,
+                    openedAt: session.modifiedAt
+                )
+
+                for reference in usableReferences {
+                    let snapshot = historySnapshot(from: reference,
+                                                   study: studyReference,
+                                                   openedAt: session.modifiedAt)
+                    bucket.series[snapshot.id] = snapshot
+                    knownSnapshotIDs.insert(snapshot.id)
+                }
+                buckets[id] = bucket
+            }
+        }
+
+        for recent in vm.recentVolumes where !recent.sourceFiles.isEmpty {
+            let snapshotID = historySnapshotID(for: recent.id)
+            guard !knownSnapshotIDs.contains(snapshotID) else { continue }
+
+            let id = historyWorklistID(for: recent)
+            var bucket = buckets[id] ?? makeOpenedBucket(id: id, recent: recent)
+            mergeHistoryMetadata(into: &bucket, recent: recent)
+            let snapshot = historySnapshot(from: recent)
+            bucket.series[snapshot.id] = snapshot
+            buckets[id] = bucket
+            knownSnapshotIDs.insert(snapshot.id)
+        }
+
+        return buckets.values
+            .compactMap(makeWorklistStudy(from:))
+            .sorted(by: historyStudySort)
+    }
+
+    private func makeOpenedBucket(id: String,
+                                  studyKey: String,
+                                  study: ViewerSessionStudyReference?,
+                                  fallback: ViewerSessionVolumeReference?,
+                                  openedAt: Date) -> OpenedWorklistBucket {
+        OpenedWorklistBucket(
+            id: id,
+            patientID: firstMeaningful(study?.patientID ?? "", fallback?.patientID ?? ""),
+            patientName: firstMeaningful(study?.patientName ?? "", fallback?.patientName ?? ""),
+            accessionNumber: study?.accessionNumber ?? "",
+            studyUID: firstMeaningful(study?.studyUID ?? "", historyStudyUID(from: studyKey)),
+            studyDescription: firstMeaningful(study?.studyDescription ?? "", fallback?.studyDescription ?? ""),
+            sourcePath: fallback.map { historySourcePath(for: $0.sourceFiles) } ?? "",
+            series: [:],
+            openedAt: openedAt
+        )
+    }
+
+    private func makeOpenedBucket(id: String, recent: RecentVolume) -> OpenedWorklistBucket {
+        OpenedWorklistBucket(
+            id: id,
+            patientID: "",
+            patientName: recent.patientName,
+            accessionNumber: "",
+            studyUID: "",
+            studyDescription: firstMeaningful(recent.studyDescription, recent.displayStudyDescription),
+            sourcePath: historySourcePath(for: recent.sourceFiles),
+            series: [:],
+            openedAt: recent.openedAt
+        )
+    }
+
+    private func mergeHistoryMetadata(into bucket: inout OpenedWorklistBucket,
+                                      study: ViewerSessionStudyReference?,
+                                      fallback: ViewerSessionVolumeReference?,
+                                      openedAt: Date) {
+        bucket.patientID = firstMeaningful(bucket.patientID, study?.patientID ?? "", fallback?.patientID ?? "")
+        bucket.patientName = firstMeaningful(bucket.patientName, study?.patientName ?? "", fallback?.patientName ?? "")
+        bucket.accessionNumber = firstMeaningful(bucket.accessionNumber, study?.accessionNumber ?? "")
+        bucket.studyUID = firstMeaningful(bucket.studyUID, study?.studyUID ?? "")
+        bucket.studyDescription = firstMeaningful(bucket.studyDescription,
+                                                 study?.studyDescription ?? "",
+                                                 fallback?.studyDescription ?? "")
+        if bucket.sourcePath.isEmpty, let fallback {
+            bucket.sourcePath = historySourcePath(for: fallback.sourceFiles)
+        }
+        bucket.openedAt = max(bucket.openedAt, openedAt)
+    }
+
+    private func mergeHistoryMetadata(into bucket: inout OpenedWorklistBucket,
+                                      recent: RecentVolume) {
+        bucket.patientName = firstMeaningful(bucket.patientName, recent.patientName)
+        bucket.studyDescription = firstMeaningful(bucket.studyDescription,
+                                                 recent.studyDescription,
+                                                 recent.displayStudyDescription)
+        if bucket.sourcePath.isEmpty {
+            bucket.sourcePath = historySourcePath(for: recent.sourceFiles)
+        }
+        bucket.openedAt = max(bucket.openedAt, recent.openedAt)
+    }
+
+    private func makeWorklistStudy(from bucket: OpenedWorklistBucket) -> PACSWorklistStudy? {
+        let series = bucket.series.values.sorted(by: historySeriesSort)
+        guard let first = series.first else { return nil }
+        return PACSWorklistStudy(
+            id: bucket.id,
+            patientID: firstMeaningful(bucket.patientID, first.patientID),
+            patientName: firstMeaningful(bucket.patientName, first.patientName),
+            accessionNumber: bucket.accessionNumber,
+            studyUID: firstMeaningful(bucket.studyUID, first.studyUID),
+            studyDescription: firstMeaningful(bucket.studyDescription, first.studyDescription),
+            studyDate: "",
+            studyTime: "",
+            referringPhysicianName: "",
+            sourcePath: firstMeaningful(bucket.sourcePath, first.sourcePath),
+            series: series,
+            status: studyStatuses[bucket.id] ?? .unread,
+            indexedAt: bucket.openedAt
+        )
+    }
+
+    private func historySnapshot(from reference: ViewerSessionVolumeReference,
+                                 study: ViewerSessionStudyReference?,
+                                 openedAt: Date) -> PACSIndexedSeriesSnapshot {
+        PACSIndexedSeriesSnapshot(
+            id: historySnapshotID(for: reference.volumeIdentity),
+            kind: historyKind(reference.kind),
+            seriesUID: historySeriesUID(from: reference.volumeIdentity),
+            studyUID: firstMeaningful(study?.studyUID ?? "", historyStudyUID(from: reference.studyKey)),
+            modality: reference.modality,
+            patientID: firstMeaningful(study?.patientID ?? "", reference.patientID),
+            patientName: firstMeaningful(study?.patientName ?? "", reference.patientName),
+            accessionNumber: study?.accessionNumber ?? "",
+            studyDescription: firstMeaningful(study?.studyDescription ?? "", reference.studyDescription),
+            studyDate: "",
+            seriesDescription: firstMeaningful(reference.seriesDescription, "Series"),
+            sourcePath: historySourcePath(for: reference.sourceFiles),
+            filePaths: reference.sourceFiles,
+            instanceCount: max(reference.sourceFiles.count, 1),
+            indexedAt: openedAt
+        )
+    }
+
+    private func historySnapshot(from recent: RecentVolume) -> PACSIndexedSeriesSnapshot {
+        PACSIndexedSeriesSnapshot(
+            id: historySnapshotID(for: recent.id),
+            kind: historyKind(recent.kind),
+            seriesUID: historySeriesUID(from: recent.id),
+            studyUID: "",
+            modality: recent.modality,
+            patientID: "",
+            patientName: recent.patientName,
+            studyDescription: firstMeaningful(recent.studyDescription, recent.displayStudyDescription),
+            studyDate: "",
+            seriesDescription: firstMeaningful(recent.seriesDescription, recent.displaySeriesDescription, "Series"),
+            sourcePath: historySourcePath(for: recent.sourceFiles),
+            filePaths: recent.sourceFiles,
+            instanceCount: max(recent.sourceFiles.count, 1),
+            indexedAt: recent.openedAt
+        )
+    }
+
+    private func historyWorklistID(forStudyKey studyKey: String) -> String {
+        studyKey
+    }
+
+    private func historyWorklistID(for recent: RecentVolume) -> String {
+        guard let first = recent.sourceFiles.first, !first.isEmpty else {
+            return "volume:\(recent.id)"
+        }
+        let parent = URL(fileURLWithPath: first).deletingLastPathComponent().path
+        return parent.isEmpty ? "volume:\(recent.id)" : "folder:\(parent)"
+    }
+
+    private func historySnapshotID(for volumeIdentity: String) -> String {
+        "history:\(volumeIdentity)"
+    }
+
+    private func historyStudyUID(from studyKey: String) -> String {
+        let prefix = "study:"
+        guard studyKey.hasPrefix(prefix) else { return "" }
+        return String(studyKey.dropFirst(prefix.count))
+    }
+
+    private func historySeriesUID(from volumeIdentity: String) -> String {
+        let prefix = "series:"
+        guard volumeIdentity.hasPrefix(prefix) else { return "" }
+        return String(volumeIdentity.dropFirst(prefix.count))
+    }
+
+    private func historyKind(_ kind: RecentVolume.Kind) -> PACSIndexedSeriesKind {
+        switch kind {
+        case .dicom: return .dicom
+        case .nifti: return .nifti
+        }
+    }
+
+    private func historySourcePath(for sourceFiles: [String]) -> String {
+        guard let first = sourceFiles.first, !first.isEmpty else { return "" }
+        return URL(fileURLWithPath: first).deletingLastPathComponent().path
+    }
+
+    private func historyStudySort(_ lhs: PACSWorklistStudy,
+                                  _ rhs: PACSWorklistStudy) -> Bool {
+        let lhsRank = worklistStatusSortRank(lhs.status)
+        let rhsRank = worklistStatusSortRank(rhs.status)
+        if lhsRank != rhsRank { return lhsRank < rhsRank }
+        if lhs.indexedAt != rhs.indexedAt { return lhs.indexedAt > rhs.indexedAt }
+        if lhs.patientName != rhs.patientName {
+            return lhs.patientName.localizedStandardCompare(rhs.patientName) == .orderedAscending
+        }
+        if lhs.studyDescription != rhs.studyDescription {
+            return lhs.studyDescription.localizedStandardCompare(rhs.studyDescription) == .orderedAscending
+        }
+        return lhs.id < rhs.id
+    }
+
+    private func historySeriesSort(_ lhs: PACSIndexedSeriesSnapshot,
+                                   _ rhs: PACSIndexedSeriesSnapshot) -> Bool {
+        let lhsRank = modalitySortRank(lhs.modality)
+        let rhsRank = modalitySortRank(rhs.modality)
+        if lhsRank != rhsRank { return lhsRank < rhsRank }
+        if lhs.seriesDescription != rhs.seriesDescription {
+            return lhs.seriesDescription.localizedStandardCompare(rhs.seriesDescription) == .orderedAscending
+        }
+        return lhs.id < rhs.id
+    }
+
+    private func worklistStatusSortRank(_ status: WorklistStudyStatus) -> Int {
+        switch status {
+        case .flagged: return 0
+        case .unread: return 1
+        case .inProgress: return 2
+        case .complete: return 3
+        }
+    }
+
+    private func modalitySortRank(_ modality: String) -> Int {
+        switch Modality.normalize(modality) {
+        case .CT: return 0
+        case .PT: return 1
+        case .MR: return 2
+        case .SEG: return 3
+        default: return 10
+        }
+    }
+
+    private func firstMeaningful(_ values: String...) -> String {
+        for value in values {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        return ""
+    }
+
     private var archiveScopes: [PACSArchiveScope] {
-        PACSArchiveScope.grouped(from: worklistStudies)
+        PACSArchiveScope.grouped(from: indexedArchiveStudies)
+    }
+
+    private var archiveTreeRoots: [PACSArchiveTreeNode] {
+        PACSArchiveTreeBuilder.roots(
+            from: indexedArchiveStudies,
+            savedRoots: vm.savedArchiveRoots,
+            shortcuts: LocalArchiveShortcut.known
+        )
+    }
+
+    private var filteredArchiveTreeRoots: [PACSArchiveTreeNode] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return archiveTreeRoots }
+        return archiveTreeRoots.compactMap { $0.filtered(matching: query) }
+    }
+
+    private var selectedArchiveTreeNode: PACSArchiveTreeNode? {
+        guard archiveFilterID.hasPrefix(PACSArchiveTreeNode.filterIDPrefix) else { return nil }
+        return archiveTreeRoots.lazy.compactMap { $0.descendant(id: archiveFilterID) }.first
+    }
+
+    private var selectedWorklistTreeNode: PACSArchiveTreeNode? {
+        guard archiveFilterID.hasPrefix(PACSArchiveTreeNode.filterIDPrefix) else { return nil }
+        return allWorklistTreeRoots.lazy.compactMap { $0.descendant(id: archiveFilterID) }.first
     }
 
     private var availableLocalArchiveShortcuts: [LocalArchiveShortcut] {
@@ -1157,6 +1483,22 @@ struct StudyBrowserView: View {
             root.displayName.lowercased().contains(query)
             || root.path.lowercased().contains(query)
         }
+    }
+
+    private func archiveStats(for root: PACSArchiveRoot) -> ArchiveStudyStats {
+        let live = ArchiveStudyStats(
+            studies: indexedArchiveStudies.filter { study($0, belongsTo: root) }
+        )
+        if live.hasIndexedContent { return live }
+        return ArchiveStudyStats(studyCount: root.studyCount,
+                                 seriesCount: root.seriesCount,
+                                 instanceCount: 0)
+    }
+
+    private func archiveStats(forPath path: String) -> ArchiveStudyStats {
+        ArchiveStudyStats(
+            studies: indexedArchiveStudies.filter { study($0, belongsToPathPrefix: path) }
+        )
     }
 
     private var filteredArchiveScopes: [PACSArchiveScope] {
@@ -1210,6 +1552,88 @@ struct StudyBrowserView: View {
             }
             return series.filePaths.contains { root.contains(path: $0) }
         }
+    }
+
+    private func study(_ study: PACSWorklistStudy, belongsToPathPrefix path: String) -> Bool {
+        let prefix = ImageVolume.canonicalPath(path)
+        guard !prefix.isEmpty else { return false }
+        return study.series.contains { series in
+            if pathIsInside(series.sourcePath, prefix: prefix) {
+                return true
+            }
+            return series.filePaths.contains { pathIsInside($0, prefix: prefix) }
+        }
+    }
+
+    private func pathIsInside(_ candidate: String, prefix: String) -> Bool {
+        let normalized = ImageVolume.canonicalPath(candidate)
+        return normalized == prefix || normalized.hasPrefix(prefix + "/")
+    }
+
+    private func archiveTreeExpansionBinding(for node: PACSArchiveTreeNode,
+                                             depth: Int) -> Binding<Bool> {
+        Binding(
+            get: {
+                if expandedArchiveTreeNodeIDs.contains(node.id) { return true }
+                if collapsedArchiveTreeNodeIDs.contains(node.id) { return false }
+                return depth == 0
+            },
+            set: { expanded in
+                if expanded {
+                    expandedArchiveTreeNodeIDs.insert(node.id)
+                    collapsedArchiveTreeNodeIDs.remove(node.id)
+                } else {
+                    collapsedArchiveTreeNodeIDs.insert(node.id)
+                    expandedArchiveTreeNodeIDs.remove(node.id)
+                }
+            }
+        )
+    }
+
+    private func worklistTreeExpansionBinding(for node: PACSArchiveTreeNode,
+                                              depth: Int) -> Binding<Bool> {
+        Binding(
+            get: {
+                if expandedWorklistTreeNodeIDs.contains(node.id) { return true }
+                if collapsedWorklistTreeNodeIDs.contains(node.id) { return false }
+                return depth == 0
+            },
+            set: { expanded in
+                if expanded {
+                    expandedWorklistTreeNodeIDs.insert(node.id)
+                    collapsedWorklistTreeNodeIDs.remove(node.id)
+                } else {
+                    collapsedWorklistTreeNodeIDs.insert(node.id)
+                    expandedWorklistTreeNodeIDs.remove(node.id)
+                }
+            }
+        )
+    }
+
+    private func showWorklistTreeBranch(_ node: PACSArchiveTreeNode) {
+        guard node.study == nil else {
+            if let study = node.study {
+                openStudy(study)
+            }
+            return
+        }
+        archiveFilterID = node.id
+        searchText = ""
+        worklistDisplayLimit = worklistDisplayPageSize
+        browserMode = .worklist
+    }
+
+    private func showArchiveTreeBranch(_ node: PACSArchiveTreeNode) {
+        guard node.study == nil else {
+            if let study = node.study {
+                openStudy(study)
+            }
+            return
+        }
+        archiveFilterID = node.id
+        searchText = ""
+        worklistDisplayLimit = worklistDisplayPageSize
+        browserMode = .worklist
     }
 
     private var fileBrowserHeaderRow: some View {
@@ -1297,6 +1721,9 @@ struct StudyBrowserView: View {
     }
 
     private func openStudy(_ study: PACSWorklistStudy) {
+        if removedWorklistStudyIDs.remove(study.id) != nil {
+            persistRemovedWorklistStudies()
+        }
         setStatus(.inProgress, for: study)
         Task { await vm.openWorklistStudy(study) }
     }
@@ -1481,8 +1908,9 @@ struct StudyBrowserView: View {
 
     private func reloadIndexResults() {
         do {
-            indexedSeries = try modelContext.fetch(indexFetchDescriptor(limit: indexFetchLimit)).map(\.snapshot)
-            indexedTotalCount = try modelContext.fetchCount(indexFetchDescriptor(limit: nil))
+            let snapshots = try modelContext.fetch(indexFetchDescriptor()).map(\.snapshot)
+            indexedSeries = snapshots
+            indexedTotalCount = snapshots.count
         } catch {
             indexedSeries = []
             indexedTotalCount = 0
@@ -1490,7 +1918,7 @@ struct StudyBrowserView: View {
         }
     }
 
-    private func indexFetchDescriptor(limit: Int?) -> FetchDescriptor<PACSIndexedSeries> {
+    private func indexFetchDescriptor() -> FetchDescriptor<PACSIndexedSeries> {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let sort = [
             SortDescriptor(\PACSIndexedSeries.indexedAt, order: .reverse),
@@ -1505,9 +1933,6 @@ struct StudyBrowserView: View {
                 predicate: #Predicate { $0.searchableTextLower.contains(query) },
                 sortBy: sort
             )
-        }
-        if let limit {
-            descriptor.fetchLimit = limit
         }
         return descriptor
     }
@@ -1533,6 +1958,16 @@ struct StudyBrowserView: View {
         }
     }
 
+    private func removeStudyFromWorklist(_ study: PACSWorklistStudy) {
+        removedWorklistStudyIDs.insert(study.id)
+        expandedWorklistTreeNodeIDs.remove(PACSArchiveTreeNode.studyID(study, path: study.sourcePath))
+        studyStatuses.removeValue(forKey: study.id)
+        persistStatusOverrides()
+        persistRemovedWorklistStudies()
+        let title = firstMeaningful(study.patientName, study.studyDescription, study.id)
+        vm.statusMessage = "Removed from worklist: \(title)"
+    }
+
     private func setStatus(_ status: WorklistStudyStatus, for study: PACSWorklistStudy) {
         studyStatuses[study.id] = status
         persistStatusOverrides()
@@ -1555,6 +1990,22 @@ struct StudyBrowserView: View {
         let raw = studyStatuses.mapValues(\.rawValue)
         if let data = try? JSONEncoder().encode(raw) {
             UserDefaults.standard.set(data, forKey: statusDefaultsKey)
+        }
+    }
+
+    private func loadRemovedWorklistStudies() {
+        guard let data = UserDefaults.standard.data(forKey: removedWorklistDefaultsKey),
+              let raw = try? JSONDecoder().decode([String].self, from: data) else {
+            removedWorklistStudyIDs = []
+            return
+        }
+        removedWorklistStudyIDs = Set(raw)
+    }
+
+    private func persistRemovedWorklistStudies() {
+        let raw = Array(removedWorklistStudyIDs).sorted()
+        if let data = try? JSONEncoder().encode(raw) {
+            UserDefaults.standard.set(data, forKey: removedWorklistDefaultsKey)
         }
     }
 }
@@ -1774,7 +2225,7 @@ private struct WorklistStudyRow: View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 8) {
                 WorklistStatusBadge(status: study.status)
-                Text(study.patientName.isEmpty ? "Unknown patient" : study.patientName)
+                Text(primaryTitle)
                     .font(.system(size: 12, weight: .semibold))
                     .lineLimit(1)
                 Spacer()
@@ -1784,7 +2235,9 @@ private struct WorklistStudyRow: View {
             }
 
             HStack(spacing: 6) {
-                Text(study.patientID.isEmpty ? "No MRN" : study.patientID)
+                if !displayPatientID.isEmpty {
+                    Text(displayPatientID)
+                }
                 if !study.accessionNumber.isEmpty {
                     Text(study.accessionNumber)
                 }
@@ -1796,7 +2249,7 @@ private struct WorklistStudyRow: View {
             .foregroundColor(.secondary)
             .lineLimit(1)
 
-            Text(study.studyDescription.isEmpty ? "Untitled study" : study.studyDescription)
+            Text(displayStudyDescription)
                 .font(.system(size: 11))
                 .foregroundColor(.primary)
                 .lineLimit(1)
@@ -1813,6 +2266,86 @@ private struct WorklistStudyRow: View {
             .foregroundColor(.secondary)
         }
         .padding(.vertical, 3)
+    }
+
+    private var primaryTitle: String {
+        if !displayPatientName.isEmpty { return displayPatientName }
+        return displayStudyDescription
+    }
+
+    private var displayPatientName: String {
+        meaningfulHeaderTitle(study.patientName)
+    }
+
+    private var displayPatientID: String {
+        meaningfulHeaderTitle(study.patientID)
+    }
+
+    private var displayStudyDescription: String {
+        let studyTitle = meaningfulHeaderTitle(study.studyDescription)
+        if !studyTitle.isEmpty { return studyTitle }
+        let folder = sourceFolderTitle(study.sourcePath)
+        return folder.isEmpty ? "Untitled study" : folder
+    }
+
+    private func sourceFolderTitle(_ sourcePath: String) -> String {
+        guard !sourcePath.isEmpty else { return "" }
+        let url = URL(fileURLWithPath: sourcePath)
+        let parent = url.deletingLastPathComponent()
+        let candidates = [
+            parent.lastPathComponent,
+            parent.deletingLastPathComponent().lastPathComponent
+        ]
+        for candidate in candidates {
+            let title = meaningfulHeaderTitle(candidate)
+            if !title.isEmpty { return title }
+        }
+        return meaningfulHeaderTitle(url.lastPathComponent)
+    }
+
+    private func meaningfulHeaderTitle(_ value: String) -> String {
+        let trimmed = stripKnownVolumeExtension(from: value.trimmingCharacters(in: .whitespacesAndNewlines))
+        guard !isGenericHeaderTitle(trimmed) else { return "" }
+        return trimmed
+    }
+
+    private func stripKnownVolumeExtension(from value: String) -> String {
+        let lower = value.lowercased()
+        if lower.hasSuffix(".nii.gz") {
+            return String(value.dropLast(7))
+        }
+        if lower.hasSuffix(".nii") || lower.hasSuffix(".mha") || lower.hasSuffix(".mhd") || lower.hasSuffix(".nrrd") {
+            return String(value.dropLast(4))
+        }
+        return value
+    }
+
+    private func isGenericHeaderTitle(_ value: String) -> Bool {
+        let normalized = value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+        guard !normalized.isEmpty else { return true }
+        return [
+            "nifti",
+            "nifti study",
+            "nifti import",
+            "untitled",
+            "untitled study",
+            "study",
+            "image",
+            "images",
+            "data",
+            "files",
+            "ct",
+            "pt",
+            "pet",
+            "mr",
+            "mri"
+        ].contains(normalized)
     }
 
     private func displayDate(_ dicomDate: String) -> String {
@@ -1919,6 +2452,520 @@ private struct EmptyBrowserRow: View {
             Spacer()
         }
         .listRowBackground(Color.clear)
+    }
+}
+
+private struct ArchiveTreeNodeView: View {
+    let node: PACSArchiveTreeNode
+    let depth: Int
+    let expansion: (PACSArchiveTreeNode, Int) -> Binding<Bool>
+    let onShowBranch: (PACSArchiveTreeNode) -> Void
+    let onOpenStudy: (PACSWorklistStudy) -> Void
+    let onSetStatus: (WorklistStudyStatus, PACSWorklistStudy) -> Void
+    let onRemoveStudy: ((PACSWorklistStudy) -> Void)?
+
+    var body: some View {
+        if let study = node.study {
+            Button {
+                onOpenStudy(study)
+            } label: {
+                ArchiveTreeStudyRow(node: node, study: study, depth: depth)
+            }
+            .buttonStyle(.plain)
+            .contextMenu {
+                Button {
+                    onOpenStudy(study)
+                } label: {
+                    Label("Open Study", systemImage: "rectangle.3.group")
+                }
+                Menu("Status") {
+                    ForEach(WorklistStudyStatus.allCases) { status in
+                        Button(status.displayName) {
+                            onSetStatus(status, study)
+                        }
+                    }
+                }
+                if let onRemoveStudy {
+                    Button(role: .destructive) {
+                        onRemoveStudy(study)
+                    } label: {
+                        Label("Remove from Worklist", systemImage: "minus.circle")
+                    }
+                }
+            }
+        } else {
+            DisclosureGroup(isExpanded: expansion(node, depth)) {
+                ForEach(node.children) { child in
+                    ArchiveTreeNodeView(
+                        node: child,
+                        depth: depth + 1,
+                        expansion: expansion,
+                        onShowBranch: onShowBranch,
+                        onOpenStudy: onOpenStudy,
+                        onSetStatus: onSetStatus,
+                        onRemoveStudy: onRemoveStudy
+                    )
+                }
+            } label: {
+                ArchiveTreeBranchRow(node: node, depth: depth, onShowBranch: onShowBranch)
+            }
+            .contextMenu {
+                Button {
+                    onShowBranch(node)
+                } label: {
+                    Label("Show Studies in Branch", systemImage: "line.3.horizontal.decrease.circle")
+                }
+            }
+        }
+    }
+}
+
+private struct ArchiveTreeBranchRow: View {
+    let node: PACSArchiveTreeNode
+    let depth: Int
+    let onShowBranch: (PACSArchiveTreeNode) -> Void
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: node.systemImage)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(depth == 0 ? TracerTheme.accentBright : TracerTheme.accent)
+                .frame(width: 18)
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(node.title)
+                        .font(.system(size: depth == 0 ? 12 : 11, weight: .semibold))
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    if !node.modalitySummary.isEmpty {
+                        Text(node.modalitySummary)
+                            .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                if !node.subtitle.isEmpty {
+                    Text(node.subtitle)
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+                HStack(spacing: 8) {
+                    Text("\(node.studyCount) studies")
+                    Text("\(node.seriesCount) series")
+                    if node.instanceCount > 0 {
+                        Text("\(node.instanceCount) images")
+                    }
+                }
+                .font(.system(size: 9))
+                .foregroundColor(.secondary)
+            }
+
+            Button {
+                onShowBranch(node)
+            } label: {
+                Image(systemName: "line.3.horizontal.decrease.circle")
+                    .font(.system(size: 11))
+            }
+            .buttonStyle(.borderless)
+            .help("Show studies in this branch")
+        }
+        .padding(.leading, CGFloat(max(0, depth)) * 8)
+        .padding(.vertical, 3)
+        .contentShape(Rectangle())
+    }
+}
+
+private struct ArchiveTreeStudyRow: View {
+    let node: PACSArchiveTreeNode
+    let study: PACSWorklistStudy
+    let depth: Int
+
+    var body: some View {
+        HStack(spacing: 9) {
+            WorklistStatusBadge(status: study.status)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(node.title)
+                        .font(.system(size: 11, weight: .medium))
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    Text(study.modalitySummary.isEmpty ? "-" : study.modalitySummary)
+                        .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+                HStack(spacing: 6) {
+                    if !study.patientID.isEmpty {
+                        Text(study.patientID)
+                    }
+                    if !study.studyDate.isEmpty {
+                        Text(study.studyDate)
+                    }
+                    Text("\(study.seriesCount) series")
+                }
+                .font(.system(size: 9))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                if !node.subtitle.isEmpty {
+                    Text(node.subtitle)
+                        .font(.system(size: 8, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            Image(systemName: "rectangle.3.group")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+        }
+        .padding(.leading, CGFloat(max(0, depth)) * 8)
+        .padding(.vertical, 2)
+        .contentShape(Rectangle())
+    }
+}
+
+private struct PACSArchiveTreeNode: Identifiable {
+    static let filterIDPrefix = "__archive_tree__:"
+
+    let id: String
+    let path: String
+    let title: String
+    let subtitle: String
+    let systemImage: String
+    let study: PACSWorklistStudy?
+    let children: [PACSArchiveTreeNode]
+    let studyCount: Int
+    let seriesCount: Int
+    let instanceCount: Int
+    let modalities: [String]
+
+    var modalitySummary: String {
+        modalities.joined(separator: "/")
+    }
+
+    static func branchID(path: String) -> String {
+        filterIDPrefix + ImageVolume.canonicalPath(path)
+    }
+
+    static func studyID(_ study: PACSWorklistStudy, path: String) -> String {
+        "archive-study:\(study.id):\(ImageVolume.canonicalPath(path))"
+    }
+
+    static func filterPath(from id: String) -> String? {
+        guard id.hasPrefix(filterIDPrefix) else { return nil }
+        return String(id.dropFirst(filterIDPrefix.count))
+    }
+
+    func descendant(id targetID: String) -> PACSArchiveTreeNode? {
+        if id == targetID { return self }
+        for child in children {
+            if let match = child.descendant(id: targetID) {
+                return match
+            }
+        }
+        return nil
+    }
+
+    func filtered(matching query: String) -> PACSArchiveTreeNode? {
+        let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return self }
+        if searchableText.contains(normalized) {
+            return self
+        }
+        let filteredChildren = children.compactMap { $0.filtered(matching: query) }
+        guard !filteredChildren.isEmpty else { return nil }
+        return PACSArchiveTreeNode(
+            id: id,
+            path: path,
+            title: title,
+            subtitle: subtitle,
+            systemImage: systemImage,
+            study: study,
+            children: filteredChildren,
+            studyCount: filteredChildren.reduce(0) { $0 + $1.studyCount },
+            seriesCount: filteredChildren.reduce(0) { $0 + $1.seriesCount },
+            instanceCount: filteredChildren.reduce(0) { $0 + $1.instanceCount },
+            modalities: Array(Set(filteredChildren.flatMap(\.modalities))).sorted()
+        )
+    }
+
+    private var searchableText: String {
+        ([
+            title,
+            subtitle,
+            path,
+            modalitySummary,
+            study?.searchableText ?? "",
+        ] + children.map(\.title))
+            .joined(separator: " ")
+            .lowercased()
+    }
+}
+
+private enum PACSArchiveTreeBuilder {
+    private struct DatasetDescriptor {
+        let path: String
+        let title: String
+        let subtitle: String
+    }
+
+    private final class MutableNode {
+        let title: String
+        let path: String
+        let subtitle: String
+        let systemImage: String
+        var childOrder: [String] = []
+        var children: [String: MutableNode] = [:]
+        var studies: [(study: PACSWorklistStudy, path: String)] = []
+
+        init(title: String, path: String, subtitle: String, systemImage: String) {
+            self.title = title
+            self.path = path
+            self.subtitle = subtitle
+            self.systemImage = systemImage
+        }
+
+        func child(title: String, path: String, subtitle: String) -> MutableNode {
+            let key = ImageVolume.canonicalPath(path)
+            if let existing = children[key] {
+                return existing
+            }
+            let node = MutableNode(title: title, path: key, subtitle: subtitle, systemImage: "folder")
+            children[key] = node
+            childOrder.append(key)
+            return node
+        }
+
+        func addStudy(_ study: PACSWorklistStudy, branch: [(title: String, path: String)], studyPath: String) {
+            if let first = branch.first {
+                child(title: first.title, path: first.path, subtitle: first.path)
+                    .addStudy(study, branch: Array(branch.dropFirst()), studyPath: studyPath)
+            } else {
+                studies.append((study, studyPath))
+            }
+        }
+
+        func finalized() -> PACSArchiveTreeNode {
+            let branchChildren = childOrder.compactMap { children[$0]?.finalized() }
+                .sorted { lhs, rhs in
+                    if lhs.studyCount != rhs.studyCount { return lhs.studyCount > rhs.studyCount }
+                    return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+                }
+            let studyChildren = studies
+                .sorted { lhs, rhs in
+                    if lhs.study.studyDate != rhs.study.studyDate {
+                        return lhs.study.studyDate > rhs.study.studyDate
+                    }
+                    return studyTitle(lhs.study).localizedCaseInsensitiveCompare(studyTitle(rhs.study)) == .orderedAscending
+                }
+                .map { entry in
+                    PACSArchiveTreeNode(
+                        id: PACSArchiveTreeNode.studyID(entry.study, path: entry.path),
+                        path: entry.path,
+                        title: studyTitle(entry.study),
+                        subtitle: entry.path,
+                        systemImage: "rectangle.3.group",
+                        study: entry.study,
+                        children: [],
+                        studyCount: 1,
+                        seriesCount: entry.study.seriesCount,
+                        instanceCount: entry.study.instanceCount,
+                        modalities: entry.study.modalities
+                    )
+                }
+            let allChildren = branchChildren + studyChildren
+            return PACSArchiveTreeNode(
+                id: PACSArchiveTreeNode.branchID(path: path),
+                path: path,
+                title: title,
+                subtitle: subtitle,
+                systemImage: systemImage,
+                study: nil,
+                children: allChildren,
+                studyCount: allChildren.reduce(0) { $0 + $1.studyCount },
+                seriesCount: allChildren.reduce(0) { $0 + $1.seriesCount },
+                instanceCount: allChildren.reduce(0) { $0 + $1.instanceCount },
+                modalities: Array(Set(allChildren.flatMap(\.modalities))).sorted()
+            )
+        }
+    }
+
+    static func roots(from studies: [PACSWorklistStudy],
+                      savedRoots: [PACSArchiveRoot],
+                      shortcuts: [LocalArchiveShortcut]) -> [PACSArchiveTreeNode] {
+        var rootOrder: [String] = []
+        var roots: [String: MutableNode] = [:]
+
+        for study in studies {
+            let studyPath = studyDirectoryPath(for: study)
+            let dataset = datasetDescriptor(for: studyPath,
+                                            savedRoots: savedRoots,
+                                            shortcuts: shortcuts)
+            let root = roots[dataset.path] ?? {
+                let node = MutableNode(title: dataset.title,
+                                       path: dataset.path,
+                                       subtitle: dataset.subtitle,
+                                       systemImage: "externaldrive.connected.to.line.below")
+                roots[dataset.path] = node
+                rootOrder.append(dataset.path)
+                return node
+            }()
+            root.addStudy(study,
+                          branch: branchPath(from: dataset.path, to: studyPath, study: study),
+                          studyPath: studyPath)
+        }
+
+        return rootOrder.compactMap { roots[$0]?.finalized() }
+            .sorted { lhs, rhs in
+                if lhs.studyCount != rhs.studyCount { return lhs.studyCount > rhs.studyCount }
+                return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+            }
+    }
+
+    private static func datasetDescriptor(for studyPath: String,
+                                          savedRoots: [PACSArchiveRoot],
+                                          shortcuts: [LocalArchiveShortcut]) -> DatasetDescriptor {
+        let canonicalStudyPath = ImageVolume.canonicalPath(studyPath)
+        let savedMatches = savedRoots
+            .map { root in (path: ImageVolume.canonicalPath(root.path), title: root.displayName) }
+            .filter { pathIsInside(canonicalStudyPath, prefix: $0.path) }
+        if let match = savedMatches.max(by: { $0.path.count < $1.path.count }) {
+            return DatasetDescriptor(path: match.path,
+                                     title: match.title,
+                                     subtitle: parentPath(match.path))
+        }
+
+        let shortcutMatches = shortcuts
+            .map { shortcut in (path: ImageVolume.canonicalPath(shortcut.path), title: shortcut.title) }
+            .filter { pathIsInside(canonicalStudyPath, prefix: $0.path) }
+        if let match = shortcutMatches.max(by: { $0.path.count < $1.path.count }) {
+            return DatasetDescriptor(path: match.path,
+                                     title: match.title,
+                                     subtitle: parentPath(match.path))
+        }
+
+        let components = pathComponents(canonicalStudyPath)
+        if let fdg = components.firstIndex(of: "FDG-PET-CT-Lesions") {
+            let path = path(from: Array(components[0...fdg]))
+            return DatasetDescriptor(path: path,
+                                     title: "FDG PET/CT Lesions",
+                                     subtitle: parentPath(path))
+        }
+        if let manifest = components.firstIndex(where: { $0.hasPrefix("manifest-") }) {
+            let path = path(from: Array(components[0...manifest]))
+            return DatasetDescriptor(path: path,
+                                     title: components[manifest],
+                                     subtitle: parentPath(path))
+        }
+        if let subject = components.firstIndex(where: { $0.hasPrefix("sub-") }), subject > 0 {
+            let path = path(from: Array(components[0..<subject]))
+            return DatasetDescriptor(path: path,
+                                     title: lastPathComponent(path, fallback: "BIDS Dataset"),
+                                     subtitle: parentPath(path))
+        }
+
+        let fallback = parentPath(parentPath(canonicalStudyPath))
+        let path = fallback.isEmpty ? parentPath(canonicalStudyPath) : fallback
+        return DatasetDescriptor(path: path,
+                                 title: lastPathComponent(path, fallback: "Indexed Dataset"),
+                                 subtitle: parentPath(path))
+    }
+
+    private static func branchPath(from datasetPath: String,
+                                   to studyPath: String,
+                                   study: PACSWorklistStudy) -> [(title: String, path: String)] {
+        let datasetComponents = pathComponents(datasetPath)
+        let studyComponents = pathComponents(studyPath)
+        let relative = studyComponents.starts(with: datasetComponents)
+            ? Array(studyComponents.dropFirst(datasetComponents.count))
+            : []
+        var branchComponents = relative.count > 1 ? Array(relative.dropLast()) : []
+        if branchComponents.isEmpty {
+            let patient = meaningful(study.patientName) ?? meaningful(study.patientID)
+            if let patient {
+                branchComponents = [patient]
+            }
+        }
+
+        var running = ImageVolume.canonicalPath(datasetPath)
+        return branchComponents.map { component in
+            running = append(component: component, to: running)
+            return (title: component, path: running)
+        }
+    }
+
+    private static func studyDirectoryPath(for study: PACSWorklistStudy) -> String {
+        guard let series = study.series.first else {
+            return ImageVolume.canonicalPath(study.sourcePath)
+        }
+        let firstPath = series.filePaths.first ?? series.sourcePath
+        let fileParent = parentPath(firstPath)
+        if series.kind == .dicom {
+            let studyParent = parentPath(fileParent)
+            return studyParent.isEmpty ? fileParent : studyParent
+        }
+        return fileParent
+    }
+
+    private static func studyTitle(_ study: PACSWorklistStudy) -> String {
+        meaningful(study.studyDescription)
+            ?? meaningful(study.patientName)
+            ?? meaningful(study.patientID)
+            ?? "Untitled study"
+    }
+
+    private static func meaningful(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let normalized = trimmed
+            .lowercased()
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+        let generic = [
+            "nifti",
+            "nifti study",
+            "nifti import",
+            "untitled",
+            "untitled study",
+            "study",
+            "image",
+            "images",
+            "data",
+            "files",
+        ]
+        return generic.contains(normalized) ? nil : trimmed
+    }
+
+    private static func pathIsInside(_ candidate: String, prefix: String) -> Bool {
+        let path = ImageVolume.canonicalPath(candidate)
+        let root = ImageVolume.canonicalPath(prefix)
+        return path == root || path.hasPrefix(root + "/")
+    }
+
+    private static func append(component: String, to path: String) -> String {
+        let root = ImageVolume.canonicalPath(path)
+        return root == "/" ? "/" + component : root + "/" + component
+    }
+
+    private static func parentPath(_ path: String) -> String {
+        let parent = (ImageVolume.canonicalPath(path) as NSString).deletingLastPathComponent
+        return parent == "." ? "" : parent
+    }
+
+    private static func lastPathComponent(_ path: String, fallback: String) -> String {
+        let last = (ImageVolume.canonicalPath(path) as NSString).lastPathComponent
+        return last.isEmpty ? fallback : last
+    }
+
+    private static func pathComponents(_ path: String) -> [String] {
+        ImageVolume.canonicalPath(path).split(separator: "/").map(String.init)
+    }
+
+    private static func path(from components: [String]) -> String {
+        components.isEmpty ? "/" : "/" + components.joined(separator: "/")
     }
 }
 
@@ -2210,8 +3257,43 @@ private struct LocalArchiveShortcut: Identifiable, Hashable {
     ]
 }
 
+private struct ArchiveStudyStats: Equatable {
+    let studyCount: Int
+    let seriesCount: Int
+    let instanceCount: Int
+
+    init(studyCount: Int = 0, seriesCount: Int = 0, instanceCount: Int = 0) {
+        self.studyCount = studyCount
+        self.seriesCount = seriesCount
+        self.instanceCount = instanceCount
+    }
+
+    init(studies: [PACSWorklistStudy]) {
+        self.studyCount = Set(studies.map(\.id)).count
+        self.seriesCount = studies.reduce(0) { $0 + $1.seriesCount }
+        self.instanceCount = studies.reduce(0) { $0 + $1.instanceCount }
+    }
+
+    var hasIndexedContent: Bool {
+        studyCount > 0 || seriesCount > 0 || instanceCount > 0
+    }
+
+    var studyLabel: String {
+        studyCount == 1 ? "1 study" : "\(studyCount) studies"
+    }
+
+    var seriesLabel: String {
+        seriesCount == 1 ? "1 series" : "\(seriesCount) series"
+    }
+
+    var imageLabel: String {
+        instanceCount == 1 ? "1 image" : "\(instanceCount) images"
+    }
+}
+
 private struct LocalArchiveShortcutRow: View {
     let shortcut: LocalArchiveShortcut
+    let stats: ArchiveStudyStats
 
     var body: some View {
         HStack(spacing: 10) {
@@ -2234,6 +3316,18 @@ private struct LocalArchiveShortcutRow: View {
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundColor(.secondary)
                     .lineLimit(1)
+
+                HStack(spacing: 8) {
+                    Text(stats.studyLabel)
+                    if stats.seriesCount > 0 {
+                        Text(stats.seriesLabel)
+                    }
+                    if stats.instanceCount > 0 {
+                        Text(stats.imageLabel)
+                    }
+                }
+                .font(.system(size: 9))
+                .foregroundColor(.secondary)
             }
 
             Spacer(minLength: 6)
@@ -2248,6 +3342,7 @@ private struct LocalArchiveShortcutRow: View {
 
 private struct SavedArchiveRootRow: View {
     let root: PACSArchiveRoot
+    let stats: ArchiveStudyStats
 
     var body: some View {
         HStack(spacing: 10) {
@@ -2262,11 +3357,10 @@ private struct SavedArchiveRootRow: View {
                         .font(.system(size: 12, weight: .semibold))
                         .lineLimit(1)
                     Spacer()
-                    if root.studyCount > 0 || root.seriesCount > 0 {
-                        Text("\(root.studyCount) studies")
-                            .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                            .foregroundColor(.secondary)
-                    }
+                    Text(stats.studyLabel)
+                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
                 }
 
                 Text(root.path)
@@ -2276,8 +3370,11 @@ private struct SavedArchiveRootRow: View {
 
                 HStack(spacing: 8) {
                     Text(root.exists ? "Available" : "Missing")
-                    if root.seriesCount > 0 {
-                        Text("\(root.seriesCount) series")
+                    if stats.seriesCount > 0 {
+                        Text(stats.seriesLabel)
+                    }
+                    if stats.instanceCount > 0 {
+                        Text(stats.imageLabel)
                     }
                     if let lastIndexedAt = root.lastIndexedAt {
                         Text("Indexed \(lastIndexedAt.formatted(date: .abbreviated, time: .shortened))")
@@ -2354,6 +3451,11 @@ private struct SeriesRow: View {
                     Text(series.patientName)
                         .font(.system(size: 10))
                         .foregroundColor(.secondary)
+                    if series.seriesNumber > 0 {
+                        Text("#\(series.seriesNumber)")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    }
                     if !series.studyDate.isEmpty {
                         Text(series.studyDate)
                             .font(.system(size: 10))

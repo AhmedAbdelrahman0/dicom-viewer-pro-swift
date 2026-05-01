@@ -32,7 +32,8 @@ public enum RadiomicsExtractor {
     public static func extract(volume: ImageVolume,
                                mask: LabelMap,
                                classID: UInt16,
-                               bounds: MONAITransforms.VoxelBounds) throws -> [String: Double] {
+                               bounds: MONAITransforms.VoxelBounds,
+                               valueTransform: ((Double) -> Double)? = nil) throws -> [String: Double] {
         guard bounds.width > 0, bounds.height > 0, bounds.depth > 0 else {
             throw ClassificationError.emptyLesion
         }
@@ -57,7 +58,9 @@ public enum RadiomicsExtractor {
                 let rowStart = z * h * w + y * w
                 for x in bounds.minX...bounds.maxX {
                     if mask.voxels[rowStart + x] == classID {
-                        intensities.append(volume.pixels[rowStart + x])
+                        let raw = Double(volume.pixels[rowStart + x])
+                        let value = valueTransform?(raw) ?? raw
+                        intensities.append(Float(value))
                         lesionVoxels.append(SIMD3(x, y, z))
                     }
                 }
@@ -86,6 +89,7 @@ public enum RadiomicsExtractor {
              mask: mask,
              classID: classID,
              bounds: bounds,
+             valueTransform: valueTransform,
              features: &features)
 
         return features
@@ -350,6 +354,7 @@ public enum RadiomicsExtractor {
                              mask: LabelMap,
                              classID: UInt16,
                              bounds: MONAITransforms.VoxelBounds,
+                             valueTransform: ((Double) -> Double)?,
                              features: inout [String: Double]) {
         // Pick the axial slice with the most lesion voxels inside bounds.
         let w = volume.width, h = volume.height
@@ -381,7 +386,9 @@ public enum RadiomicsExtractor {
         for y in bounds.minY...bounds.maxY {
             let rowStart = bestZ * h * w + y * w
             for x in bounds.minX...bounds.maxX where mask.voxels[rowStart + x] == classID {
-                values.append(volume.pixels[rowStart + x])
+                let raw = Double(volume.pixels[rowStart + x])
+                let value = valueTransform?(raw) ?? raw
+                values.append(Float(value))
             }
         }
         guard let minV = values.min(), let maxV = values.max() else { return }
@@ -401,8 +408,10 @@ public enum RadiomicsExtractor {
             for x in bounds.minX..<bounds.maxX {
                 let i = rowStart + x
                 if mask.voxels[i] == classID, mask.voxels[i + 1] == classID {
-                    let a = bin(of: volume.pixels[i])
-                    let b = bin(of: volume.pixels[i + 1])
+                    let rawA = Double(volume.pixels[i])
+                    let rawB = Double(volume.pixels[i + 1])
+                    let a = bin(of: Float(valueTransform?(rawA) ?? rawA))
+                    let b = bin(of: Float(valueTransform?(rawB) ?? rawB))
                     glcm[a][b] += 1
                     glcm[b][a] += 1   // symmetric GLCM
                     pairCount += 2

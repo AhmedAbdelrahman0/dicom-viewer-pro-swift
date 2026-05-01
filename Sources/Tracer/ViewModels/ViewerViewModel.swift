@@ -114,6 +114,14 @@ public struct DisplayWindowLevelSnapshot: Equatable, Sendable {
     public let level: Double
 }
 
+private enum PETMIPRotationConstants {
+    static let fullCircleTenths = 3_600
+    static let stepDegrees = 5.0
+    static let stepTenths = 50
+    static let fullCircleFrameCount = fullCircleTenths / stepTenths
+    static let minimumCachedProjectionFrames = fullCircleFrameCount * 2 + 1
+}
+
 private struct PETMIPProjectionKey: Hashable, Sendable {
     let volumeIdentity: String
     let axis: Int
@@ -137,16 +145,19 @@ private struct PETMIPProjectionKey: Hashable, Sendable {
         self.rotationTenths = axis == 2 ? 0 : PETMIPProjectionKey.normalizedRotationTenths(rotationTenths)
     }
 
-    private static func quantizedRotationTenths(_ degrees: Double) -> Int {
+    fileprivate static func quantizedRotationTenths(_ degrees: Double) -> Int {
         guard degrees.isFinite else { return 0 }
         var normalized = degrees.truncatingRemainder(dividingBy: 360)
         if normalized < 0 { normalized += 360 }
-        return normalizedRotationTenths(Int((normalized * 10).rounded()))
+        let tenths = Int((normalized * 10).rounded())
+        let step = PETMIPRotationConstants.stepTenths
+        let snapped = Int((Double(tenths) / Double(step)).rounded()) * step
+        return normalizedRotationTenths(snapped)
     }
 
     private static func normalizedRotationTenths(_ tenths: Int) -> Int {
-        let value = tenths % 3_600
-        return value < 0 ? value + 3_600 : value
+        let value = tenths % PETMIPRotationConstants.fullCircleTenths
+        return value < 0 ? value + PETMIPRotationConstants.fullCircleTenths : value
     }
 
     var needsRotatedProjection: Bool {
@@ -444,6 +455,7 @@ private struct ViewerPatientSeed {
 
 @MainActor
 public final class ViewerViewModel: ObservableObject {
+    public static let petMIPRotationStepDegrees = PETMIPRotationConstants.stepDegrees
 
     // Loaded volumes (cache)
     @Published public var loadedVolumes: [ImageVolume] = []
@@ -473,7 +485,7 @@ public final class ViewerViewModel: ObservableObject {
     @Published public var invertPETOnlyImages: Bool = false
     @Published public var invertCTImages: Bool = false
     @Published public var invertPETMIP: Bool = false
-    @Published public var correctAnteriorPosteriorDisplay: Bool = true
+    @Published public var correctAnteriorPosteriorDisplay: Bool = false
     @Published public var correctRightLeftDisplay: Bool = false
     @Published public var linkZoomPanAcrossPanes: Bool = true
     @Published public var sharedViewportTransform: ViewportTransformState = .identity
@@ -497,6 +509,7 @@ public final class ViewerViewModel: ObservableObject {
     @Published public var suvSettings = SUVCalculationSettings()
     @Published public var hangingPanes: [HangingPaneConfiguration] = HangingPaneConfiguration.defaultPETCT
     @Published public var lastVolumeMeasurementReport: VolumeMeasurementReport?
+    @Published public private(set) var lastRadiomicsFeatureReport: RadiomicsFeatureReport?
     @Published public var suvSphereRadiusMM: Double = 6.2
     @Published public var suvROIMeasurements: [SUVROIMeasurement] = []
     @Published public var lastSUVROIMeasurement: SUVROIMeasurement?
@@ -581,6 +594,7 @@ public final class ViewerViewModel: ObservableObject {
         var lastSUVROI: SUVROIMeasurement?
         var intensityROIs: [IntensityROIMeasurement]
         var lastIntensityROI: IntensityROIMeasurement?
+        var lastRadiomicsReport: RadiomicsFeatureReport?
         var labelVoxels: [UUID: [UInt16]]
     }
 
@@ -608,7 +622,7 @@ public final class ViewerViewModel: ObservableObject {
     private var petMIPCineProgressVolumeIdentity: String?
     private var petMIPFullQualityDebounceTask: Task<Void, Never>?
     private let petMIPFullQualitySettleDelayNanoseconds: UInt64 = 700_000_000
-    private let petMIPCineStepTenths = 50
+    private let petMIPCineStepTenths = PETMIPRotationConstants.stepTenths
     private var petMIPRenderedImageCache: [PETMIPRenderedImageKey: CGImage] = [:]
     private var petMIPRenderedImageCacheOrder: [PETMIPRenderedImageKey] = []
     private var petMIPRenderedLabelCache: [PETMIPRenderedLabelKey: CGImage] = [:]
@@ -727,6 +741,18 @@ public final class ViewerViewModel: ObservableObject {
                 return lastVolumeMeasurementReport.map { [$0] } ?? []
             }
             return session.volumeReports
+        }
+    }
+
+    public var visibleRadiomicsFeatureReports: [RadiomicsFeatureReport] {
+        guard !studySessions.isEmpty else {
+            return lastRadiomicsFeatureReport.map { [$0] } ?? []
+        }
+        return studySessions.filter(\.visible).flatMap { session in
+            if session.id == activeStudySessionID {
+                return lastRadiomicsFeatureReport.map { [$0] } ?? []
+            }
+            return session.radiomicsReports
         }
     }
 
@@ -1462,6 +1488,7 @@ public final class ViewerViewModel: ObservableObject {
         intensityROIMeasurements.removeAll()
         lastIntensityROIMeasurement = nil
         lastVolumeMeasurementReport = nil
+        lastRadiomicsFeatureReport = nil
         resetAllViewportTransforms()
         invertColors = false
         invertPETImages = false
@@ -1531,6 +1558,29 @@ public final class ViewerViewModel: ObservableObject {
             self.annotations.append(annotation)
         }
         autosaveActiveStudySession()
+    }
+
+    @discardableResult
+    public func updateAnnotation(_ annotation: Annotation) -> Bool {
+        guard let index = annotations.firstIndex(where: { $0.id == annotation.id }) else {
+            statusMessage = "Measurement was not found in the active session"
+            return false
+        }
+        let previous = annotations[index]
+        guard previous != annotation else { return true }
+        annotations[index] = annotation
+        recordHistoryIfNeeded(name: "Edit measurement", changed: true) { [weak self] in
+            guard let self,
+                  let currentIndex = self.annotations.firstIndex(where: { $0.id == annotation.id }) else { return }
+            self.annotations[currentIndex] = previous
+        } redo: { [weak self] in
+            guard let self,
+                  let currentIndex = self.annotations.firstIndex(where: { $0.id == annotation.id }) else { return }
+            self.annotations[currentIndex] = annotation
+        }
+        statusMessage = "Updated \(annotation.displayText.isEmpty ? annotation.type.rawValue : annotation.displayText)"
+        autosaveActiveStudySession()
+        return true
     }
 
     @discardableResult
@@ -2029,6 +2079,7 @@ public final class ViewerViewModel: ObservableObject {
         !suvROIMeasurements.isEmpty ||
         !intensityROIMeasurements.isEmpty ||
         lastVolumeMeasurementReport != nil ||
+        lastRadiomicsFeatureReport != nil ||
         !labeling.labelMaps.isEmpty
     }
 
@@ -2047,6 +2098,11 @@ public final class ViewerViewModel: ObservableObject {
            !reports.contains(where: { $0.id == report.id }) {
             reports.append(report)
         }
+        var radiomicsReports = activeStudySession?.radiomicsReports ?? []
+        if let report = lastRadiomicsFeatureReport,
+           !radiomicsReports.contains(where: { $0.id == report.id }) {
+            radiomicsReports.append(report)
+        }
         let labelMaps = includeLabelMaps
             ? labeling.labelMaps.map(StudySessionLabelMap.init)
             : (activeStudySession?.labelMaps ?? [])
@@ -2060,6 +2116,7 @@ public final class ViewerViewModel: ObservableObject {
             suvROIs: suvROIMeasurements,
             intensityROIs: intensityROIMeasurements,
             volumeReports: reports,
+            radiomicsReports: radiomicsReports,
             labelMaps: labelMaps,
             metadata: currentGeneratedMetadata()
         )
@@ -2080,6 +2137,7 @@ public final class ViewerViewModel: ObservableObject {
         intensityROIMeasurements = session.intensityROIs
         lastIntensityROIMeasurement = session.intensityROIs.last
         lastVolumeMeasurementReport = session.volumeReports.last
+        lastRadiomicsFeatureReport = session.radiomicsReports.last
         let maps = session.labelMaps.compactMap { try? $0.makeLabelMap() }
         labeling.replaceLabelMapsForStudySession(maps)
     }
@@ -2091,6 +2149,7 @@ public final class ViewerViewModel: ObservableObject {
         intensityROIMeasurements.removeAll()
         lastIntensityROIMeasurement = nil
         lastVolumeMeasurementReport = nil
+        lastRadiomicsFeatureReport = nil
         labeling.replaceLabelMapsForStudySession([])
     }
 
@@ -2734,20 +2793,59 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     private func addVolumeToActiveViewerSession(_ volume: ImageVolume) {
-        let id = ensureActiveViewerSession(for: volume)
-        guard let index = viewerSessions.firstIndex(where: { $0.id == id }) else { return }
-        let seed = patientSeed(for: volume)
-        viewerPatientSeedByVolumeIdentity[volume.sessionIdentity] = seed
-        let studyKey = viewerStudyKey(for: volume)
-        let reference = viewerVolumeReference(for: volume)
-        if let volumeIndex = viewerSessions[index].volumes.firstIndex(where: { $0.volumeIdentity == reference.volumeIdentity }) {
-            viewerSessions[index].volumes[volumeIndex] = reference
-        } else {
-            viewerSessions[index].volumes.append(reference)
+        addVolumesToActiveViewerSession([volume], activeVolume: volume)
+    }
+
+    private func addRelatedLoadedVolumesToActiveViewerSession(activating volume: ImageVolume) {
+        addVolumesToActiveViewerSession(
+            loadedVolumesMatchingViewerSession(of: volume),
+            activeVolume: volume
+        )
+    }
+
+    private func loadedVolumesMatchingViewerSession(of volume: ImageVolume) -> [ImageVolume] {
+        let targetPatientKey = patientSessionKey(for: volume)
+        var seen = Set<String>()
+        let candidates = (loadedVolumes + [volume]).filter { candidate in
+            seen.insert(candidate.sessionIdentity).inserted
         }
-        viewerSessions[index].studies = makeStudyReferences(from: activeSessionVolumes + [volume])
-        viewerSessions[index].activeStudyKey = studyKey
-        viewerSessions[index].activeVolumeIdentity = volume.sessionIdentity
+        return candidates
+            .filter { candidate in
+                if candidate.sessionIdentity == volume.sessionIdentity {
+                    return true
+                }
+                if let targetPatientKey {
+                    return patientSessionKey(for: candidate) == targetPatientKey
+                }
+                return patientSessionKey(for: candidate) == nil
+            }
+            .sorted(by: viewerVolumeSort)
+    }
+
+    private func addVolumesToActiveViewerSession(_ volumes: [ImageVolume],
+                                                 activeVolume: ImageVolume) {
+        let id = ensureActiveViewerSession(for: activeVolume)
+        guard let index = viewerSessions.firstIndex(where: { $0.id == id }) else { return }
+        var seen = Set<String>()
+        let orderedVolumes = (volumes + [activeVolume]).filter { candidate in
+            seen.insert(candidate.sessionIdentity).inserted
+        }
+
+        for volume in orderedVolumes {
+            let seed = patientSeed(for: volume)
+            viewerPatientSeedByVolumeIdentity[volume.sessionIdentity] = seed
+            let reference = viewerVolumeReference(for: volume)
+            if let volumeIndex = viewerSessions[index].volumes.firstIndex(where: { $0.volumeIdentity == reference.volumeIdentity }) {
+                viewerSessions[index].volumes[volumeIndex] = reference
+            } else {
+                viewerSessions[index].volumes.append(reference)
+            }
+        }
+
+        let sessionVolumes = activeSessionVolumes + orderedVolumes
+        viewerSessions[index].studies = makeStudyReferences(from: sessionVolumes)
+        viewerSessions[index].activeStudyKey = viewerStudyKey(for: activeVolume)
+        viewerSessions[index].activeVolumeIdentity = activeVolume.sessionIdentity
         viewerSessions[index].modifiedAt = Date()
         persistViewerSessions()
     }
@@ -2832,7 +2930,7 @@ public final class ViewerViewModel: ObservableObject {
 
     private func loadViewerSessionVolume(_ reference: ViewerSessionVolumeReference) async -> ImageVolume? {
         if let existing = loadedVolumes.first(where: { $0.sessionIdentity == reference.volumeIdentity }) {
-            addVolumeToActiveViewerSession(existing)
+            addRelatedLoadedVolumesToActiveViewerSession(activating: existing)
             return existing
         }
         guard !reference.sourceFiles.isEmpty else { return nil }
@@ -2841,8 +2939,17 @@ public final class ViewerViewModel: ObservableObject {
             switch reference.kind {
             case .nifti:
                 guard let path = reference.sourceFiles.first else { return nil }
+                let metadata = NIfTILoadMetadata(
+                    studyUID: studyUID(from: reference.studyKey),
+                    patientID: reference.patientID,
+                    patientName: reference.patientName,
+                    seriesDescription: reference.seriesDescription,
+                    studyDescription: reference.studyDescription
+                )
                 volume = try await Task.detached(priority: .userInitiated) {
-                    try NIfTILoader.load(URL(fileURLWithPath: path))
+                    try NIfTILoader.load(URL(fileURLWithPath: path),
+                                         modalityHint: reference.modality,
+                                         metadata: metadata)
                 }.value
             case .dicom:
                 let paths = reference.sourceFiles
@@ -2868,6 +2975,12 @@ public final class ViewerViewModel: ObservableObject {
             return "folder:\(folder)"
         }
         return "volume:\(volume.sessionIdentity)"
+    }
+
+    private func studyUID(from studyKey: String) -> String {
+        let prefix = "study:"
+        guard studyKey.hasPrefix(prefix) else { return "" }
+        return String(studyKey.dropFirst(prefix.count))
     }
 
     private func viewerVolumeReference(for volume: ImageVolume) -> ViewerSessionVolumeReference {
@@ -3193,11 +3306,7 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     private func normalizedPETMIPRotation(_ degrees: Double) -> Double {
-        guard degrees.isFinite else { return 0 }
-        var value = degrees.truncatingRemainder(dividingBy: 360)
-        if value < 0 { value += 360 }
-        let tenths = Int((value * 10).rounded()) % 3_600
-        return Double(tenths) / 10
+        Double(PETMIPProjectionKey.quantizedRotationTenths(degrees)) / 10
     }
 
     private func applyPETMIPRotation(_ degrees: Double) {
@@ -3248,6 +3357,7 @@ public final class ViewerViewModel: ObservableObject {
             lastSUVROI: lastSUVROIMeasurement,
             intensityROIs: intensityROIMeasurements,
             lastIntensityROI: lastIntensityROIMeasurement,
+            lastRadiomicsReport: lastRadiomicsFeatureReport,
             labelVoxels: labeling.labelMaps.reduce(into: [:]) { voxelsByMapID, map in
                 voxelsByMapID[map.id] = map.voxels
             }
@@ -3287,6 +3397,7 @@ public final class ViewerViewModel: ObservableObject {
         lastSUVROIMeasurement = snapshot.lastSUVROI
         intensityROIMeasurements = snapshot.intensityROIs
         lastIntensityROIMeasurement = snapshot.lastIntensityROI
+        lastRadiomicsFeatureReport = snapshot.lastRadiomicsReport
         for map in labeling.labelMaps {
             if let voxels = snapshot.labelVoxels[map.id], voxels.count == map.voxels.count {
                 map.voxels = voxels
@@ -3298,7 +3409,10 @@ public final class ViewerViewModel: ObservableObject {
 
     // MARK: - Loading
 
-    public func loadNIfTI(url: URL, autoFuse: Bool = false) async {
+    public func loadNIfTI(url: URL,
+                          autoFuse: Bool = false,
+                          modalityHint: String = "",
+                          metadata: NIfTILoadMetadata = NIfTILoadMetadata()) async {
         let sourcePath = NIfTILoader.canonicalSourcePath(for: url)
         if let existing = loadedVolume(sourcePath: sourcePath) {
             displayVolume(existing)
@@ -3311,8 +3425,11 @@ public final class ViewerViewModel: ObservableObject {
         defer { isLoading = false }
 
         do {
+            let effectiveMetadata = metadata.isEmpty
+                ? PACSIndexBuilder.loadMetadataForNIfTI(url: url)
+                : metadata
             let volume = try await Task.detached(priority: .userInitiated) {
-                try NIfTILoader.load(url)
+                try NIfTILoader.load(url, modalityHint: modalityHint, metadata: effectiveMetadata)
             }.value
 
             let result = addLoadedVolumeIfNeeded(volume)
@@ -3828,7 +3945,21 @@ public final class ViewerViewModel: ObservableObject {
             await openIndexedDICOMSeries(entry, autoFuse: autoFuse)
         case .nifti:
             let path = entry.filePaths.first ?? entry.sourcePath
-            await loadNIfTI(url: URL(fileURLWithPath: path), autoFuse: autoFuse)
+            let metadata = NIfTILoadMetadata(
+                studyUID: entry.studyUID,
+                patientID: entry.patientID,
+                patientName: entry.patientName,
+                accessionNumber: entry.accessionNumber,
+                studyDate: entry.studyDate,
+                studyTime: entry.studyTime,
+                bodyPartExamined: entry.bodyPartExamined,
+                seriesDescription: entry.seriesDescription,
+                studyDescription: entry.studyDescription
+            )
+            await loadNIfTI(url: URL(fileURLWithPath: path),
+                            autoFuse: autoFuse,
+                            modalityHint: entry.modality,
+                            metadata: metadata)
         }
     }
 
@@ -5066,13 +5197,6 @@ public final class ViewerViewModel: ObservableObject {
                 movingOnFixedGrid: prealigned,
                 label: "Rigid prealignment"
             )
-            candidateInputs.append(PETMRFusionCandidateInput(
-                volume: prealigned,
-                note: "\(registration.note). Rigid prealignment retained as QA fallback.",
-                deformationQuality: nil,
-                label: "Rigid prealignment",
-                allowBrainFitInside: false
-            ))
             do {
                 statusMessage = "Running \(petMRDeformableRegistration.backend.displayName) PET/MR deformable registration..."
                 let deformable = try await PETMRDeformableRegistrationRunner.register(
@@ -5223,6 +5347,25 @@ public final class ViewerViewModel: ObservableObject {
             label: "Scanner geometry",
             allowBrainFitInside: false
         ))
+
+        if hasMatchingGrid(mr, pet) {
+            let pair = configureFusion(base: mr, overlay: pet, resampledOverlay: nil)
+            pair.registrationNote = "Auto PET/MR retained scanner/world geometry because PET and MRI grids already match."
+            pair.registrationDiagnostics = [
+                "PET/MR automatic registration skipped higher-complexity candidates for an already matching PET/MR grid."
+            ]
+            pair.registrationQuality = RegistrationQualityAssurance.compare(
+                before: geometryQuality,
+                after: geometryQuality,
+                deformation: nil,
+                allowBrainPETMRFitInside: false
+            )
+            pair.objectWillChange.send()
+            applyHangingProtocol(grid: .threeByTwo, panes: HangingPaneConfiguration.defaultPETMR)
+            let qaLabel = pair.registrationQuality?.grade.displayName ?? RegistrationQualityGrade.unknown.displayName
+            statusMessage = "PET/MR auto registration retained scanner geometry. QA \(qaLabel)"
+            return
+        }
 
         for candidateMode in [PETMRRegistrationMode.rigidAnatomical, .rigidThenDeformable] {
             statusMessage = "Auto-registering PET/MR: testing \(candidateMode.displayName)..."
@@ -5809,7 +5952,7 @@ public final class ViewerViewModel: ObservableObject {
         }
         loadedVolumes.append(volume)
         recordRecent(volume: volume)
-        addVolumeToActiveViewerSession(volume)
+        addRelatedLoadedVolumesToActiveViewerSession(activating: volume)
         return (volume, true)
     }
 
@@ -6272,7 +6415,7 @@ public final class ViewerViewModel: ObservableObject {
            hasGeneratedStudySessionContent {
             persistStudySessions()
         }
-        addVolumeToActiveViewerSession(volume)
+        addRelatedLoadedVolumesToActiveViewerSession(activating: volume)
         currentVolume = volume
         updateActiveViewerSessionSelection(volume: volume)
         sliceIndices = [volume.width / 2, volume.height / 2, volume.depth / 2]
@@ -6906,6 +7049,86 @@ public final class ViewerViewModel: ObservableObject {
         }
     }
 
+    @discardableResult
+    public func extractActiveRadiomics(preferPET: Bool = true) -> RadiomicsFeatureReport? {
+        guard let map = labeling.activeLabelMap else {
+            lastRadiomicsFeatureReport = nil
+            statusMessage = "No active label map for radiomics"
+            return nil
+        }
+        guard let source = activeMeasurementSource(matching: map, preferPET: preferPET) else {
+            lastRadiomicsFeatureReport = nil
+            statusMessage = "No matching volume grid for active-label radiomics"
+            return nil
+        }
+        if preferPET, source.source != .petSUV {
+            lastRadiomicsFeatureReport = nil
+            statusMessage = "No PET volume matches the active label map"
+            return nil
+        }
+        if !preferPET, source.source == .petSUV {
+            lastRadiomicsFeatureReport = nil
+            statusMessage = "No CT/anatomic volume matches the active label map"
+            return nil
+        }
+        let classID = labeling.activeClassID
+        let className = map.classInfo(id: classID)?.name ?? "class_\(classID)"
+        guard let bounds = radiomicsBounds(for: map, classID: classID) else {
+            lastRadiomicsFeatureReport = nil
+            statusMessage = "Active class has no voxels for radiomics"
+            return nil
+        }
+
+        do {
+            let transform: ((Double) -> Double)? = source.source == .petSUV ? suvTransform(for: source.volume) : nil
+            let features = try RadiomicsExtractor.extract(
+                volume: source.volume,
+                mask: map,
+                classID: classID,
+                bounds: bounds,
+                valueTransform: transform
+            )
+            let description = source.volume.seriesDescription.isEmpty
+                ? Modality.normalize(source.volume.modality).displayName
+                : source.volume.seriesDescription
+            let report = RadiomicsFeatureReport(
+                source: source.source,
+                sourceVolumeIdentity: source.volume.sessionIdentity,
+                sourceDescription: description,
+                classID: classID,
+                className: className,
+                bounds: bounds,
+                features: features
+            )
+            lastRadiomicsFeatureReport = report
+            statusMessage = "Extracted \(report.compactSummary)"
+            autosaveActiveStudySession()
+            return report
+        } catch {
+            lastRadiomicsFeatureReport = nil
+            statusMessage = "Radiomics extraction failed: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    public func activeLabelDataExportReport() -> LabelDataExportReport? {
+        guard let map = labeling.activeLabelMap else {
+            statusMessage = "No active label map to export"
+            return nil
+        }
+        guard let source = referenceVolumeMatching(map) else {
+            statusMessage = "No matching volume grid for label data export"
+            return nil
+        }
+        return LabelDataExportReport(
+            labelMap: map,
+            parentVolume: source,
+            activeVolumeReport: lastVolumeMeasurementReport,
+            activeRadiomicsReport: lastRadiomicsFeatureReport,
+            annotations: annotations
+        )
+    }
+
     public func thresholdActiveLabel(atOrAbove threshold: Double) {
         ensureActiveLabelMapForCurrentContext(defaultName: "PET/CT Volumes", className: "Lesion", category: .lesion, color: .orange)
         guard let map = labeling.activeLabelMap else { return }
@@ -7362,6 +7585,35 @@ public final class ViewerViewModel: ObservableObject {
         volume.depth == labelMap.depth
     }
 
+    private func radiomicsBounds(for labelMap: LabelMap,
+                                 classID: UInt16) -> MONAITransforms.VoxelBounds? {
+        var minZ = labelMap.depth
+        var maxZ = -1
+        var minY = labelMap.height
+        var maxY = -1
+        var minX = labelMap.width
+        var maxX = -1
+        for z in 0..<labelMap.depth {
+            for y in 0..<labelMap.height {
+                let rowStart = z * labelMap.height * labelMap.width + y * labelMap.width
+                for x in 0..<labelMap.width where labelMap.voxels[rowStart + x] == classID {
+                    minZ = min(minZ, z)
+                    maxZ = max(maxZ, z)
+                    minY = min(minY, y)
+                    maxY = max(maxY, y)
+                    minX = min(minX, x)
+                    maxX = max(maxX, x)
+                }
+            }
+        }
+        guard maxZ >= minZ, maxY >= minY, maxX >= minX else { return nil }
+        return MONAITransforms.VoxelBounds(
+            minZ: minZ, maxZ: maxZ,
+            minY: minY, maxY: maxY,
+            minX: minX, maxX: maxX
+        )
+    }
+
     // MARK: - Slice images
 
     public func clearSliceRenderCache() {
@@ -7808,6 +8060,7 @@ public final class ViewerViewModel: ObservableObject {
         if transform.flipHorizontal {
             x = mip.width - 1 - x
         }
+        y = mip.height - 1 - y
         if transform.flipVertical {
             y = mip.height - 1 - y
         }
@@ -8372,7 +8625,7 @@ public final class ViewerViewModel: ObservableObject {
         petMIPProjectionCacheOrder.append(key)
         petMIPPreviewProjectionCache.removeValue(forKey: key)
         petMIPPreviewProjectionCacheOrder.removeAll { $0 == key }
-        while petMIPProjectionCacheOrder.count > max(144, policy.petMIPCacheEntries * 8) {
+        while petMIPProjectionCacheOrder.count > petMIPProjectionCacheLimit(policy: policy) {
             let evicted = petMIPProjectionCacheOrder.removeFirst()
             petMIPProjectionCache.removeValue(forKey: evicted)
         }
@@ -8385,7 +8638,7 @@ public final class ViewerViewModel: ObservableObject {
         petMIPPreviewProjectionCache[key] = projection
         petMIPPreviewProjectionCacheOrder.removeAll { $0 == key }
         petMIPPreviewProjectionCacheOrder.append(key)
-        while petMIPPreviewProjectionCacheOrder.count > max(144, policy.petMIPCacheEntries * 8) {
+        while petMIPPreviewProjectionCacheOrder.count > petMIPProjectionCacheLimit(policy: policy) {
             let evicted = petMIPPreviewProjectionCacheOrder.removeFirst()
             petMIPPreviewProjectionCache.removeValue(forKey: evicted)
         }
@@ -8395,6 +8648,11 @@ public final class ViewerViewModel: ObservableObject {
                 petMIPCacheRevision += 1
             }
         }
+    }
+
+    private func petMIPProjectionCacheLimit(policy: ResourcePolicy) -> Int {
+        max(PETMIPRotationConstants.minimumCachedProjectionFrames,
+            policy.petMIPCacheEntries * 8)
     }
 
     private func startPETMIPPreviewProjectionIfNeeded(volume: ImageVolume,

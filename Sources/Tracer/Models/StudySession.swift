@@ -213,6 +213,7 @@ public struct StudyMeasurementSession: Identifiable, Codable, Equatable, Sendabl
     public var suvROIs: [SUVROIMeasurement]
     public var intensityROIs: [IntensityROIMeasurement]
     public var volumeReports: [VolumeMeasurementReport]
+    public var radiomicsReports: [RadiomicsFeatureReport]
     public var labelMaps: [StudySessionLabelMap]
     public var metadata: [String: String]
 
@@ -225,6 +226,7 @@ public struct StudyMeasurementSession: Identifiable, Codable, Equatable, Sendabl
                 suvROIs: [SUVROIMeasurement] = [],
                 intensityROIs: [IntensityROIMeasurement] = [],
                 volumeReports: [VolumeMeasurementReport] = [],
+                radiomicsReports: [RadiomicsFeatureReport] = [],
                 labelMaps: [StudySessionLabelMap] = [],
                 metadata: [String: String] = [:]) {
         self.id = id
@@ -236,12 +238,13 @@ public struct StudyMeasurementSession: Identifiable, Codable, Equatable, Sendabl
         self.suvROIs = suvROIs
         self.intensityROIs = intensityROIs
         self.volumeReports = volumeReports
+        self.radiomicsReports = radiomicsReports
         self.labelMaps = labelMaps
         self.metadata = metadata
     }
 
     public var measurementCount: Int {
-        annotations.count + suvROIs.count + intensityROIs.count + volumeReports.count
+        annotations.count + suvROIs.count + intensityROIs.count + volumeReports.count + radiomicsReports.count
     }
 
     public var labelMapCount: Int { labelMaps.count }
@@ -256,8 +259,40 @@ public struct StudyMeasurementSession: Identifiable, Codable, Equatable, Sendabl
         if !suvROIs.isEmpty { parts.append("\(suvROIs.count) SUV ROI") }
         if !intensityROIs.isEmpty { parts.append("\(intensityROIs.count) HU/intensity ROI") }
         if !volumeReports.isEmpty { parts.append("\(volumeReports.count) volumes") }
+        if !radiomicsReports.isEmpty { parts.append("\(radiomicsReports.count) radiomics") }
         if !labelMaps.isEmpty { parts.append("\(labelMaps.count) labels") }
         return parts.isEmpty ? "Empty" : parts.joined(separator: " · ")
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case createdAt
+        case modifiedAt
+        case visible
+        case annotations
+        case suvROIs
+        case intensityROIs
+        case volumeReports
+        case radiomicsReports
+        case labelMaps
+        case metadata
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        modifiedAt = try container.decode(Date.self, forKey: .modifiedAt)
+        visible = try container.decode(Bool.self, forKey: .visible)
+        annotations = try container.decodeIfPresent([Annotation].self, forKey: .annotations) ?? []
+        suvROIs = try container.decodeIfPresent([SUVROIMeasurement].self, forKey: .suvROIs) ?? []
+        intensityROIs = try container.decodeIfPresent([IntensityROIMeasurement].self, forKey: .intensityROIs) ?? []
+        volumeReports = try container.decodeIfPresent([VolumeMeasurementReport].self, forKey: .volumeReports) ?? []
+        radiomicsReports = try container.decodeIfPresent([RadiomicsFeatureReport].self, forKey: .radiomicsReports) ?? []
+        labelMaps = try container.decodeIfPresent([StudySessionLabelMap].self, forKey: .labelMaps) ?? []
+        metadata = try container.decodeIfPresent([String: String].self, forKey: .metadata) ?? [:]
     }
 }
 
@@ -433,6 +468,11 @@ public struct StudySessionStore: Sendable {
     }
 
     public static func defaultRootURL() -> URL {
+        if ProcessInfo.processInfo.processName == "xctest" {
+            return FileManager.default.temporaryDirectory
+                .appendingPathComponent("TracerTests", isDirectory: true)
+                .appendingPathComponent("StudySessions-\(UUID().uuidString)", isDirectory: true)
+        }
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
         return base.appendingPathComponent("Tracer", isDirectory: true)
@@ -511,6 +551,11 @@ public struct ViewerSessionStore: Sendable {
     }
 
     public static func defaultRootURL() -> URL {
+        if ProcessInfo.processInfo.processName == "xctest" {
+            return FileManager.default.temporaryDirectory
+                .appendingPathComponent("TracerTests", isDirectory: true)
+                .appendingPathComponent("ViewerSessions-\(UUID().uuidString)", isDirectory: true)
+        }
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
         return base.appendingPathComponent("Tracer", isDirectory: true)

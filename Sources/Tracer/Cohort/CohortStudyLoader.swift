@@ -156,8 +156,11 @@ enum CohortStudyLoader {
                 return LoadedStudy(primary: vol, auxiliary: [])
             }
         }
+        guard let fallbackSeries = series.first else {
+            throw LoadError.emptyStudy
+        }
         // Fallback — whatever's first.
-        let vol = try loadDICOMSeries(snapshot: series[0])
+        let vol = try loadDICOMSeries(snapshot: fallbackSeries)
         return LoadedStudy(primary: vol, auxiliary: [])
     }
 
@@ -215,7 +218,20 @@ enum CohortStudyLoader {
         }
         do {
             let url = URL(fileURLWithPath: path)
-            return try NIfTILoader.load(url, modalityHint: snapshot.modality)
+            let metadata = NIfTILoadMetadata(
+                studyUID: snapshot.studyUID,
+                patientID: snapshot.patientID,
+                patientName: snapshot.patientName,
+                accessionNumber: snapshot.accessionNumber,
+                studyDate: snapshot.studyDate,
+                studyTime: snapshot.studyTime,
+                bodyPartExamined: snapshot.bodyPartExamined,
+                seriesDescription: snapshot.seriesDescription,
+                studyDescription: snapshot.studyDescription
+            )
+            return try NIfTILoader.load(url,
+                                        modalityHint: snapshot.modality,
+                                        metadata: metadata)
         } catch {
             throw LoadError.niftiLoadFailed(error.localizedDescription)
         }

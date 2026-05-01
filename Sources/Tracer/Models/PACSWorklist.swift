@@ -194,11 +194,17 @@ public struct PACSWorklistStudy: Identifiable, Hashable, Sendable {
             }
             if lhs.studyDate != rhs.studyDate { return lhs.studyDate > rhs.studyDate }
             if lhs.studyTime != rhs.studyTime { return lhs.studyTime > rhs.studyTime }
-            return lhs.patientName < rhs.patientName
+            return stableStudySort(lhs, rhs)
         }
     }
 
     static func studyKey(for snapshot: PACSIndexedSeriesSnapshot) -> String {
+        if snapshot.kind == .nifti {
+            if isBIDSStudyUID(snapshot.studyUID) {
+                return "study:\(snapshot.studyUID)"
+            }
+            return "nifti-folder:\(syntheticDirectoryBucket(for: snapshot))"
+        }
         if !snapshot.studyUID.isEmpty && snapshot.studyUID != "NIFTI_STUDY" {
             return "study:\(snapshot.studyUID)"
         }
@@ -211,6 +217,10 @@ public struct PACSWorklistStudy: Identifiable, Hashable, Sendable {
         // — so genuinely separate studies can't silently merge on shared archives.
         let bucket = syntheticDirectoryBucket(for: snapshot)
         return "synthetic:\(snapshot.patientID):\(snapshot.studyDate):\(snapshot.studyDescription):\(bucket)"
+    }
+
+    private static func isBIDSStudyUID(_ studyUID: String) -> Bool {
+        studyUID.lowercased().hasPrefix("bids:")
     }
 
     private static func syntheticDirectoryBucket(for snapshot: PACSIndexedSeriesSnapshot) -> String {
@@ -248,7 +258,41 @@ public struct PACSWorklistStudy: Identifiable, Hashable, Sendable {
         let lhsRank = modalitySortRank(lhs.modality)
         let rhsRank = modalitySortRank(rhs.modality)
         if lhsRank != rhsRank { return lhsRank < rhsRank }
-        return lhs.seriesDescription < rhs.seriesDescription
+        if lhs.seriesDescription != rhs.seriesDescription {
+            return lhs.seriesDescription < rhs.seriesDescription
+        }
+        if lhs.seriesUID != rhs.seriesUID {
+            return lhs.seriesUID < rhs.seriesUID
+        }
+        if lhs.sourcePath != rhs.sourcePath {
+            return lhs.sourcePath < rhs.sourcePath
+        }
+        return lhs.id < rhs.id
+    }
+
+    private static func stableStudySortKey(_ study: PACSWorklistStudy) -> [String] {
+        [
+            study.patientName,
+            study.patientID,
+            study.accessionNumber,
+            study.studyDescription,
+            study.studyUID,
+            study.sourcePath,
+            study.id,
+        ].map { $0.lowercased() }
+    }
+
+    private static func stableStudySort(_ lhs: PACSWorklistStudy,
+                                        _ rhs: PACSWorklistStudy) -> Bool {
+        let lhsKey = stableStudySortKey(lhs)
+        let rhsKey = stableStudySortKey(rhs)
+        for index in lhsKey.indices {
+            guard rhsKey.indices.contains(index) else { return false }
+            if lhsKey[index] != rhsKey[index] {
+                return lhsKey[index] < rhsKey[index]
+            }
+        }
+        return lhs.id < rhs.id
     }
 
     private static func preferredAnatomicalScore(_ snapshot: PACSIndexedSeriesSnapshot) -> Int {

@@ -10,8 +10,8 @@ import simd
 ///   • **ITK-SNAP label descriptor** (`.label.txt`) — name/color sidecar
 ///   • **3D Slicer segmentation** (`.seg.nrrd`) — NRRD with segment metadata
 ///   • **NRRD** labelmap (`.nrrd`) — simple integer NRRD
-///   • **DICOM SEG** (read planned) — binary DICOM segmentation object
-///   • **DICOM RTSTRUCT** (read planned) — contour-based RT structures
+///   • **DICOM SEG** — binary DICOM segmentation object
+///   • **DICOM RTSTRUCT** — contour-based RT structures
 ///   • **JSON annotations** (COCO, CVAT-style, plain points/boxes)
 ///   • **BIDS derivatives** (NIfTI + JSON sidecar)
 public enum LabelIO {
