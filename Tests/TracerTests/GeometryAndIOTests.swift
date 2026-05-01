@@ -19,6 +19,19 @@ final class GeometryAndIOTests: XCTestCase {
         XCTFail("Timed out waiting for volume operation", file: file, line: line)
     }
 
+    @MainActor
+    private func waitForAllVolumeOperations(_ vm: ViewerViewModel,
+                                            file: StaticString = #filePath,
+                                            line: UInt = #line) async throws {
+        for _ in 0..<200 {
+            if vm.volumeOperationStatuses.isEmpty {
+                return
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTFail("Timed out waiting for all volume operations", file: file, line: line)
+    }
+
     private func makeFakeNNUnetModelFolder(root: URL,
                                            datasetID: String = "Dataset222_AutoPETIII_2024") throws -> URL {
         let modelFolder = root
@@ -2853,6 +2866,56 @@ final class GeometryAndIOTests: XCTestCase {
         let report = try XCTUnwrap(vm.lastVolumeMeasurementReport)
         XCTAssertEqual(report.source, .petSUV)
         XCTAssertEqual(report.suvMax ?? 0, 10, accuracy: 1e-9)
+    }
+
+    @MainActor
+    func testReadOnlyVolumeMeasurementsCanRunInParallel() async throws {
+        let volume = ImageVolume(
+            pixels: [1, 2, 3, 4],
+            depth: 1,
+            height: 2,
+            width: 2,
+            modality: "PT",
+            suvScaleFactor: 1
+        )
+        let vm = ViewerViewModel()
+        vm.displayVolume(volume)
+        let map = vm.labeling.createLabelMap(for: volume)
+        map.setValue(1, z: 0, y: 0, x: 0)
+        map.setValue(1, z: 0, y: 1, x: 1)
+
+        vm.startActiveVolumeMeasurement(thresholdSummary: "Reader A", preferPET: true)
+        vm.startActiveVolumeMeasurement(thresholdSummary: "Reader B", preferPET: true)
+
+        XCTAssertEqual(vm.volumeOperationStatuses.filter { !$0.isMutating }.count, 2)
+        XCTAssertFalse(vm.isVolumeOperationRunning,
+                       "Read-only measurements should not block independent viewer interactions.")
+
+        try await waitForAllVolumeOperations(vm)
+        XCTAssertNotNil(vm.lastVolumeMeasurementReport)
+    }
+
+    @MainActor
+    func testMutatingLabelOperationsAreSerializedPerLabelMap() async throws {
+        let volume = ImageVolume(
+            pixels: [1, 2, 3, 4],
+            depth: 1,
+            height: 2,
+            width: 2,
+            modality: "PT",
+            suvScaleFactor: 1
+        )
+        let vm = ViewerViewModel()
+        vm.displayVolume(volume)
+        _ = vm.labeling.createLabelMap(for: volume)
+
+        vm.startThresholdActiveLabel(atOrAbove: 2)
+        vm.startThresholdActiveLabel(atOrAbove: 3)
+
+        XCTAssertEqual(vm.volumeOperationStatuses.filter(\.isMutating).count, 1)
+        XCTAssertTrue(vm.statusMessage.contains("label-writing job"))
+
+        try await waitForVolumeOperation(vm)
     }
 
     func testPETSegmentationGradientEdgeStopsAtSUVDrop() {

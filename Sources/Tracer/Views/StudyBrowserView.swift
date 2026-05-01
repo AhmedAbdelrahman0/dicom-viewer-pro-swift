@@ -65,6 +65,8 @@ struct StudyBrowserView: View {
     @State private var fileBrowserCurrentURL: URL?
     @State private var fileBrowserEntries: [LocalFileBrowserEntry] = []
     @State private var fileBrowserError: String?
+    @State private var fileBrowserLoadTask: Task<Void, Never>?
+    @State private var indexReloadTask: Task<Void, Never>?
 
     private let worklistDisplayPageSize = 300
     private let statusDefaultsKey = "Tracer.WorklistStudyStatuses"
@@ -118,9 +120,16 @@ struct StudyBrowserView: View {
             reloadIndexResults()
         }
         .onChange(of: searchText) { _, _ in
-            if browserMode != .vna {
+            if browserMode == .archives {
                 worklistDisplayLimit = worklistDisplayPageSize
-                reloadIndexResults()
+                scheduleIndexResultsReload()
+            } else {
+                worklistDisplayLimit = worklistDisplayPageSize
+            }
+        }
+        .onChange(of: browserMode) { _, mode in
+            if mode == .archives {
+                scheduleIndexResultsReload(delayNanoseconds: 0)
             }
         }
         .onChange(of: vm.activeVNAConnectionID) { _, _ in syncVNAConnectionForm() }
@@ -1837,24 +1846,38 @@ struct StudyBrowserView: View {
 
     private func reloadFileBrowserEntries() {
         guard let url = fileBrowserCurrentURL else { return }
-        do {
-            let contents = try FileManager.default.contentsOfDirectory(
-                at: url,
-                includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .fileSizeKey, .contentModificationDateKey],
-                options: [.skipsHiddenFiles]
-            )
-            fileBrowserEntries = contents
-                .compactMap { try? LocalFileBrowserEntry(url: $0) }
-                .sorted { lhs, rhs in
-                    if lhs.isDirectory != rhs.isDirectory {
-                        return lhs.isDirectory && !rhs.isDirectory
-                    }
-                    return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+        fileBrowserLoadTask?.cancel()
+        fileBrowserError = nil
+        fileBrowserLoadTask = Task { @MainActor [url] in
+            let result = await Task.detached(priority: .userInitiated) {
+                do {
+                    let contents = try FileManager.default.contentsOfDirectory(
+                        at: url,
+                        includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .fileSizeKey, .contentModificationDateKey],
+                        options: [.skipsHiddenFiles]
+                    )
+                    let entries = contents
+                        .compactMap { try? LocalFileBrowserEntry(url: $0) }
+                        .sorted { lhs, rhs in
+                            if lhs.isDirectory != rhs.isDirectory {
+                                return lhs.isDirectory && !rhs.isDirectory
+                            }
+                            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+                        }
+                    return (entries: entries, errorMessage: String?.none)
+                } catch {
+                    return (entries: [LocalFileBrowserEntry](), errorMessage: Optional(error.localizedDescription))
                 }
-            fileBrowserError = nil
-        } catch {
-            fileBrowserEntries = []
-            fileBrowserError = error.localizedDescription
+            }.value
+            guard !Task.isCancelled,
+                  fileBrowserCurrentURL == url else { return }
+            if let errorMessage = result.errorMessage {
+                fileBrowserEntries = []
+                fileBrowserError = errorMessage
+            } else {
+                fileBrowserEntries = result.entries
+                fileBrowserError = nil
+            }
         }
     }
 
@@ -1915,6 +1938,18 @@ struct StudyBrowserView: View {
             indexedSeries = []
             indexedTotalCount = 0
             vm.statusMessage = "Index fetch error: \(error.localizedDescription)"
+        }
+    }
+
+    private func scheduleIndexResultsReload(delayNanoseconds: UInt64 = 250_000_000) {
+        indexReloadTask?.cancel()
+        indexReloadTask = Task { @MainActor [delayNanoseconds] in
+            if delayNanoseconds > 0 {
+                try? await Task.sleep(nanoseconds: delayNanoseconds)
+            }
+            guard !Task.isCancelled else { return }
+            reloadIndexResults()
+            indexReloadTask = nil
         }
     }
 
@@ -3079,7 +3114,7 @@ private struct PACSArchiveScope: Identifiable, Hashable {
     }
 }
 
-private struct LocalFileBrowserEntry: Identifiable, Hashable {
+private struct LocalFileBrowserEntry: Identifiable, Hashable, Sendable {
     let id: String
     let url: URL
     let name: String

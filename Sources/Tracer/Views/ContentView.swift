@@ -453,7 +453,7 @@ public struct ContentView: View {
         HoverIconButton(
             systemImage: "flame",
             tooltip: "Measure PET SUV / MTV / TLG\nCalculates SUVmax, SUVmean, metabolic tumor volume, and TLG for the active label without blocking the viewer.",
-            isActive: vm.volumeOperationStatus?.title.contains("SUV") == true
+            isActive: vm.volumeOperationStatuses.contains { $0.title.contains("SUV") }
         ) {
             vm.startActiveVolumeMeasurement(
                 method: .activeLabel,
@@ -1079,7 +1079,7 @@ public struct ContentView: View {
             ))
         }
 
-        if let operation = vm.volumeOperationStatus {
+        for operation in vm.volumeOperationStatuses {
             operations.append(ActivityOperationSnapshot(
                 id: operation.id.uuidString,
                 title: operation.title,
@@ -1270,7 +1270,7 @@ public struct ContentView: View {
         guard let target = operation.cancelTarget else { return }
         switch target {
         case .volumeOperation:
-            vm.cancelVolumeOperation()
+            vm.cancelVolumeOperation(id: UUID(uuidString: operation.id))
             activity.log("Cancelled \(operation.title).", source: "Viewer", level: .warning)
         case .indexing:
             vm.cancelIndexing()
@@ -2090,10 +2090,12 @@ private struct PETMIPPane: View {
         }
         .background(TracerTheme.panelBackground)
         .onAppear {
-            vm.preparePETMIPCine(for: plane.axis)
+            vm.preparePETMIPFrame(for: plane.axis,
+                                  rotationDegrees: vm.petMIPRotationDegrees)
         }
         .onChange(of: plane.axis) { _, axis in
-            vm.preparePETMIPCine(for: axis)
+            vm.preparePETMIPFrame(for: axis,
+                                  rotationDegrees: vm.petMIPRotationDegrees)
         }
     }
 

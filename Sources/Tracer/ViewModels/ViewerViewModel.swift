@@ -100,6 +100,22 @@ public struct VolumeOperationStatus: Identifiable, Equatable, Sendable {
     public let title: String
     public let detail: String
     public let startedAt: Date
+    public let mapID: UUID?
+    public let isMutating: Bool
+
+    public init(id: UUID,
+                title: String,
+                detail: String,
+                startedAt: Date,
+                mapID: UUID? = nil,
+                isMutating: Bool = false) {
+        self.id = id
+        self.title = title
+        self.detail = detail
+        self.startedAt = startedAt
+        self.mapID = mapID
+        self.isMutating = isMutating
+    }
 }
 
 public enum DisplayWindowLevelTarget: String, Equatable, Sendable {
@@ -533,6 +549,7 @@ public final class ViewerViewModel: ObservableObject {
     @Published public private(set) var dynamicTimeActivityCurve: [DynamicTimeActivityPoint] = []
     @Published public private(set) var isDynamicTACComputing: Bool = false
     @Published public private(set) var volumeOperationStatus: VolumeOperationStatus?
+    @Published public private(set) var volumeOperationStatuses: [VolumeOperationStatus] = []
     @Published public private(set) var petMIPCacheRevision: Int = 0
     @Published public private(set) var petMIPCineProgressByAxis: [Int: Double] = [:]
     @Published public private(set) var sliceRenderWarmupStatus: String = "Slice cache idle"
@@ -603,7 +620,7 @@ public final class ViewerViewModel: ObservableObject {
     private var isReplayingAppHistory = false
     private let maxAppHistoryRecords = 120
     private let maxBackgroundTrackedChangedVoxels = 5_000_000
-    private var volumeOperationTask: Task<Void, Never>?
+    private var volumeOperationTasks: [UUID: Task<Void, Never>] = [:]
     private var autoWindowTask: Task<Void, Never>?
     private var sliceRenderWarmupTask: Task<Void, Never>?
     private var fusionAdjustmentTask: Task<Void, Never>?
@@ -620,8 +637,10 @@ public final class ViewerViewModel: ObservableObject {
     private var petMIPCineReadyKeys: Set<PETMIPCineWarmupKey> = []
     private var petMIPCineProgressKeys: [PETMIPCineWarmupKey: Double] = [:]
     private var petMIPCineProgressVolumeIdentity: String?
+    private var petMIPCineWarmupDebounceTask: Task<Void, Never>?
     private var petMIPFullQualityDebounceTask: Task<Void, Never>?
     private let petMIPFullQualitySettleDelayNanoseconds: UInt64 = 700_000_000
+    private let petMIPCineWarmupSettleDelayNanoseconds: UInt64 = 1_500_000_000
     private let petMIPCineStepTenths = PETMIPRotationConstants.stepTenths
     private var petMIPRenderedImageCache: [PETMIPRenderedImageKey: CGImage] = [:]
     private var petMIPRenderedImageCacheOrder: [PETMIPRenderedImageKey] = []
@@ -836,26 +855,28 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     public func preparePETMIPCine(for axis: Int) {
-        preparePETMIPFrame(for: axis, rotationDegrees: petMIPRotationDegrees)
+        guard let pet = activePETQuantificationVolume else { return }
+        let key = PETMIPProjectionKey(volume: pet, axis: axis, rotationDegrees: petMIPRotationDegrees)
+        guard axis != SlicePlane.axial.axis else {
+            startPETMIPProjectionIfNeeded(volume: pet, axis: axis, key: key)
+            return
+        }
+        startPETMIPCineWarmupIfNeeded(volume: pet, axis: axis, around: key.rotationTenths)
     }
 
     public func preparePETMIPFrame(for axis: Int, rotationDegrees: Double) {
         guard let pet = activePETQuantificationVolume else { return }
         let key = PETMIPProjectionKey(volume: pet, axis: axis, rotationDegrees: rotationDegrees)
-        if axis == SlicePlane.axial.axis {
-            startPETMIPProjectionIfNeeded(volume: pet, axis: axis, key: key)
-            return
+        if axis != SlicePlane.axial.axis {
+            let warmupKey = PETMIPCineWarmupKey(volume: pet, axis: axis)
+            if petMIPCineReadyKeys.contains(warmupKey),
+               !hasRenderedPETMIPFrame(volume: pet, axis: axis, key: key) {
+                petMIPCineReadyKeys.remove(warmupKey)
+                petMIPCineProgressKeys[warmupKey] = 0
+                petMIPCineProgressByAxis[axis] = 0
+            }
         }
-        let warmupKey = PETMIPCineWarmupKey(volume: pet, axis: axis)
-        if petMIPCineReadyKeys.contains(warmupKey),
-           !hasRenderedPETMIPFrame(volume: pet, axis: axis, key: key) {
-            petMIPCineReadyKeys.remove(warmupKey)
-            petMIPCineProgressKeys[warmupKey] = 0
-            petMIPCineProgressByAxis[axis] = 0
-        }
-        startPETMIPCineWarmupIfNeeded(volume: pet,
-                                      axis: axis,
-                                      around: key.rotationTenths)
+        startPETMIPProjectionIfNeeded(volume: pet, axis: axis, key: key)
     }
 
     public func isPETMIPCineReady(for axis: Int) -> Bool {
@@ -944,18 +965,41 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     public var isVolumeOperationRunning: Bool {
-        volumeOperationStatus != nil
+        volumeOperationStatuses.contains { $0.isMutating }
     }
 
-    public func cancelVolumeOperation() {
-        volumeOperationTask?.cancel()
-        volumeOperationTask = nil
-        if let operation = volumeOperationStatus {
+    public func cancelVolumeOperation(id: UUID? = nil) {
+        let operationIDs: [UUID]
+        if let id {
+            operationIDs = [id]
+        } else {
+            operationIDs = Array(Set(volumeOperationTasks.keys).union(volumeOperationStatuses.map(\.id)))
+        }
+
+        for operationID in operationIDs {
+            volumeOperationTasks[operationID]?.cancel()
+            volumeOperationTasks.removeValue(forKey: operationID)
+            guard let operation = volumeOperationStatuses.first(where: { $0.id == operationID }) else { continue }
             statusMessage = "Cancelled \(operation.title)"
             JobManager.shared.cancel(operationID: operation.id.uuidString,
                                      detail: "Cancelled \(operation.title)")
+            removeVolumeOperationStatus(id: operationID)
         }
-        volumeOperationStatus = nil
+    }
+
+    private func addVolumeOperationStatus(_ status: VolumeOperationStatus) {
+        volumeOperationStatuses.removeAll { $0.id == status.id }
+        volumeOperationStatuses.append(status)
+        volumeOperationStatus = status
+    }
+
+    private func removeVolumeOperationStatus(id: UUID) {
+        volumeOperationStatuses.removeAll { $0.id == id }
+        volumeOperationStatus = volumeOperationStatuses.last
+    }
+
+    private func hasMutatingVolumeOperation(for mapID: UUID) -> Bool {
+        volumeOperationStatuses.contains { $0.isMutating && $0.mapID == mapID }
     }
 
     public func volumeForDisplayMode(_ mode: SliceDisplayMode) -> ImageVolume? {
@@ -6982,10 +7026,6 @@ public final class ViewerViewModel: ObservableObject {
     public func startActiveVolumeMeasurement(method: VolumeMeasurementMethod = .activeLabel,
                                              thresholdSummary: String = "Active label",
                                              preferPET: Bool = true) {
-        guard !isVolumeOperationRunning else {
-            statusMessage = "Volume operation already running. Cancel it before starting another label-volume job."
-            return
-        }
         guard let map = labeling.activeLabelMap else {
             lastVolumeMeasurementReport = nil
             statusMessage = "No active label map to measure"
@@ -6999,12 +7039,14 @@ public final class ViewerViewModel: ObservableObject {
 
         let operationID = UUID()
         let title = source.source == .petSUV ? "Measure SUV metrics" : "Measure volume"
-        volumeOperationStatus = VolumeOperationStatus(
+        addVolumeOperationStatus(VolumeOperationStatus(
             id: operationID,
             title: title,
             detail: thresholdSummary,
-            startedAt: Date()
-        )
+            startedAt: Date(),
+            mapID: map.id,
+            isMutating: false
+        ))
         statusMessage = "Running \(title)… viewer remains responsive"
         JobManager.shared.start(JobUpdate(operationID: operationID.uuidString,
                                           kind: .volumeOperation,
@@ -7028,7 +7070,7 @@ public final class ViewerViewModel: ObservableObject {
             suvSettings: suvSettings
         )
 
-        volumeOperationTask = Task { [weak self, input, operationID] in
+        let task = Task { [weak self, input, operationID] in
             await MainActor.run {
                 JobManager.shared.heartbeat(operationID: operationID.uuidString,
                                             detail: "Computing volume metrics")
@@ -7038,15 +7080,16 @@ public final class ViewerViewModel: ObservableObject {
             }.value
             guard !Task.isCancelled,
                   let self,
-                  self.volumeOperationStatus?.id == operationID else { return }
+                  self.volumeOperationStatuses.contains(where: { $0.id == operationID }) else { return }
             self.lastVolumeMeasurementReport = report
             self.statusMessage = self.measurementStatus(report)
-            self.volumeOperationStatus = nil
-            self.volumeOperationTask = nil
+            self.removeVolumeOperationStatus(id: operationID)
+            self.volumeOperationTasks.removeValue(forKey: operationID)
             self.autosaveActiveStudySession()
             JobManager.shared.succeed(operationID: operationID.uuidString,
                                       detail: self.statusMessage)
         }
+        volumeOperationTasks[operationID] = task
     }
 
     @discardableResult
@@ -7334,11 +7377,6 @@ public final class ViewerViewModel: ObservableObject {
                                              color: Color,
                                              forceCT: Bool = false,
                                              preferredVolume: ImageVolume? = nil) {
-        guard !isVolumeOperationRunning else {
-            statusMessage = "Volume operation already running. Cancel it before starting another label-volume job."
-            return
-        }
-
         ensureActiveLabelMapForCurrentContext(
             defaultName: defaultName,
             className: className,
@@ -7346,6 +7384,10 @@ public final class ViewerViewModel: ObservableObject {
             color: color
         )
         guard let map = labeling.activeLabelMap else { return }
+        guard !hasMutatingVolumeOperation(for: map.id) else {
+            statusMessage = "A label-writing job is already running for this label map. Other studies and read-only measurements can continue."
+            return
+        }
 
         let source: (volume: ImageVolume, usesSUV: Bool)?
         if let preferredVolume, sameGrid(preferredVolume, map) {
@@ -7363,12 +7405,14 @@ public final class ViewerViewModel: ObservableObject {
         }
 
         let operationID = UUID()
-        volumeOperationStatus = VolumeOperationStatus(
+        addVolumeOperationStatus(VolumeOperationStatus(
             id: operationID,
             title: operation.title,
             detail: operation.thresholdSummary,
-            startedAt: Date()
-        )
+            startedAt: Date(),
+            mapID: map.id,
+            isMutating: true
+        ))
         statusMessage = "Running \(operation.title)… viewer remains responsive"
         JobManager.shared.start(JobUpdate(operationID: operationID.uuidString,
                                           kind: .volumeOperation,
@@ -7392,7 +7436,7 @@ public final class ViewerViewModel: ObservableObject {
             diffLimit: maxBackgroundTrackedChangedVoxels
         )
 
-        volumeOperationTask = Task { [weak self, input, operationID] in
+        let task = Task { [weak self, input, operationID] in
             await MainActor.run {
                 JobManager.shared.heartbeat(operationID: operationID.uuidString,
                                             detail: "Running \(input.operation.title)")
@@ -7402,9 +7446,10 @@ public final class ViewerViewModel: ObservableObject {
             }.value
             guard !Task.isCancelled,
                   let self,
-                  self.volumeOperationStatus?.id == operationID else { return }
+                  self.volumeOperationStatuses.contains(where: { $0.id == operationID }) else { return }
             self.finishBackgroundLabelOperation(result, operationID: operationID)
         }
+        volumeOperationTasks[operationID] = task
     }
 
     private func finishBackgroundLabelOperation(_ result: VolumeLabelOperationOutput, operationID: UUID) {
@@ -7458,8 +7503,8 @@ public final class ViewerViewModel: ObservableObject {
             message = "No voxels matched \(result.operation.thresholdSummary)"
         }
         statusMessage = message
-        volumeOperationStatus = nil
-        volumeOperationTask = nil
+        removeVolumeOperationStatus(id: operationID)
+        volumeOperationTasks.removeValue(forKey: operationID)
         saveOrUpdateCurrentStudySession(announce: false, includeLabelMaps: true)
         JobManager.shared.succeed(operationID: operationID.uuidString,
                                   detail: message)
@@ -7628,22 +7673,25 @@ public final class ViewerViewModel: ObservableObject {
 
     public func scheduleVisibleSliceCacheWarmup(reason: String = "visible panes") {
         sliceRenderWarmupTask?.cancel()
-        sliceRenderWarmupTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 120_000_000)
+        let quiet = reason == "slice navigation"
+        let delayNanoseconds: UInt64 = quiet ? 280_000_000 : 120_000_000
+        sliceRenderWarmupTask = Task { [weak self, delayNanoseconds, quiet] in
+            try? await Task.sleep(nanoseconds: delayNanoseconds)
             guard !Task.isCancelled else { return }
-            self?.runVisibleSliceCacheWarmup(reason: reason)
+            self?.runVisibleSliceCacheWarmup(reason: reason, quiet: quiet)
         }
     }
 
     @discardableResult
-    public func warmVisibleSliceCacheNow(limit: Int = 12) -> Int {
+    public func warmVisibleSliceCacheNow(limit: Int = 12,
+                                         updateStatus: Bool = true) -> Int {
         guard !hangingPanes.isEmpty else {
-            sliceRenderWarmupStatus = "Slice cache idle"
+            if updateStatus { sliceRenderWarmupStatus = "Slice cache idle" }
             return 0
         }
         let visibleCount = min(max(0, limit), hangingGrid.paneCount, hangingPanes.count)
         guard visibleCount > 0 else {
-            sliceRenderWarmupStatus = "Slice cache idle"
+            if updateStatus { sliceRenderWarmupStatus = "Slice cache idle" }
             return 0
         }
 
@@ -7664,17 +7712,19 @@ public final class ViewerViewModel: ObservableObject {
 
         let newHits = sliceRenderCacheHitCount - hitsBefore
         let newMisses = sliceRenderCacheMissCount - missesBefore
-        if warmed > 0 {
-            sliceRenderWarmupStatus = "Slice cache warm: \(warmed) image(s), \(newHits) hit(s), \(newMisses) miss(es)"
-        } else {
-            sliceRenderWarmupStatus = "Slice cache idle"
+        if updateStatus {
+            if warmed > 0 {
+                sliceRenderWarmupStatus = "Slice cache warm: \(warmed) image(s), \(newHits) hit(s), \(newMisses) miss(es)"
+            } else {
+                sliceRenderWarmupStatus = "Slice cache idle"
+            }
         }
         return warmed
     }
 
-    private func runVisibleSliceCacheWarmup(reason: String) {
-        let warmed = warmVisibleSliceCacheNow()
-        if warmed > 0 {
+    private func runVisibleSliceCacheWarmup(reason: String, quiet: Bool = false) {
+        let warmed = warmVisibleSliceCacheNow(updateStatus: !quiet)
+        if warmed > 0 && !quiet {
             statusMessage = "Prepared \(warmed) visible slice image(s) for \(reason)"
         }
     }
@@ -8109,6 +8159,8 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     private func clearPETMIPRenderedImageCache() {
+        petMIPCineWarmupDebounceTask?.cancel()
+        petMIPCineWarmupDebounceTask = nil
         for task in petMIPCineWarmupTasks.values {
             task.cancel()
         }
@@ -8364,8 +8416,6 @@ public final class ViewerViewModel: ObservableObject {
     private func petMIPProjectionForDisplay(volume: ImageVolume,
                                             axis: Int,
                                             key: PETMIPProjectionKey) -> PETMIPProjectionSelection? {
-        startPETMIPCineWarmupIfNeeded(volume: volume, axis: axis, around: key.rotationTenths)
-
         if let selection = exactCachedPETMIPProjection(for: key) {
             return selection
         }
@@ -8493,6 +8543,8 @@ public final class ViewerViewModel: ObservableObject {
                                           total: Int,
                                           volumeIdentity: String) {
         let progress = total == 0 ? 1 : Double(completed) / Double(total)
+        let previous = petMIPCineProgressKeys[key] ?? 0
+        guard progress >= 1 || progress - previous >= 0.03 else { return }
         petMIPCineProgressKeys[key] = progress
         if petMIPCineProgressVolumeIdentity == volumeIdentity {
             petMIPCineProgressByAxis[axis] = progress
@@ -8506,15 +8558,36 @@ public final class ViewerViewModel: ObservableObject {
             petMIPCineProgressByAxis = [:]
         }
         cancelPETMIPWorkForOtherVolumes(keeping: volume.sessionIdentity)
-        startPETMIPCineWarmupIfNeeded(volume: volume,
-                                      axis: SlicePlane.coronal.axis,
-                                      around: Int((petMIPRotationDegrees * 10).rounded()))
-        startPETMIPCineWarmupIfNeeded(volume: volume,
-                                      axis: SlicePlane.sagittal.axis,
-                                      around: Int((petMIPRotationDegrees * 10).rounded()))
+
+        for axis in preferredPETMIPProjectionAxes(priorityAxis: nil) {
+            let key = PETMIPProjectionKey(volume: volume, axis: axis, rotationDegrees: petMIPRotationDegrees)
+            startPETMIPProjectionIfNeeded(volume: volume, axis: axis, key: key)
+        }
+
+        schedulePETMIPCineWarmupForVolume(volume)
+    }
+
+    private func schedulePETMIPCineWarmupForVolume(_ volume: ImageVolume) {
+        let axes = preferredPETMIPProjectionAxes(priorityAxis: nil).filter { $0 != SlicePlane.axial.axis }
+        guard !axes.isEmpty else { return }
+        petMIPCineWarmupDebounceTask?.cancel()
+        let delay = petMIPCineWarmupSettleDelayNanoseconds
+        let centerTenths = Int((petMIPRotationDegrees * 10).rounded())
+        petMIPCineWarmupDebounceTask = Task { @MainActor [weak self, volume, axes, delay, centerTenths] in
+            if delay > 0 {
+                try? await Task.sleep(nanoseconds: delay)
+            }
+            guard let self, !Task.isCancelled else { return }
+            guard self.activePETQuantificationVolume?.sessionIdentity == volume.sessionIdentity else { return }
+            for axis in axes {
+                self.startPETMIPCineWarmupIfNeeded(volume: volume, axis: axis, around: centerTenths)
+            }
+        }
     }
 
     private func cancelPETMIPWorkForOtherVolumes(keeping volumeIdentity: String) {
+        petMIPCineWarmupDebounceTask?.cancel()
+        petMIPCineWarmupDebounceTask = nil
         let staleWarmups = petMIPCineWarmupTasks.keys.filter { $0.volumeIdentity != volumeIdentity }
         for key in staleWarmups {
             petMIPCineWarmupTasks[key]?.cancel()
