@@ -94,6 +94,37 @@ public struct AutoPETExperimentPanel: View {
                 TextField("Remote root", text: $autoPET.experiment.remoteExperimentRoot)
                     .textFieldStyle(.roundedBorder)
             }
+
+            Toggle("Use Spark dataset root instead of staging local viewer cases",
+                   isOn: $autoPET.experiment.useSparkDatasetRoot)
+                .font(.system(size: 11, weight: .medium))
+
+            if autoPET.experiment.useSparkDatasetRoot {
+                VStack(alignment: .leading, spacing: 6) {
+                    TextField("Spark dataset root", text: $autoPET.experiment.sparkDatasetRoot)
+                        .textFieldStyle(.roundedBorder)
+                    TextField("Model env file", text: $autoPET.experiment.sparkModelEnvironmentFile)
+                        .textFieldStyle(.roundedBorder)
+                    HStack {
+                        TextField("Container mount", text: $autoPET.experiment.sparkContainerDatasetMount)
+                            .textFieldStyle(.roundedBorder)
+                        Stepper("Limit \(autoPET.experiment.sparkCaseLimit == 0 ? "all" : "\(autoPET.experiment.sparkCaseLimit)")",
+                                value: $autoPET.experiment.sparkCaseLimit,
+                                in: 0...10_000,
+                                step: 10)
+                            .font(.system(size: 11))
+                    }
+                    HStack(spacing: 6) {
+                        Text("Validation")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                        Slider(value: $autoPET.experiment.sparkValidationFraction, in: 0.05...0.5, step: 0.05)
+                        Text("\(Int(autoPET.experiment.sparkValidationFraction * 100))%")
+                            .font(.system(size: 11, design: .monospaced))
+                            .frame(width: 34, alignment: .trailing)
+                    }
+                }
+            }
         }
     }
 
@@ -104,19 +135,24 @@ public struct AutoPETExperimentPanel: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(.secondary)
                 Spacer()
-                Text("\(autoPET.selectedCaseCount) selected  |  train \(autoPET.selectedTrainingCount)  |  validation \(autoPET.selectedValidationCount)")
+                Text(caseCountSummary)
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.secondary)
-                Button {
-                    autoPET.refresh(from: viewer)
-                } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
+                if !autoPET.experiment.useSparkDatasetRoot {
+                    Button {
+                        autoPET.refresh(from: viewer)
+                    } label: {
+                        Label("Refresh", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
             }
 
-            if autoPET.drafts.isEmpty {
+            if autoPET.experiment.useSparkDatasetRoot {
+                ContentUnavailableView("Spark dataset mode", systemImage: "bolt.horizontal")
+                    .frame(minHeight: 160)
+            } else if autoPET.drafts.isEmpty {
                 ContentUnavailableView("No PET/CT cases", systemImage: "tray")
                     .frame(minHeight: 180)
             } else {
@@ -199,21 +235,28 @@ public struct AutoPETExperimentPanel: View {
             } label: {
                 Label("Build Package", systemImage: "shippingbox")
             }
-            .disabled(autoPET.isRunning || autoPET.selectedCaseCount == 0)
+            .disabled(autoPET.isRunning || !autoPET.canBuildOrRun)
+
+            Button {
+                Task { await autoPET.prepareOnDGX(from: viewer) }
+            } label: {
+                Label("Prepare Only", systemImage: "checklist")
+            }
+            .disabled(autoPET.isRunning || !autoPET.canBuildOrRun)
 
             Button {
                 Task { await autoPET.launchTraining(from: viewer) }
             } label: {
                 Label("Train on DGX", systemImage: "bolt.fill")
             }
-            .disabled(autoPET.isRunning || autoPET.selectedTrainingCount == 0)
+            .disabled(autoPET.isRunning || !autoPET.canBuildOrRun)
 
             Button {
                 Task { await autoPET.launchValidation(from: viewer) }
             } label: {
                 Label("Validate on DGX", systemImage: "checkmark.seal")
             }
-            .disabled(autoPET.isRunning || autoPET.selectedValidationCount == 0)
+            .disabled(autoPET.isRunning || !autoPET.canBuildOrRun)
 
             Spacer()
         }
@@ -250,6 +293,16 @@ public struct AutoPETExperimentPanel: View {
                 autoPET.experiment.folds = folds.isEmpty ? ["0"] : folds
             }
         )
+    }
+
+    private var caseCountSummary: String {
+        if autoPET.experiment.useSparkDatasetRoot {
+            let limit = autoPET.experiment.sparkCaseLimit == 0
+                ? "all"
+                : "\(autoPET.experiment.sparkCaseLimit)"
+            return "Spark dataset  |  cases \(limit)  |  validation \(Int(autoPET.experiment.sparkValidationFraction * 100))%"
+        }
+        return "\(autoPET.selectedCaseCount) selected  |  train \(autoPET.selectedTrainingCount)  |  validation \(autoPET.selectedValidationCount)"
     }
 
     private func caseSubtitle(_ draft: AutoPETVManifestBuilder.DraftCase) -> String {

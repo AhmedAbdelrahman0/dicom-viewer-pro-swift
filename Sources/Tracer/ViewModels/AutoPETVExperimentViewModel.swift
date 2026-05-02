@@ -16,7 +16,11 @@ public final class AutoPETVExperimentViewModel: ObservableObject {
         self.store = store
         self.experiment = AutoPETVExperimentConfig(
             name: "AutoPET V \(Self.dateStamp())",
-            remoteExperimentRoot: DGXSparkConfig.load().remoteWorkdir + "/autopetv"
+            remoteExperimentRoot: DGXSparkConfig.load().remoteWorkdir + "/autopetv",
+            useSparkDatasetRoot: true,
+            sparkDatasetRoot: AutoPETVExperimentConfig.defaultSparkDatasetRoot,
+            sparkModelEnvironmentFile: AutoPETVExperimentConfig.defaultSparkModelEnvironmentFile,
+            sparkContainerDatasetMount: AutoPETVExperimentConfig.defaultSparkContainerDatasetMount
         )
         reloadStore()
     }
@@ -26,15 +30,22 @@ public final class AutoPETVExperimentViewModel: ObservableObject {
     }
 
     public var selectedCaseCount: Int {
-        selectedDrafts.count
+        if experiment.useSparkDatasetRoot { return max(0, experiment.sparkCaseLimit) }
+        return selectedDrafts.count
     }
 
     public var selectedTrainingCount: Int {
-        selectedDrafts.filter { $0.split == .train }.count
+        if experiment.useSparkDatasetRoot { return 1 }
+        return selectedDrafts.filter { $0.split == .train }.count
     }
 
     public var selectedValidationCount: Int {
-        selectedDrafts.filter { $0.split == .validation }.count
+        if experiment.useSparkDatasetRoot { return 1 }
+        return selectedDrafts.filter { $0.split == .validation }.count
+    }
+
+    public var canBuildOrRun: Bool {
+        experiment.useSparkDatasetRoot || !selectedDrafts.isEmpty
     }
 
     public func reloadStore() {
@@ -85,6 +96,10 @@ public final class AutoPETVExperimentViewModel: ObservableObject {
         await runPackageOperation(kind: .packageOnly, viewer: viewer)
     }
 
+    public func prepareOnDGX(from viewer: ViewerViewModel) async {
+        await runPackageOperation(kind: .prepare, viewer: viewer)
+    }
+
     public func launchTraining(from viewer: ViewerViewModel) async {
         await runPackageOperation(kind: .training, viewer: viewer)
     }
@@ -99,21 +114,31 @@ public final class AutoPETVExperimentViewModel: ObservableObject {
         defer { isRunning = false }
 
         do {
-            let sources = try AutoPETVManifestBuilder.makePackageSources(
-                drafts: drafts,
-                volumes: viewer.activeSessionVolumes,
-                labelMaps: viewer.labeling.labelMaps
-            )
             var exp = experiment
             exp.updatedAt = Date()
             let packageRoot = store.rootURL.appendingPathComponent("Packages", isDirectory: true)
+            let sources: [AutoPETVCasePackageSource]
+            if exp.useSparkDatasetRoot {
+                sources = []
+            } else {
+                sources = try AutoPETVManifestBuilder.makePackageSources(
+                    drafts: drafts,
+                    volumes: viewer.activeSessionVolumes,
+                    labelMaps: viewer.labeling.labelMaps
+                )
+            }
 
             switch kind {
             case .packageOnly:
                 let package = try await Task.detached(priority: ResourcePolicy.load().backgroundTaskPriority) {
-                    try AutoPETVDGXPipeline.buildPackage(experiment: exp,
-                                                         caseSources: sources,
-                                                         rootURL: packageRoot)
+                    if exp.useSparkDatasetRoot {
+                        return try AutoPETVDGXPipeline.buildPackage(experiment: exp,
+                                                                    cases: [],
+                                                                    rootURL: packageRoot)
+                    }
+                    return try AutoPETVDGXPipeline.buildPackage(experiment: exp,
+                                                                caseSources: sources,
+                                                                rootURL: packageRoot)
                 }.value
                 let run = AutoPETVExperimentRunRecord(
                     experimentID: exp.id,
@@ -123,7 +148,10 @@ public final class AutoPETVExperimentViewModel: ObservableObject {
                     localPackagePath: package.localURL.path,
                     remotePackagePath: package.remotePath,
                     command: package.trainCommand,
-                    metadata: ["caseCount": "\(sources.count)"]
+                    metadata: [
+                        "caseCount": "\(sources.count)",
+                        "sparkDatasetRoot": exp.useSparkDatasetRoot ? exp.sparkDatasetRoot : ""
+                    ]
                 )
                 try store.upsertExperiment(exp)
                 try store.upsertRun(run)
@@ -131,14 +159,57 @@ public final class AutoPETVExperimentViewModel: ObservableObject {
                 lastRun = run
                 experiment = exp
                 reloadStore()
-                statusMessage = "Built AutoPET V package with \(sources.count) case\(sources.count == 1 ? "" : "s")."
+                statusMessage = exp.useSparkDatasetRoot
+                    ? "Built Spark-native AutoPET V package for \(exp.sparkDatasetRoot)."
+                    : "Built AutoPET V package with \(sources.count) case\(sources.count == 1 ? "" : "s")."
+
+            case .prepare:
+                let cfg = try requireDGXConfig()
+                let store = self.store
+                statusMessage = "Uploading AutoPET V package and running DGX prepare-only..."
+                let run = try await Task.detached(priority: ResourcePolicy.load().backgroundTaskPriority) {
+                    if exp.useSparkDatasetRoot {
+                        return try AutoPETVDGXPipeline.launchPrepareOnDGX(
+                            experiment: exp,
+                            cases: [],
+                            dgx: cfg,
+                            packageRoot: packageRoot,
+                            store: store,
+                            logSink: { _ in }
+                        )
+                    }
+                    return try AutoPETVDGXPipeline.launchPrepareOnDGX(
+                        experiment: exp,
+                        caseSources: sources,
+                        dgx: cfg,
+                        packageRoot: packageRoot,
+                        store: store,
+                        logSink: { _ in }
+                    )
+                }.value
+                lastRun = run
+                experiment = exp
+                reloadStore()
+                statusMessage = run.status == .succeeded
+                    ? "DGX prepare-only finished."
+                    : "DGX prepare-only ended with \(run.status.rawValue)."
 
             case .training:
                 let cfg = try requireDGXConfig()
                 let store = self.store
                 statusMessage = "Uploading AutoPET V package and launching DGX training..."
                 let run = try await Task.detached(priority: ResourcePolicy.load().backgroundTaskPriority) {
-                    try AutoPETVDGXPipeline.launchTrainingOnDGX(
+                    if exp.useSparkDatasetRoot {
+                        return try AutoPETVDGXPipeline.launchTrainingOnDGX(
+                            experiment: exp,
+                            cases: [],
+                            dgx: cfg,
+                            packageRoot: packageRoot,
+                            store: store,
+                            logSink: { _ in }
+                        )
+                    }
+                    return try AutoPETVDGXPipeline.launchTrainingOnDGX(
                         experiment: exp,
                         caseSources: sources,
                         dgx: cfg,
@@ -159,7 +230,17 @@ public final class AutoPETVExperimentViewModel: ObservableObject {
                 let store = self.store
                 statusMessage = "Uploading AutoPET V package and launching DGX validation..."
                 let run = try await Task.detached(priority: ResourcePolicy.load().backgroundTaskPriority) {
-                    try AutoPETVDGXPipeline.launchValidationOnDGX(
+                    if exp.useSparkDatasetRoot {
+                        return try AutoPETVDGXPipeline.launchValidationOnDGX(
+                            experiment: exp,
+                            cases: [],
+                            dgx: cfg,
+                            packageRoot: packageRoot,
+                            store: store,
+                            logSink: { _ in }
+                        )
+                    }
+                    return try AutoPETVDGXPipeline.launchValidationOnDGX(
                         experiment: exp,
                         caseSources: sources,
                         dgx: cfg,

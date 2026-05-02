@@ -4436,7 +4436,8 @@ final class GeometryAndIOTests: XCTestCase {
             promptDistanceMM: 32,
             maxInteractionSteps: 3,
             folds: ["0", "1"],
-            remoteExperimentRoot: "~/autopetv"
+            remoteExperimentRoot: "~/autopetv",
+            useSparkDatasetRoot: true
         )
         let cases = [
             AutoPETVCaseManifestEntry(caseID: "case-a",
@@ -4483,6 +4484,8 @@ final class GeometryAndIOTests: XCTestCase {
         ))
         XCTAssertTrue(package.remotePath.hasPrefix("~/autopetv/EDT-prompt-smoke-"))
         XCTAssertTrue(package.trainCommand.contains("train_autopetv.py"))
+        XCTAssertTrue(package.prepareCommand.contains("--prepare-only"))
+        XCTAssertTrue(package.trainCommand.contains("model_access.env"))
 
         let trainScript = try String(contentsOf: package.localURL
             .appendingPathComponent("scripts", isDirectory: true)
@@ -4496,6 +4499,8 @@ final class GeometryAndIOTests: XCTestCase {
         let data = try Data(contentsOf: package.manifestURL)
         let manifest = try JSONDecoder().decode(AutoPETVTrainingManifest.self, from: data)
         XCTAssertEqual(manifest.experiment.promptDistanceMM, 32)
+        XCTAssertEqual(manifest.experiment.sparkDatasetRoot, "/home/ahmed/datasets/autopet5/current")
+        XCTAssertTrue(manifest.experiment.useSparkDatasetRoot)
         XCTAssertEqual(manifest.trainingCases.map(\.caseID), ["case-a"])
         XCTAssertEqual(manifest.validationCases.map(\.caseID), ["case-b"])
 

@@ -1,6 +1,10 @@
 import Foundation
 
 public struct AutoPETVExperimentConfig: Codable, Identifiable, Hashable, Sendable {
+    public static let defaultSparkDatasetRoot = "/home/ahmed/datasets/autopet5/current"
+    public static let defaultSparkModelEnvironmentFile = "/home/ahmed/datasets/autopet5/model_access.env"
+    public static let defaultSparkContainerDatasetMount = "/data/autopet5"
+
     public enum PromptEncoding: String, Codable, CaseIterable, Sendable {
         case edt
         case binary
@@ -29,6 +33,12 @@ public struct AutoPETVExperimentConfig: Codable, Identifiable, Hashable, Sendabl
     public var folds: [String]
     public var baseModelID: String
     public var remoteExperimentRoot: String
+    public var useSparkDatasetRoot: Bool
+    public var sparkDatasetRoot: String
+    public var sparkModelEnvironmentFile: String
+    public var sparkContainerDatasetMount: String
+    public var sparkCaseLimit: Int
+    public var sparkValidationFraction: Double
     public var notes: String
 
     public init(id: UUID = UUID(),
@@ -45,6 +55,12 @@ public struct AutoPETVExperimentConfig: Codable, Identifiable, Hashable, Sendabl
                 folds: [String] = ["0"],
                 baseModelID: String = "AutoPET-V-2026",
                 remoteExperimentRoot: String = "~/tracer-autopetv-experiments",
+                useSparkDatasetRoot: Bool = false,
+                sparkDatasetRoot: String = AutoPETVExperimentConfig.defaultSparkDatasetRoot,
+                sparkModelEnvironmentFile: String = AutoPETVExperimentConfig.defaultSparkModelEnvironmentFile,
+                sparkContainerDatasetMount: String = AutoPETVExperimentConfig.defaultSparkContainerDatasetMount,
+                sparkCaseLimit: Int = 0,
+                sparkValidationFraction: Double = 0.2,
                 notes: String = "") {
         self.id = id
         self.name = name
@@ -60,7 +76,71 @@ public struct AutoPETVExperimentConfig: Codable, Identifiable, Hashable, Sendabl
         self.folds = folds
         self.baseModelID = baseModelID
         self.remoteExperimentRoot = remoteExperimentRoot
+        self.useSparkDatasetRoot = useSparkDatasetRoot
+        self.sparkDatasetRoot = sparkDatasetRoot
+        self.sparkModelEnvironmentFile = sparkModelEnvironmentFile
+        self.sparkContainerDatasetMount = sparkContainerDatasetMount
+        self.sparkCaseLimit = sparkCaseLimit
+        self.sparkValidationFraction = sparkValidationFraction
         self.notes = notes
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, createdAt, updatedAt, datasetID, promptEncoding, promptDistanceMM
+        case maxInteractionSteps, maxForegroundScribblesPerStep, maxBackgroundScribblesPerStep
+        case nnunetConfiguration, folds, baseModelID, remoteExperimentRoot
+        case useSparkDatasetRoot, sparkDatasetRoot, sparkModelEnvironmentFile
+        case sparkContainerDatasetMount, sparkCaseLimit, sparkValidationFraction, notes
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? "AutoPET V experiment"
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
+        datasetID = try c.decodeIfPresent(String.self, forKey: .datasetID) ?? "Dataset998_AutoPETV"
+        promptEncoding = try c.decodeIfPresent(PromptEncoding.self, forKey: .promptEncoding) ?? .edt
+        promptDistanceMM = try c.decodeIfPresent(Double.self, forKey: .promptDistanceMM) ?? 40
+        maxInteractionSteps = try c.decodeIfPresent(Int.self, forKey: .maxInteractionSteps) ?? 4
+        maxForegroundScribblesPerStep = try c.decodeIfPresent(Int.self, forKey: .maxForegroundScribblesPerStep) ?? 3
+        maxBackgroundScribblesPerStep = try c.decodeIfPresent(Int.self, forKey: .maxBackgroundScribblesPerStep) ?? 3
+        nnunetConfiguration = try c.decodeIfPresent(String.self, forKey: .nnunetConfiguration) ?? "3d_fullres"
+        folds = try c.decodeIfPresent([String].self, forKey: .folds) ?? ["0"]
+        baseModelID = try c.decodeIfPresent(String.self, forKey: .baseModelID) ?? "AutoPET-V-2026"
+        remoteExperimentRoot = try c.decodeIfPresent(String.self, forKey: .remoteExperimentRoot) ?? "~/tracer-autopetv-experiments"
+        useSparkDatasetRoot = try c.decodeIfPresent(Bool.self, forKey: .useSparkDatasetRoot) ?? false
+        sparkDatasetRoot = try c.decodeIfPresent(String.self, forKey: .sparkDatasetRoot) ?? Self.defaultSparkDatasetRoot
+        sparkModelEnvironmentFile = try c.decodeIfPresent(String.self, forKey: .sparkModelEnvironmentFile) ?? Self.defaultSparkModelEnvironmentFile
+        sparkContainerDatasetMount = try c.decodeIfPresent(String.self, forKey: .sparkContainerDatasetMount) ?? Self.defaultSparkContainerDatasetMount
+        sparkCaseLimit = try c.decodeIfPresent(Int.self, forKey: .sparkCaseLimit) ?? 0
+        sparkValidationFraction = try c.decodeIfPresent(Double.self, forKey: .sparkValidationFraction) ?? 0.2
+        notes = try c.decodeIfPresent(String.self, forKey: .notes) ?? ""
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(createdAt, forKey: .createdAt)
+        try c.encode(updatedAt, forKey: .updatedAt)
+        try c.encode(datasetID, forKey: .datasetID)
+        try c.encode(promptEncoding, forKey: .promptEncoding)
+        try c.encode(promptDistanceMM, forKey: .promptDistanceMM)
+        try c.encode(maxInteractionSteps, forKey: .maxInteractionSteps)
+        try c.encode(maxForegroundScribblesPerStep, forKey: .maxForegroundScribblesPerStep)
+        try c.encode(maxBackgroundScribblesPerStep, forKey: .maxBackgroundScribblesPerStep)
+        try c.encode(nnunetConfiguration, forKey: .nnunetConfiguration)
+        try c.encode(folds, forKey: .folds)
+        try c.encode(baseModelID, forKey: .baseModelID)
+        try c.encode(remoteExperimentRoot, forKey: .remoteExperimentRoot)
+        try c.encode(useSparkDatasetRoot, forKey: .useSparkDatasetRoot)
+        try c.encode(sparkDatasetRoot, forKey: .sparkDatasetRoot)
+        try c.encode(sparkModelEnvironmentFile, forKey: .sparkModelEnvironmentFile)
+        try c.encode(sparkContainerDatasetMount, forKey: .sparkContainerDatasetMount)
+        try c.encode(sparkCaseLimit, forKey: .sparkCaseLimit)
+        try c.encode(sparkValidationFraction, forKey: .sparkValidationFraction)
+        try c.encode(notes, forKey: .notes)
     }
 }
 
@@ -221,6 +301,7 @@ public struct AutoPETVCaseValidationRecord: Codable, Identifiable, Equatable, Se
 
 public struct AutoPETVExperimentRunRecord: Codable, Identifiable, Equatable, Sendable {
     public enum Kind: String, Codable, CaseIterable, Sendable {
+        case prepare
         case training
         case validation
         case packageOnly
@@ -362,6 +443,7 @@ public enum AutoPETVDGXPipeline {
         public let localURL: URL
         public let remotePath: String
         public let manifestURL: URL
+        public let prepareCommand: String
         public let trainCommand: String
         public let validateCommand: String
     }
@@ -392,8 +474,16 @@ public enum AutoPETVDGXPipeline {
             localURL: localURL,
             remotePath: remotePath,
             manifestURL: manifestURL,
-            trainCommand: remoteCommand(remotePath: remotePath, scriptName: "train_autopetv.py"),
-            validateCommand: remoteCommand(remotePath: remotePath, scriptName: "validate_autopetv.py")
+            prepareCommand: remoteCommand(remotePath: remotePath,
+                                          scriptName: "train_autopetv.py",
+                                          experiment: experiment,
+                                          extraArguments: ["--prepare-only"]),
+            trainCommand: remoteCommand(remotePath: remotePath,
+                                        scriptName: "train_autopetv.py",
+                                        experiment: experiment),
+            validateCommand: remoteCommand(remotePath: remotePath,
+                                           scriptName: "validate_autopetv.py",
+                                           experiment: experiment)
         )
     }
 
@@ -416,6 +506,42 @@ public enum AutoPETVDGXPipeline {
         let package = try buildPackage(experiment: experiment, cases: cases, rootURL: rootURL)
         try writeCaseSources(caseSources, into: package.localURL)
         return package
+    }
+
+    @discardableResult
+    public static func launchPrepareOnDGX(experiment: AutoPETVExperimentConfig,
+                                          cases: [AutoPETVCaseManifestEntry],
+                                          dgx: DGXSparkConfig,
+                                          packageRoot: URL = FileManager.default.temporaryDirectory,
+                                          store: AutoPETVExperimentStore? = nil,
+                                          timeoutSeconds: TimeInterval? = nil,
+                                          logSink: @escaping @Sendable (String) -> Void = { _ in }) throws -> AutoPETVExperimentRunRecord {
+        let package = try buildPackage(experiment: experiment, cases: cases, rootURL: packageRoot)
+        return try launchPrepareOnDGX(experiment: experiment,
+                                      package: package,
+                                      caseCount: cases.count,
+                                      dgx: dgx,
+                                      store: store,
+                                      timeoutSeconds: timeoutSeconds,
+                                      logSink: logSink)
+    }
+
+    @discardableResult
+    public static func launchPrepareOnDGX(experiment: AutoPETVExperimentConfig,
+                                          caseSources: [AutoPETVCasePackageSource],
+                                          dgx: DGXSparkConfig,
+                                          packageRoot: URL = FileManager.default.temporaryDirectory,
+                                          store: AutoPETVExperimentStore? = nil,
+                                          timeoutSeconds: TimeInterval? = nil,
+                                          logSink: @escaping @Sendable (String) -> Void = { _ in }) throws -> AutoPETVExperimentRunRecord {
+        let package = try buildPackage(experiment: experiment, caseSources: caseSources, rootURL: packageRoot)
+        return try launchPrepareOnDGX(experiment: experiment,
+                                      package: package,
+                                      caseCount: caseSources.count,
+                                      dgx: dgx,
+                                      store: store,
+                                      timeoutSeconds: timeoutSeconds,
+                                      logSink: logSink)
     }
 
     @discardableResult
@@ -574,9 +700,63 @@ public enum AutoPETVDGXPipeline {
         return try decoder.decode([AutoPETVCaseValidationRecord].self, from: data)
     }
 
-    private static func remoteCommand(remotePath: String, scriptName: String) -> String {
+    private static func remoteCommand(remotePath: String,
+                                      scriptName: String,
+                                      experiment: AutoPETVExperimentConfig,
+                                      extraArguments: [String] = []) -> String {
         let quotedPath = RemoteExecutor.shellPath(remotePath)
-        return "cd \(quotedPath) && python3 scripts/\(scriptName) --manifest manifest.json --workdir work"
+        let sourceEnv = experiment.sparkModelEnvironmentFile.trimmingCharacters(in: .whitespacesAndNewlines)
+        let envPrefix = sourceEnv.isEmpty
+            ? ""
+            : "if [ -f \(RemoteExecutor.shellPath(sourceEnv)) ]; then . \(RemoteExecutor.shellPath(sourceEnv)); fi; "
+        let arguments = extraArguments.joined(separator: " ")
+        let suffix = arguments.isEmpty ? "" : " \(arguments)"
+        return "\(envPrefix)cd \(quotedPath) && python3 scripts/\(scriptName) --manifest manifest.json --workdir work\(suffix)"
+    }
+
+    private static func launchPrepareOnDGX(experiment: AutoPETVExperimentConfig,
+                                           package: Package,
+                                           caseCount: Int,
+                                           dgx: DGXSparkConfig,
+                                           store: AutoPETVExperimentStore?,
+                                           timeoutSeconds: TimeInterval?,
+                                           logSink: @escaping @Sendable (String) -> Void) throws -> AutoPETVExperimentRunRecord {
+        let executor = RemoteExecutor(config: dgx)
+        var run = AutoPETVExperimentRunRecord(
+            experimentID: experiment.id,
+            kind: .prepare,
+            status: .running,
+            localPackagePath: package.localURL.path,
+            remotePackagePath: package.remotePath,
+            command: package.prepareCommand,
+            metadata: runMetadata(experiment: experiment, caseCount: caseCount)
+        )
+        try store?.upsertExperiment(experiment)
+        try store?.upsertRun(run)
+
+        do {
+            try executor.uploadDirectory(package.localURL, toRemote: package.remotePath)
+            let result = try executor.run(package.prepareCommand,
+                                          timeoutSeconds: timeoutSeconds,
+                                          logSink: logSink)
+            run.finishedAt = Date()
+            run.stdoutTail = tail(String(data: result.stdout, encoding: .utf8) ?? "")
+            run.stderrTail = tail(result.stderr)
+            run.status = result.exitCode == 0 ? .succeeded : .failed
+            if result.exitCode != 0 {
+                try store?.upsertRun(run)
+                throw RemoteExecutor.Error.commandFailed(exitCode: result.exitCode, stderr: result.stderr)
+            }
+        } catch {
+            run.finishedAt = Date()
+            run.status = .failed
+            run.stderrTail = tail(error.localizedDescription)
+            try? store?.upsertRun(run)
+            throw error
+        }
+
+        try store?.upsertRun(run)
+        return run
     }
 
     private static func launchTrainingOnDGX(experiment: AutoPETVExperimentConfig,
@@ -719,7 +899,10 @@ public enum AutoPETVDGXPipeline {
             "datasetID": experiment.datasetID,
             "promptEncoding": experiment.promptEncoding.rawValue,
             "promptDistanceMM": String(experiment.promptDistanceMM),
-            "caseCount": String(caseCount)
+            "caseCount": String(caseCount),
+            "useSparkDatasetRoot": experiment.useSparkDatasetRoot ? "true" : "false",
+            "sparkDatasetRoot": experiment.sparkDatasetRoot,
+            "sparkModelEnvironmentFile": experiment.sparkModelEnvironmentFile
         ]
     }
 
@@ -756,16 +939,31 @@ public enum AutoPETVDGXPipeline {
         - Prompt encoding: \(experiment.promptEncoding.rawValue)
         - Prompt distance: \(experiment.promptDistanceMM) mm
         - Interaction steps: \(experiment.maxInteractionSteps)
+        - Spark dataset root: \(experiment.sparkDatasetRoot)
+        - Model env file: \(experiment.sparkModelEnvironmentFile)
 
         Expected Python packages on the DGX are listed in `requirements.txt`.
         The scripts accept MHA/MHD/NIfTI inputs, write an nnU-Net v2 dataset
         with CT, PET, foreground-prompt, and background-prompt channels, then
         train and validate interaction curves.
 
+        Spark dataset mode:
+
+        If `manifest.json` has no explicit cases and the experiment has
+        `useSparkDatasetRoot=true`, the scripts discover cases from
+        `\(experiment.sparkDatasetRoot)`. For Docker/container jobs, mount it
+        as:
+
+        ```bash
+        -v \(experiment.sparkDatasetRoot):\(experiment.sparkContainerDatasetMount):ro
+        ```
+
         Run on DGX:
 
         ```bash
+        source \(experiment.sparkModelEnvironmentFile)
         python3 -m pip install -r requirements.txt
+        python3 scripts/train_autopetv.py --manifest manifest.json --workdir work --prepare-only
         python3 scripts/train_autopetv.py --manifest manifest.json --workdir work
         python3 scripts/validate_autopetv.py --manifest manifest.json --workdir work
         ```
@@ -818,7 +1016,15 @@ class Manifest:
 
     @property
     def cases(self):
-        return self.raw["cases"]
+        explicit = self.raw.get("cases", [])
+        if explicit:
+            return explicit
+        if not self.experiment.get("useSparkDatasetRoot", False):
+            return []
+        root = self.experiment.get("sparkDatasetRoot") or "/home/ahmed/datasets/autopet5/current"
+        limit = int(self.experiment.get("sparkCaseLimit", 0) or 0)
+        validation_fraction = float(self.experiment.get("sparkValidationFraction", 0.2) or 0.2)
+        return discover_cases_from_dataset(root, limit=limit, validation_fraction=validation_fraction)
 
     @property
     def train_cases(self):
@@ -845,6 +1051,114 @@ def require_existing(path, field):
     if not p.exists():
         raise FileNotFoundError(f"{field} does not exist: {p}")
     return p
+
+
+def discover_cases_from_dataset(root, limit=0, validation_fraction=0.2):
+    root = require_existing(root, "sparkDatasetRoot")
+    cases = discover_nnunet_cases(root)
+    if not cases:
+        cases = discover_folder_cases(root)
+    cases = sorted(cases, key=lambda c: c["caseID"])
+    if limit > 0:
+        cases = cases[:limit]
+    assign_splits(cases, validation_fraction)
+    if not cases:
+        raise RuntimeError(
+            f"No AutoPET cases discovered under {root}. Expected nnU-Net imagesTr/labelsTr "
+            "or per-case folders containing CT, PET/SUV, and label/seg files."
+        )
+    return cases
+
+
+def discover_nnunet_cases(root):
+    cases = []
+    images_tr = root / "imagesTr"
+    labels_tr = root / "labelsTr"
+    if not images_tr.exists() or not labels_tr.exists():
+        return cases
+    for ct_path in sorted(images_tr.glob("*_0000.nii*")):
+        case_id = ct_path.name.split("_0000")[0]
+        pet_path = first_existing([
+            images_tr / f"{case_id}_0001.nii.gz",
+            images_tr / f"{case_id}_0001.nii",
+        ])
+        label_path = first_existing([
+            labels_tr / f"{case_id}.nii.gz",
+            labels_tr / f"{case_id}.nii",
+            labels_tr / f"{case_id}.mha",
+            labels_tr / f"{case_id}.mhd",
+        ])
+        if pet_path and label_path:
+            cases.append(case_entry(case_id, ct_path, pet_path, label_path))
+    return cases
+
+
+def discover_folder_cases(root):
+    cases = []
+    for folder in sorted([p for p in root.rglob("*") if p.is_dir()]):
+        files = [p for p in folder.iterdir() if p.is_file() and image_suffix(p.name)]
+        if len(files) < 2:
+            continue
+        ct = best_file(files, include=("ct",), exclude=("pet", "suv", "label", "seg", "mask"))
+        pet = best_file(files, include=("pet", "suv"), exclude=("label", "seg", "mask"))
+        label = best_file(files, include=("label", "seg", "mask", "tumor", "lesion"), exclude=("ct", "pet", "suv"))
+        if ct and pet and label:
+            cases.append(case_entry(folder.name, ct, pet, label))
+    return cases
+
+
+def case_entry(case_id, ct_path, pet_path, label_path):
+    lower = f"{case_id} {pet_path.name}".lower()
+    tracer = "PSMA" if "psma" in lower else ("FDG" if "fdg" in lower else "")
+    return {
+        "caseID": sanitize_case_id(case_id),
+        "split": "train",
+        "ctPath": str(ct_path),
+        "petPath": str(pet_path),
+        "labelPath": str(label_path),
+        "tracer": tracer,
+        "center": "",
+        "notes": "discovered from Spark dataset root",
+    }
+
+
+def assign_splits(cases, validation_fraction):
+    if not cases:
+        return
+    fraction = min(max(validation_fraction, 0.0), 0.9)
+    validation_count = max(1, int(round(len(cases) * fraction))) if len(cases) > 1 else 0
+    split_at = max(0, len(cases) - validation_count)
+    for index, case in enumerate(cases):
+        case["split"] = "validation" if index >= split_at else "train"
+
+
+def first_existing(paths):
+    for path in paths:
+        if path.exists():
+            return path
+    return None
+
+
+def best_file(files, include, exclude=()):
+    ranked = []
+    for path in files:
+        lower = path.name.lower()
+        if not any(token in lower for token in include):
+            continue
+        if any(token in lower for token in exclude):
+            continue
+        ranked.append((len(lower), lower, path))
+    return sorted(ranked)[0][2] if ranked else None
+
+
+def image_suffix(name):
+    lower = name.lower()
+    return lower.endswith((".nii", ".nii.gz", ".mha", ".mhd", ".nrrd"))
+
+
+def sanitize_case_id(raw):
+    cleaned = re.sub(r"[^A-Za-z0-9_-]+", "-", str(raw)).strip("-")
+    return cleaned or "autopet-case"
 
 
 def prompt_summary(manifest):
