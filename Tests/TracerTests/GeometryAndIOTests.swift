@@ -1339,6 +1339,53 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertFalse(NIfTILoader.isVolumeFile(URL(fileURLWithPath: "/tmp/study.nrrd")))
         XCTAssertFalse(NIfTILoader.isVolumeFile(URL(fileURLWithPath: "/tmp/study.mha")))
         XCTAssertFalse(NIfTILoader.isVolumeFile(URL(fileURLWithPath: "/tmp/study.hdr")))
+        XCTAssertTrue(MedicalVolumeFileIO.isVolumeFile(URL(fileURLWithPath: "/tmp/study.mha")))
+        XCTAssertTrue(MedicalVolumeFileIO.isVolumeFile(URL(fileURLWithPath: "/tmp/study.mhd")))
+    }
+
+    func testMetaImageIORoundTripsVolumeAndLabelMap() throws {
+        let volume = ImageVolume(
+            pixels: [1, 2, 3, 4, 5, 6],
+            depth: 1,
+            height: 2,
+            width: 3,
+            spacing: (2.5, 3.5, 4.5),
+            origin: (10, 20, 30),
+            modality: "PT",
+            seriesDescription: "PET SUV"
+        )
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mha-roundtrip-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let volumeURL = root.appendingPathComponent("PET.mha")
+
+        try MetaImageIO.write(volume, to: volumeURL)
+        let reloaded = try MetaImageIO.load(volumeURL, modalityHint: "PT")
+
+        XCTAssertEqual(reloaded.pixels, volume.pixels)
+        XCTAssertEqual(reloaded.spacing.x, 2.5, accuracy: 1e-6)
+        XCTAssertEqual(reloaded.spacing.y, 3.5, accuracy: 1e-6)
+        XCTAssertEqual(reloaded.spacing.z, 4.5, accuracy: 1e-6)
+        XCTAssertEqual(reloaded.origin.x, 10, accuracy: 1e-6)
+        XCTAssertEqual(reloaded.origin.y, 20, accuracy: 1e-6)
+        XCTAssertEqual(reloaded.origin.z, 30, accuracy: 1e-6)
+
+        let label = LabelMap(parentSeriesUID: volume.seriesUID,
+                             depth: volume.depth,
+                             height: volume.height,
+                             width: volume.width,
+                             name: "Lesions",
+                             classes: [LabelClass(labelID: 1, name: "Lesion", category: .lesion, color: .red)])
+        label.setValue(1, z: 0, y: 0, x: 1)
+        label.setValue(7, z: 0, y: 1, x: 2)
+        let labelURL = root.appendingPathComponent("mask.mha")
+
+        try MetaImageIO.writeLabelMap(label, to: labelURL, parentVolume: volume)
+        let reloadedLabel = try MetaImageIO.loadLabelMap(from: labelURL, parentVolume: volume)
+
+        XCTAssertEqual(reloadedLabel.voxels, label.voxels)
+        XCTAssertEqual(reloadedLabel.classes.map(\.labelID).sorted(), [1, 7])
     }
 
     func testNIfTIWriterRoundTripsFirstVoxelWithoutExtensionShift() throws {
@@ -4170,12 +4217,306 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertTrue(ids.contains("AutoPET-II-2023"))
         XCTAssertTrue(ids.contains("LesionTracer-AutoPETIII"))
         XCTAssertTrue(ids.contains("LesionLocator-AutoPETIV"))
+        XCTAssertTrue(ids.contains("AutoPET-V-2026"))
 
         let autoPETII = try? XCTUnwrap(NNUnetCatalog.byID("AutoPET-II-2023"))
         XCTAssertEqual(autoPETII?.datasetID, "Dataset221_AutoPETII_2023")
         XCTAssertTrue(autoPETII?.multiChannel ?? false)
         XCTAssertEqual(autoPETII?.requiredChannels, 2)
         XCTAssertEqual(autoPETII?.channelDescriptions.count, 2)
+
+        let autoPETV = try? XCTUnwrap(NNUnetCatalog.byID("AutoPET-V-2026"))
+        XCTAssertEqual(autoPETV?.datasetID, "Dataset998_AutoPETV")
+        XCTAssertTrue(autoPETV?.multiChannel ?? false)
+        XCTAssertEqual(autoPETV?.requiredChannels, 4)
+        XCTAssertEqual(autoPETV?.channelDescriptions, [
+            "CT (HU)",
+            "PET (SUV)",
+            "Foreground scribbles",
+            "Background scribbles"
+        ])
+    }
+
+    func testAutoPETVScribblesCreatePromptChannelsAndMHAOutput() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("autopetv-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let inputRoot = root.appendingPathComponent("input", isDirectory: true)
+        let outputRoot = root.appendingPathComponent("output", isDirectory: true)
+        let ctDir = inputRoot.appendingPathComponent("images/ct", isDirectory: true)
+        let petDir = inputRoot.appendingPathComponent("images/pet", isDirectory: true)
+        try FileManager.default.createDirectory(at: ctDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: petDir, withIntermediateDirectories: true)
+
+        let ct = ImageVolume(pixels: [Float](repeating: 42, count: 2 * 3 * 4),
+                             depth: 2,
+                             height: 3,
+                             width: 4,
+                             spacing: (2, 2, 3),
+                             modality: "CT",
+                             seriesDescription: "CT")
+        let pet = ImageVolume(pixels: (0..<24).map { Float($0) },
+                              depth: 2,
+                              height: 3,
+                              width: 4,
+                              spacing: (2, 2, 3),
+                              modality: "PT",
+                              seriesDescription: "PET SUV")
+        let ctURL = ctDir.appendingPathComponent("case123.mha")
+        let petURL = petDir.appendingPathComponent("case123_pet.mha")
+        try MetaImageIO.write(ct, to: ctURL)
+        try MetaImageIO.write(pet, to: petURL)
+        let clicksJSON = """
+        {
+          "points": [
+            { "name": "tumor", "point": [1, 2, 0] },
+            { "name": "background", "point": [3, 0, 1] }
+          ]
+        }
+        """
+        try clicksJSON.data(using: .utf8)?.write(
+            to: inputRoot.appendingPathComponent("lesion-clicks.json"),
+            options: [.atomic]
+        )
+
+        let input = try AutoPETVChallenge.discoverInput(root: inputRoot)
+        XCTAssertEqual(input.outputName, "case123")
+        let scribbles = try AutoPETVChallenge.ScribbleSet.load(from: input.scribblesURL)
+        XCTAssertEqual(scribbles.foreground, [AutoPETVChallenge.VoxelPoint(x: 1, y: 2, z: 0)])
+        XCTAssertEqual(scribbles.background, [AutoPETVChallenge.VoxelPoint(x: 3, y: 0, z: 1)])
+
+        let channels = try AutoPETVChallenge.makeChannels(ct: ct, pet: pet, scribbles: scribbles)
+        XCTAssertEqual(channels.count, 4)
+        let foregroundIndex = 0 * 3 * 4 + 2 * 4 + 1
+        let backgroundIndex = 1 * 3 * 4 + 0 * 4 + 3
+        XCTAssertEqual(channels[2].pixels[foregroundIndex], 1)
+        XCTAssertEqual(channels[3].pixels[backgroundIndex], 1)
+
+        let label = LabelMap(parentSeriesUID: pet.seriesUID,
+                             depth: pet.depth,
+                             height: pet.height,
+                             width: pet.width,
+                             name: "Prediction",
+                             classes: [LabelClass(labelID: 1, name: "Lesion", category: .lesion, color: .red)])
+        label.setValue(1, z: 1, y: 1, x: 1)
+        let outputURL = try AutoPETVChallenge.writeOutput(label,
+                                                          outputRoot: outputRoot,
+                                                          outputName: input.outputName,
+                                                          parentVolume: pet)
+        XCTAssertTrue(outputURL.path.hasSuffix("/output/images/tumor-lesion-segmentation/case123.mha"))
+        let reloaded = try MetaImageIO.loadLabelMap(from: outputURL, parentVolume: pet)
+        XCTAssertEqual(reloaded.voxels, label.voxels)
+    }
+
+    func testAutoPETVWorkbenchComputesInteractionMetricsAndAUC() throws {
+        let groundTruth = LabelMap(parentSeriesUID: "gt",
+                                   depth: 1,
+                                   height: 1,
+                                   width: 5,
+                                   classes: [LabelClass(labelID: 1,
+                                                        name: "Lesion",
+                                                        category: .lesion,
+                                                        color: .red)])
+        groundTruth.voxels = [1, 0, 0, 0, 1]
+
+        let firstPrediction = LabelMap(parentSeriesUID: "pred0",
+                                       depth: 1,
+                                       height: 1,
+                                       width: 5,
+                                       classes: groundTruth.classes)
+        firstPrediction.voxels = [1, 0, 1, 0, 0]
+
+        let correctedPrediction = LabelMap(parentSeriesUID: "pred1",
+                                           depth: 1,
+                                           height: 1,
+                                           width: 5,
+                                           classes: groundTruth.classes)
+        correctedPrediction.voxels = [1, 0, 0, 0, 1]
+
+        let first = try AutoPETVWorkbench.evaluate(prediction: firstPrediction,
+                                                   groundTruth: groundTruth,
+                                                   spacing: (10, 10, 10))
+        XCTAssertEqual(first.dice ?? -1, 0.5, accuracy: 1e-9)
+        XCTAssertEqual(first.dmm ?? -1, 0.5, accuracy: 1e-9)
+        XCTAssertEqual(first.truePositiveLesions, 1)
+        XCTAssertEqual(first.falsePositiveLesions, 1)
+        XCTAssertEqual(first.falseNegativeLesions, 1)
+        XCTAssertEqual(first.falsePositiveVolumeML, 1, accuracy: 1e-9)
+        XCTAssertEqual(first.falseNegativeVolumeML, 1, accuracy: 1e-9)
+
+        let report = try AutoPETVWorkbench.interactionReport(
+            caseID: "case-metrics",
+            predictions: [firstPrediction, correctedPrediction],
+            groundTruth: groundTruth,
+            spacing: (10, 10, 10),
+            triageThresholds: .init(highFalsePositiveVolumeML: 0.5,
+                                    highFalseNegativeVolumeML: 0.5,
+                                    lowDMM: 0.75)
+        )
+        XCTAssertEqual(report.aucDice ?? -1, 0.75, accuracy: 1e-9)
+        XCTAssertEqual(report.aucDMM ?? -1, 0.75, accuracy: 1e-9)
+        XCTAssertTrue(report.failureTags.contains(.missedLesions))
+        XCTAssertTrue(report.failureTags.contains(.falsePositiveBurden))
+        XCTAssertTrue(report.assistantBrief.contains("AUC-Dice: 0.750"))
+    }
+
+    func testAutoPETVWorkbenchSimulatesScribblesAndBuildsEDTPrompts() throws {
+        let pet = ImageVolume(
+            pixels: [
+                0, 0, 0, 0,
+                0, 9, 0, 5,
+                0, 0, 0, 0
+            ],
+            depth: 1,
+            height: 3,
+            width: 4,
+            spacing: (1, 1, 1),
+            modality: "PT"
+        )
+        let groundTruth = LabelMap(parentSeriesUID: "gt",
+                                   depth: 1,
+                                   height: 3,
+                                   width: 4,
+                                   classes: [LabelClass(labelID: 1,
+                                                        name: "Lesion",
+                                                        category: .lesion,
+                                                        color: .red)])
+        groundTruth.setValue(1, z: 0, y: 1, x: 1)
+
+        let prediction = LabelMap(parentSeriesUID: "pred",
+                                  depth: 1,
+                                  height: 3,
+                                  width: 4,
+                                  classes: groundTruth.classes)
+        prediction.setValue(1, z: 0, y: 1, x: 3)
+
+        let scribbles = try AutoPETVWorkbench.simulateCorrectiveScribbles(
+            prediction: prediction,
+            groundTruth: groundTruth,
+            petSUVVolume: pet,
+            options: .init(maximumForegroundScribbles: 1,
+                           maximumBackgroundScribbles: 1)
+        )
+        XCTAssertEqual(scribbles.foreground, [AutoPETVChallenge.VoxelPoint(x: 1, y: 1, z: 0)])
+        XCTAssertEqual(scribbles.background, [AutoPETVChallenge.VoxelPoint(x: 3, y: 1, z: 0)])
+
+        let foreground = AutoPETVWorkbench.makeEDTPromptChannel(
+            reference: pet,
+            points: scribbles.foreground,
+            name: "foreground",
+            maxDistanceMM: 2
+        )
+        let center = 0 * 3 * 4 + 1 * 4 + 1
+        let neighbor = 0 * 3 * 4 + 1 * 4 + 2
+        let far = 0 * 3 * 4 + 1 * 4 + 3
+        XCTAssertEqual(foreground.pixels[center], 1, accuracy: 1e-6)
+        XCTAssertGreaterThan(foreground.pixels[neighbor], 0)
+        XCTAssertLessThan(foreground.pixels[neighbor], 1)
+        XCTAssertEqual(foreground.pixels[far], 0, accuracy: 1e-6)
+
+        let channels = try AutoPETVChallenge.makeChannels(
+            ct: pet,
+            pet: pet,
+            scribbles: scribbles,
+            promptEncoding: .distanceTransform(maxDistanceMM: 2)
+        )
+        XCTAssertEqual(channels.count, 4)
+        XCTAssertEqual(channels[2].pixels[center], 1, accuracy: 1e-6)
+        XCTAssertEqual(channels[2].pixels[far], 0, accuracy: 1e-6)
+    }
+
+    func testAutoPETVExperimentStoreAndDGXPackageRoundTrip() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("autopetv-exp-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let store = AutoPETVExperimentStore(rootURL: root.appendingPathComponent("store", isDirectory: true))
+        let experiment = AutoPETVExperimentConfig(
+            name: "EDT prompt smoke",
+            promptDistanceMM: 32,
+            maxInteractionSteps: 3,
+            folds: ["0", "1"],
+            remoteExperimentRoot: "~/autopetv"
+        )
+        let cases = [
+            AutoPETVCaseManifestEntry(caseID: "case-a",
+                                      split: .train,
+                                      ctPath: "/data/case-a/ct.mha",
+                                      petPath: "/data/case-a/pet.mha",
+                                      labelPath: "/data/case-a/label.mha",
+                                      tracer: "FDG",
+                                      center: "UKT"),
+            AutoPETVCaseManifestEntry(caseID: "case-b",
+                                      split: .validation,
+                                      ctPath: "/data/case-b/ct.mha",
+                                      petPath: "/data/case-b/pet.mha",
+                                      labelPath: "/data/case-b/label.mha",
+                                      tracer: "PSMA",
+                                      center: "LMU")
+        ]
+
+        try store.upsertExperiment(experiment)
+        var bundle = try store.loadBundle()
+        XCTAssertEqual(bundle.experiments.first?.name, "EDT prompt smoke")
+
+        let run = AutoPETVExperimentRunRecord(
+            experimentID: experiment.id,
+            kind: .packageOnly,
+            status: .succeeded,
+            metadata: ["purpose": "unit-test"]
+        )
+        try store.upsertRun(run)
+        bundle = try store.loadBundle()
+        XCTAssertEqual(bundle.runs.first?.metadata["purpose"], "unit-test")
+
+        let package = try AutoPETVDGXPipeline.buildPackage(
+            experiment: experiment,
+            cases: cases,
+            rootURL: root.appendingPathComponent("packages", isDirectory: true)
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: package.manifestURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: package.localURL.appendingPathComponent("scripts/train_autopetv.py").path
+        ))
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: package.localURL.appendingPathComponent("requirements.txt").path
+        ))
+        XCTAssertTrue(package.remotePath.hasPrefix("~/autopetv/EDT-prompt-smoke-"))
+        XCTAssertTrue(package.trainCommand.contains("train_autopetv.py"))
+
+        let trainScript = try String(contentsOf: package.localURL
+            .appendingPathComponent("scripts", isDirectory: true)
+            .appendingPathComponent("train_autopetv.py"))
+        XCTAssertTrue(trainScript.contains("nnUNetv2_train"))
+        let commonScript = try String(contentsOf: package.localURL
+            .appendingPathComponent("scripts", isDirectory: true)
+            .appendingPathComponent("autopetv_common.py"))
+        XCTAssertTrue(commonScript.contains("prepare_nnunet_dataset"))
+
+        let data = try Data(contentsOf: package.manifestURL)
+        let manifest = try JSONDecoder().decode(AutoPETVTrainingManifest.self, from: data)
+        XCTAssertEqual(manifest.experiment.promptDistanceMM, 32)
+        XCTAssertEqual(manifest.trainingCases.map(\.caseID), ["case-a"])
+        XCTAssertEqual(manifest.validationCases.map(\.caseID), ["case-b"])
+
+        let resultsURL = root.appendingPathComponent("validation_results.json")
+        try """
+        {
+          "validation": [
+            {
+              "caseID": "case-b",
+              "steps": [],
+              "aucDice": 0.5,
+              "aucDMM": null,
+              "failureTags": ["missed_lesions"],
+              "assistantBrief": "review"
+            }
+          ]
+        }
+        """.write(to: resultsURL, atomically: true, encoding: .utf8)
+        let loadedValidation = try AutoPETVDGXPipeline.loadValidationRecords(from: resultsURL)
+        XCTAssertEqual(loadedValidation.first?.caseID, "case-b")
+        XCTAssertEqual(loadedValidation.first?.failureTags, ["missed_lesions"])
     }
 
     func testPETQuantificationReportsTMTVAndPerLesion() throws {

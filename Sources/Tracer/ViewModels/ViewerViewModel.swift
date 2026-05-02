@@ -2991,9 +2991,9 @@ public final class ViewerViewModel: ObservableObject {
                     studyDescription: reference.studyDescription
                 )
                 volume = try await Task.detached(priority: .userInitiated) {
-                    try NIfTILoader.load(URL(fileURLWithPath: path),
-                                         modalityHint: reference.modality,
-                                         metadata: metadata)
+                    try MedicalVolumeFileIO.load(URL(fileURLWithPath: path),
+                                                 modalityHint: reference.modality,
+                                                 metadata: metadata)
                 }.value
             case .dicom:
                 let paths = reference.sourceFiles
@@ -3457,7 +3457,7 @@ public final class ViewerViewModel: ObservableObject {
                           autoFuse: Bool = false,
                           modalityHint: String = "",
                           metadata: NIfTILoadMetadata = NIfTILoadMetadata()) async {
-        let sourcePath = NIfTILoader.canonicalSourcePath(for: url)
+        let sourcePath = MedicalVolumeFileIO.canonicalSourcePath(for: url)
         if let existing = loadedVolume(sourcePath: sourcePath) {
             displayVolume(existing)
             statusMessage = "Already loaded: \(existing.seriesDescription)"
@@ -3473,7 +3473,7 @@ public final class ViewerViewModel: ObservableObject {
                 ? PACSIndexBuilder.loadMetadataForNIfTI(url: url)
                 : metadata
             let volume = try await Task.detached(priority: .userInitiated) {
-                try NIfTILoader.load(url, modalityHint: modalityHint, metadata: effectiveMetadata)
+                try MedicalVolumeFileIO.load(url, modalityHint: modalityHint, metadata: effectiveMetadata)
             }.value
 
             let result = addLoadedVolumeIfNeeded(volume)
@@ -4065,7 +4065,7 @@ public final class ViewerViewModel: ObservableObject {
     }
 
     public func loadOverlay(url: URL) async {
-        let sourcePath = NIfTILoader.canonicalSourcePath(for: url)
+        let sourcePath = MedicalVolumeFileIO.canonicalSourcePath(for: url)
         if let fusion,
            fusion.overlayVolume.sourceFiles.contains(sourcePath) {
             statusMessage = "Overlay already loaded: \(fusion.overlayVolume.seriesDescription)"
@@ -4078,7 +4078,7 @@ public final class ViewerViewModel: ObservableObject {
 
         do {
             let overlay = try await Task.detached(priority: .userInitiated) {
-                try NIfTILoader.load(url)
+                try MedicalVolumeFileIO.load(url)
             }.value
 
             guard let base = currentVolume else {
@@ -8806,7 +8806,7 @@ private func findNIfTIFiles(in url: URL) -> [URL] {
     var files: [URL] = []
     for case let fileURL as URL in enumerator {
         let isFile = (try? fileURL.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) ?? false
-        guard isFile, NIfTILoader.isVolumeFile(fileURL) else { continue }
+        guard isFile, MedicalVolumeFileIO.isVolumeFile(fileURL) else { continue }
         files.append(fileURL)
     }
     return files.sorted { $0.path < $1.path }

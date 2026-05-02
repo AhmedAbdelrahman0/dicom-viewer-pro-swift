@@ -224,9 +224,11 @@ struct StudyBrowserView: View {
             return
         }
 
-        if NIfTILoader.isVolumeFile(url)
+        if MedicalVolumeFileIO.isVolumeFile(url)
             || lowercased.hasSuffix(".nii")
-            || lowercased.hasSuffix(".nii.gz") {
+            || lowercased.hasSuffix(".nii.gz")
+            || lowercased.hasSuffix(".mha")
+            || lowercased.hasSuffix(".mhd") {
             await vm.loadNIfTI(url: url)
             return
         }

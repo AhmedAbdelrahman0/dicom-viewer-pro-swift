@@ -10,6 +10,7 @@ let package = Package(
     products: [
         .library(name: "Tracer", targets: ["Tracer"]),
         .executable(name: "TracerApp", targets: ["TracerApp"]),
+        .executable(name: "TracerAutoPETV", targets: ["TracerAutoPETV"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-log.git", .upToNextMinor(from: "1.6.4")),
@@ -31,6 +32,11 @@ let package = Package(
             resources: [
                 .copy("Resources/AppIcon.icns"),
             ]
+        ),
+        .executableTarget(
+            name: "TracerAutoPETV",
+            dependencies: ["Tracer"],
+            path: "Sources/TracerAutoPETV"
         ),
         .testTarget(
             name: "TracerTests",

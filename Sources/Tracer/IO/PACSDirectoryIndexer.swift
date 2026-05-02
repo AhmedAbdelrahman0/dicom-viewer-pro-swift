@@ -216,9 +216,9 @@ public enum PACSDirectoryIndexer {
             }
             guard isRegularFile(fileURL) else { continue }
 
-            if NIfTILoader.isVolumeFile(fileURL) {
+            if MedicalVolumeFileIO.isVolumeFile(fileURL) {
                 scannedFiles += 1
-                let sourcePath = NIfTILoader.canonicalSourcePath(for: fileURL)
+                let sourcePath = MedicalVolumeFileIO.canonicalSourcePath(for: fileURL)
                 if seenNIfTIPaths.insert(sourcePath).inserted {
                     niftiRecords.append(PACSIndexBuilder.snapshotForNIfTI(url: fileURL, indexedAt: indexedAt))
                     niftiVolumes += 1

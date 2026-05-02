@@ -147,6 +147,7 @@ public enum NNUnetCatalog {
         autoPETII,
         lesionTracer,
         lesionLocator,
+        autoPETV,
     ]
 
     public static func byID(_ id: String) -> Entry? {
@@ -425,6 +426,29 @@ public enum NNUnetCatalog {
         coreML: CoreMLPreset(patchSize: (d: 192, h: 192, w: 192), numClasses: 2),
         requiredChannels: 2,
         channelDescriptions: ["CT (HU)", "PET (SUV)"]
+    )
+
+    /// **AutoPET V / AutoPET5 (2026) — interactive PET/CT challenge.**
+    /// Four channels: CT, PET SUV, foreground corrective scribbles, and
+    /// background corrective scribbles. Grand Challenge I/O uses MHA files
+    /// and a `lesion-clicks.json`; `AutoPETVChallengeRunner` adapts that
+    /// interface to this nnU-Net channel layout.
+    public static let autoPETV = Entry(
+        id: "AutoPET-V-2026",
+        datasetID: "Dataset998_AutoPETV",
+        displayName: "AutoPET V Interactive (CT+PET+scribbles)",
+        modality: .PT,
+        bodyRegion: "Whole Body",
+        description: "Interactive FDG/PSMA PET/CT lesion segmentation with foreground/background scribble prompts.",
+        configuration: "3d_fullres",
+        folds: ["0"],
+        classes: [1: "pet_lesion"],
+        multiChannel: true,
+        notes: "Channel 0 = CT, channel 1 = PET SUV, channel 2 = foreground scribble heatmap, channel 3 = background scribble heatmap. Grand Challenge adapter reads/writes MHA.",
+        preprocessing: .petSUV(cap: 30),
+        coreML: CoreMLPreset(patchSize: (d: 192, h: 192, w: 192), numClasses: 2),
+        requiredChannels: 4,
+        channelDescriptions: ["CT (HU)", "PET (SUV)", "Foreground scribbles", "Background scribbles"]
     )
 
     public static let bratsGlioma = Entry(

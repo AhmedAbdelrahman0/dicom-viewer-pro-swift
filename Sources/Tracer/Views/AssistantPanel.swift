@@ -475,6 +475,8 @@ struct AssistantPanel: View {
             return .lesionTracer
         case "LesionLocator-AutoPETIV":
             return .lesionLocator
+        case "AutoPET-V-2026":
+            return .autoPETV
         default:
             return nil
         }

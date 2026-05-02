@@ -229,9 +229,9 @@ enum CohortStudyLoader {
                 seriesDescription: snapshot.seriesDescription,
                 studyDescription: snapshot.studyDescription
             )
-            return try NIfTILoader.load(url,
-                                        modalityHint: snapshot.modality,
-                                        metadata: metadata)
+            return try MedicalVolumeFileIO.load(url,
+                                                modalityHint: snapshot.modality,
+                                                metadata: metadata)
         } catch {
             throw LoadError.niftiLoadFailed(error.localizedDescription)
         }

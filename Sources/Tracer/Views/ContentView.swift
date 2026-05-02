@@ -1593,7 +1593,7 @@ public struct ContentView: View {
         panel.prompt = mode == .overlay ? "Open Overlay" : "Open"
         panel.message = mode == .overlay
             ? "Choose an overlay, label, segmentation, or NIfTI-derived file."
-            : "Choose a NIfTI volume (.nii or .nii.gz) or a DICOM instance."
+            : "Choose a NIfTI/MetaImage volume (.nii, .nii.gz, .mha) or a DICOM instance."
         panel.treatsFilePackagesAsDirectories = false
 
         guard panel.runModal() == .OK else { return }
@@ -1613,7 +1613,7 @@ public struct ContentView: View {
             if mode == .overlay {
                 await vm.loadOverlay(url: url)
             } else {
-                if NIfTILoader.isVolumeFile(url) {
+                if MedicalVolumeFileIO.isVolumeFile(url) {
                     await vm.loadNIfTI(url: url)
                 } else {
                     // Assume DICOM single file — pick its folder
@@ -1646,7 +1646,7 @@ public struct ContentView: View {
                 return
             }
 
-            // Inspect contents: if NIfTI files present, scan as volumes;
+            // Inspect contents: if medical volume files are present, scan as volumes;
             // otherwise as DICOM directory.
             let fm = FileManager.default
             let contents: [URL]
@@ -1656,10 +1656,10 @@ public struct ContentView: View {
                 vm.statusMessage = "Could not read directory: \(error.localizedDescription)"
                 return
             }
-            let niftiFiles = contents.filter { NIfTILoader.isVolumeFile($0) }
+            let volumeFiles = contents.filter { MedicalVolumeFileIO.isVolumeFile($0) }
 
-            if !niftiFiles.isEmpty {
-                for f in niftiFiles {
+            if !volumeFiles.isEmpty {
+                for f in volumeFiles {
                     await vm.loadNIfTI(url: f)
                 }
             } else {

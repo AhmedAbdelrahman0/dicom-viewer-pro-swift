@@ -17,6 +17,7 @@ public final class PETEngineViewModel: ObservableObject {
         case autoPETII
         case lesionTracer
         case lesionLocator
+        case autoPETV
         case medSAM2
         case tmtv
         case totalSegPrefilter
@@ -28,6 +29,7 @@ public final class PETEngineViewModel: ObservableObject {
             case .autoPETII:         return "AutoPET II (FDG baseline)"
             case .lesionTracer:      return "LesionTracer (AutoPET III winner)"
             case .lesionLocator:     return "LesionLocator (interactive, experimental)"
+            case .autoPETV:          return "AutoPET V (challenge adapter)"
             case .medSAM2:           return "MedSAM2 (box-prompt refinement)"
             case .tmtv:              return "TMTV / TLG quantification"
             case .totalSegPrefilter: return "Physiological uptake filter"
@@ -39,6 +41,7 @@ public final class PETEngineViewModel: ObservableObject {
             case .autoPETII:         return "flame"
             case .lesionTracer:      return "flame.fill"
             case .lesionLocator:     return "hand.tap.fill"
+            case .autoPETV:          return "rectangle.3.group.bubble.left"
             case .medSAM2:           return "scope"
             case .tmtv:              return "sum"
             case .totalSegPrefilter: return "xmark.square.fill"
@@ -53,6 +56,8 @@ public final class PETEngineViewModel: ObservableObject {
                 return "AutoPET III 2024 winner (MIC-DKFZ). Handles both FDG and PSMA tracers. nnU-Net ResEncL + MultiTalent pretraining. Weights CC-BY-4.0."
             case .lesionLocator:
                 return "AutoPET IV 2025 interactive track: refine lesion masks with foreground/background click prompts. Experimental — weights still rolling out."
+            case .autoPETV:
+                return "AutoPET V / AutoPET5 challenge path: CT + PET SUV + foreground/background scribble channels. In-app runs use empty prompt channels; challenge runs use lesion-clicks.json."
             case .medSAM2:
                 return "Promptable foundation model. Draw a bounding box on any slice and MedSAM2 returns a refined 2D mask. Apache-2.0."
             case .tmtv:
@@ -64,7 +69,7 @@ public final class PETEngineViewModel: ObservableObject {
 
         public var requiresAuxiliaryChannel: Bool {
             switch self {
-            case .autoPETII, .lesionTracer, .lesionLocator, .totalSegPrefilter:
+            case .autoPETII, .lesionTracer, .lesionLocator, .autoPETV, .totalSegPrefilter:
                 return true
             case .medSAM2, .tmtv:
                 return false
@@ -151,7 +156,7 @@ public final class PETEngineViewModel: ObservableObject {
         defer { isRunning = false }
 
         switch selectedEngine {
-        case .autoPETII, .lesionTracer, .lesionLocator:
+        case .autoPETII, .lesionTracer, .lesionLocator, .autoPETV:
             return await runNNUnetPET(viewer: viewer,
                                       nnunet: nnunet,
                                       labeling: labeling)
@@ -176,6 +181,7 @@ public final class PETEngineViewModel: ObservableObject {
             case .autoPETII:       return "AutoPET-II-2023"
             case .lesionTracer:    return "LesionTracer-AutoPETIII"
             case .lesionLocator:   return "LesionLocator-AutoPETIV"
+            case .autoPETV:        return "AutoPET-V-2026"
             default:               return ""
             }
         }()
@@ -211,8 +217,25 @@ public final class PETEngineViewModel: ObservableObject {
             auxiliary: extraChannels
         )
         let modelChannel0 = makePETModelInputChannel(channel0, viewer: viewer)
-        let modelRestChannels = restChannels.map {
+        var modelRestChannels = restChannels.map {
             makePETModelInputChannel($0, viewer: viewer)
+        }
+        if selectedEngine == .autoPETV {
+            guard let promptReference = ([modelChannel0] + modelRestChannels).first(where: {
+                Modality.normalize($0.modality) == .PT
+            }) else {
+                statusMessage = "AutoPET V needs PET as channel 1 before prompt channels can be generated."
+                return statusMessage
+            }
+            let emptyScribbles = AutoPETVChallenge.ScribbleSet()
+            modelRestChannels.append(contentsOf: [
+                AutoPETVChallenge.makeScribbleHeatmap(reference: promptReference,
+                                                      points: emptyScribbles.foreground,
+                                                      name: "AutoPET V foreground scribbles"),
+                AutoPETVChallenge.makeScribbleHeatmap(reference: promptReference,
+                                                      points: emptyScribbles.background,
+                                                      name: "AutoPET V background scribbles")
+            ])
         }
 
         if selectedEngine == .lesionTracer, nnunet.mode == .dgxRemote {

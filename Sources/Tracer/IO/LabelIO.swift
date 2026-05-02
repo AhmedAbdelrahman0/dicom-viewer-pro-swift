@@ -7,6 +7,7 @@ import simd
 /// formats:
 ///
 ///   • **NIfTI labelmap** (`.nii` / `.nii.gz`) — integer mask
+///   • **MetaImage** (`.mha`) — Grand Challenge / SimpleITK-compatible mask
 ///   • **ITK-SNAP label descriptor** (`.label.txt`) — name/color sidecar
 ///   • **3D Slicer segmentation** (`.seg.nrrd`) — NRRD with segment metadata
 ///   • **NRRD** labelmap (`.nrrd`) — simple integer NRRD
@@ -36,6 +37,7 @@ public enum LabelIO {
         case labelPackage = "DICOM Viewer Labels"
         case niftiLabelmap = "NIfTI Labelmap"
         case niftiGz = "NIfTI (.nii.gz)"
+        case metaImageMHA = "MetaImage MHA"
         case nrrdLabelmap = "NRRD Labelmap"
         case slicerSeg = "3D Slicer .seg.nrrd"
         case dicomSeg = "DICOM SEG"
@@ -51,6 +53,7 @@ public enum LabelIO {
             case .labelPackage:  return ["dvlabels"]
             case .niftiLabelmap: return ["nii"]
             case .niftiGz:       return ["nii.gz"]
+            case .metaImageMHA:  return ["mha"]
             case .nrrdLabelmap:  return ["nrrd"]
             case .slicerSeg:     return ["seg.nrrd"]
             case .dicomSeg:      return ["dcm"]

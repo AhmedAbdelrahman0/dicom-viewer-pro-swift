@@ -331,10 +331,10 @@ public enum PACSIndexBuilder {
             parentDir: url.deletingLastPathComponent().path,
             hint: ""
         )
-        let sourcePath = NIfTILoader.canonicalSourcePath(for: url)
-        let id = "nifti:\(sourcePath)"
+        let sourcePath = MedicalVolumeFileIO.canonicalSourcePath(for: url)
+        let id = MetaImageIO.isVolumeFile(url) ? "mha:\(sourcePath)" : "nifti:\(sourcePath)"
         let metadata = metadataForNIfTI(url: url)
-        let imageCount = (try? NIfTILoader.headerSummary(url).imageCount) ?? 1
+        let imageCount = MedicalVolumeFileIO.headerImageCount(url)
         return PACSIndexedSeriesSnapshot(
             id: id,
             kind: .nifti,

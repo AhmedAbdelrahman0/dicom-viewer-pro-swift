@@ -811,6 +811,8 @@ public final class LabelingViewModel: ObservableObject {
         case .niftiGz:
             try LabelIO.saveNIfTIGz(map, to: url, parentVolume: parentVolume,
                                      writeLabelDescriptor: true)
+        case .metaImageMHA:
+            try MetaImageIO.writeLabelMap(map, to: url, parentVolume: parentVolume)
         case .nrrdLabelmap:
             try LabelIO.saveNRRD(map, to: url, parentVolume: parentVolume)
         case .slicerSeg:
@@ -847,6 +849,12 @@ public final class LabelingViewModel: ObservableObject {
         } else if name.hasSuffix(".nii") || name.hasSuffix(".nii.gz") {
             result = LabelImportResult(
                 labelMap: try LabelIO.loadNIfTILabelmap(from: url, parentVolume: parentVolume),
+                annotations: [],
+                landmarks: []
+            )
+        } else if name.hasSuffix(".mha") || name.hasSuffix(".mhd") {
+            result = LabelImportResult(
+                labelMap: try MetaImageIO.loadLabelMap(from: url, parentVolume: parentVolume),
                 annotations: [],
                 landmarks: []
             )

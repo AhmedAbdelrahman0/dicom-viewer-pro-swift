@@ -83,7 +83,7 @@ public struct PETEnginePanel: View {
     @ViewBuilder
     private var options: some View {
         switch pet.selectedEngine {
-        case .autoPETII, .lesionTracer, .lesionLocator:
+        case .autoPETII, .lesionTracer, .lesionLocator, .autoPETV:
             nnunetChannelsSection
         case .medSAM2:
             medSAMSection
@@ -174,6 +174,12 @@ public struct PETEnginePanel: View {
                           systemImage: "exclamationmark.triangle.fill")
                         .font(.system(size: 10, weight: .medium))
                         .foregroundColor(.orange)
+                }
+                if entry.id == "AutoPET-V-2026" {
+                    Label("In-app run uses empty scribble channels. The challenge runner consumes lesion-clicks.json.",
+                          systemImage: "info.circle")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.secondary)
                 }
             }
         }
@@ -319,7 +325,7 @@ public struct PETEnginePanel: View {
 
     private var canRun: Bool {
         switch pet.selectedEngine {
-        case .autoPETII, .lesionTracer, .lesionLocator:
+        case .autoPETII, .lesionTracer, .lesionLocator, .autoPETV:
             return viewer.currentVolume != nil
         case .medSAM2:
             return viewer.currentVolume != nil
@@ -338,6 +344,7 @@ public struct PETEnginePanel: View {
         case .autoPETII:        return NNUnetCatalog.autoPETII
         case .lesionTracer:     return NNUnetCatalog.lesionTracer
         case .lesionLocator:    return NNUnetCatalog.lesionLocator
+        case .autoPETV:         return NNUnetCatalog.autoPETV
         default:                return nil
         }
     }
