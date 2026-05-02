@@ -14,6 +14,7 @@ public struct ContentView: View {
     @StateObject private var monai = MONAILabelViewModel()
     @StateObject private var nnunet = NNUnetViewModel()
     @StateObject private var pet = PETEngineViewModel()
+    @StateObject private var autoPET = AutoPETVExperimentViewModel()
     @StateObject private var classification = ClassificationViewModel()
     @StateObject private var modelManager = ModelManagerViewModel()
     @StateObject private var cohort = CohortResultsStore()
@@ -37,6 +38,7 @@ public struct ContentView: View {
     @State private var showMONAIPanel = false
     @State private var showNNUnetPanel = false
     @State private var showPETEnginePanel = false
+    @State private var showAutoPETPanel = false
     @State private var showClassificationPanel = false
     @State private var showModelManagerPanel = false
     @State private var showCohortPanel = false
@@ -92,6 +94,7 @@ public struct ContentView: View {
         .environmentObject(monai)
         .environmentObject(nnunet)
         .environmentObject(pet)
+        .environmentObject(autoPET)
         .environmentObject(activity)
         .environmentObject(jobs)
         // Engine panels open as right-side inspector drawers on regular-
@@ -128,6 +131,16 @@ public struct ContentView: View {
             PETEnginePanel(viewer: vm, nnunet: nnunet, pet: pet, labeling: vm.labeling)
                 .overlay(alignment: .topTrailing) {
                     closeInspectorButton { showPETEnginePanel = false }
+                }
+        }
+        .engineInspector(
+            isCompact: useCompactEnginePresentation,
+            isPresented: $showAutoPETPanel,
+            inspectorWidth: (min: 560, ideal: 640, max: 780)
+        ) {
+            AutoPETExperimentPanel(viewer: vm, autoPET: autoPET)
+                .overlay(alignment: .topTrailing) {
+                    closeInspectorButton { showAutoPETPanel = false }
                 }
         }
         .engineInspector(
@@ -1372,6 +1385,7 @@ public struct ContentView: View {
         showMONAIPanel = false
         showNNUnetPanel = false
         showPETEnginePanel = false
+        showAutoPETPanel = false
         showClassificationPanel = false
         showModelManagerPanel = false
         showCohortPanel = false
@@ -1385,6 +1399,7 @@ public struct ContentView: View {
             case .monai: showMONAIPanel = true
             case .nnunet: showNNUnetPanel = true
             case .pet: showPETEnginePanel = true
+            case .autoPET: showAutoPETPanel = true
             case .classification: showClassificationPanel = true
             case .modelManager: showModelManagerPanel = true
             case .cohort: showCohortPanel = true
@@ -1396,13 +1411,14 @@ public struct ContentView: View {
         }
     }
 
-    private enum EngineInspector { case monai, nnunet, pet, classification, modelManager, cohort, lesionDetector, petAC, nuclearTools, dictation }
+    private enum EngineInspector { case monai, nnunet, pet, autoPET, classification, modelManager, cohort, lesionDetector, petAC, nuclearTools, dictation }
 
     private func showEngineInspector(named raw: String) {
         switch raw {
         case "monai": showInspector(.monai)
         case "nnunet": showInspector(.nnunet)
         case "pet": showInspector(.pet)
+        case "autoPET": showInspector(.autoPET)
         case "classification": showInspector(.classification)
         case "modelManager": showInspector(.modelManager)
         case "cohort":

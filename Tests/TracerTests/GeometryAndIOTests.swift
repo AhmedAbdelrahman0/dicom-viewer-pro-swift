@@ -4519,6 +4519,83 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(loadedValidation.first?.failureTags, ["missed_lesions"])
     }
 
+    func testAutoPETVManifestBuilderPairsSessionVolumesAndStagesPackageData() throws {
+        let studyUID = "study-autopetv"
+        let ct = ImageVolume(
+            pixels: [Float](repeating: -500, count: 8),
+            depth: 2,
+            height: 2,
+            width: 2,
+            spacing: (2, 2, 3),
+            modality: "CT",
+            seriesUID: "ct-series",
+            studyUID: studyUID,
+            patientID: "P001",
+            studyDate: "20260502",
+            seriesDescription: "Low dose CT",
+            seriesNumber: 2
+        )
+        let pet = ImageVolume(
+            pixels: [0, 1, 2, 3, 4, 5, 6, 7],
+            depth: 2,
+            height: 2,
+            width: 2,
+            spacing: (2, 2, 3),
+            modality: "PT",
+            seriesUID: "pet-series",
+            studyUID: studyUID,
+            patientID: "P001",
+            studyDate: "20260502",
+            seriesDescription: "FDG PET SUV",
+            seriesNumber: 3
+        )
+        let label = LabelMap(parentSeriesUID: pet.seriesUID,
+                             depth: pet.depth,
+                             height: pet.height,
+                             width: pet.width,
+                             name: "Tumor labels",
+                             classes: [LabelClass(labelID: 1,
+                                                  name: "Lesion",
+                                                  category: .lesion,
+                                                  color: .red)])
+        label.setValue(1, z: 1, y: 1, x: 1)
+
+        let drafts = AutoPETVManifestBuilder.draftCases(volumes: [ct, pet],
+                                                        labelMaps: [label],
+                                                        defaultSplit: .validation)
+        XCTAssertEqual(drafts.count, 1)
+        XCTAssertEqual(drafts.first?.split, .validation)
+        XCTAssertEqual(drafts.first?.tracer, "FDG")
+        XCTAssertEqual(drafts.first?.labelDescription, "Tumor labels")
+        XCTAssertTrue(drafts.first?.include == true)
+
+        let sources = try AutoPETVManifestBuilder.makePackageSources(drafts: drafts,
+                                                                     volumes: [ct, pet],
+                                                                     labelMaps: [label])
+        XCTAssertEqual(sources.first?.caseID, "P001-20260502-s003")
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("autopetv-manifest-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let experiment = AutoPETVExperimentConfig(name: "Session builder",
+                                                  remoteExperimentRoot: "~/autopetv")
+        let package = try AutoPETVDGXPipeline.buildPackage(experiment: experiment,
+                                                           caseSources: sources,
+                                                           rootURL: root)
+        let dataRoot = package.localURL
+            .appendingPathComponent("data", isDirectory: true)
+            .appendingPathComponent("P001-20260502-s003", isDirectory: true)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dataRoot.appendingPathComponent("ct.mha").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dataRoot.appendingPathComponent("pet.mha").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dataRoot.appendingPathComponent("label.mha").path))
+
+        let data = try Data(contentsOf: package.manifestURL)
+        let manifest = try JSONDecoder().decode(AutoPETVTrainingManifest.self, from: data)
+        XCTAssertEqual(manifest.validationCases.first?.ctPath, "data/P001-20260502-s003/ct.mha")
+        XCTAssertEqual(manifest.validationCases.first?.petPath, "data/P001-20260502-s003/pet.mha")
+        XCTAssertEqual(manifest.validationCases.first?.labelPath, "data/P001-20260502-s003/label.mha")
+    }
+
     func testPETQuantificationReportsTMTVAndPerLesion() throws {
         // 3x3x1 PET with two lesions separated by background.
         let pet = ImageVolume(

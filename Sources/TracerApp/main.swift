@@ -169,6 +169,7 @@ private final class TracerAppDelegate: NSObject, NSApplicationDelegate {
         aiMenu.addItem(makeEnginePanelItem("MONAI Label", panel: "monai", key: "m"))
         aiMenu.addItem(makeEnginePanelItem("nnU-Net", panel: "nnunet", key: "n"))
         aiMenu.addItem(makeEnginePanelItem("PET Engine", panel: "pet", key: "p"))
+        aiMenu.addItem(makeEnginePanelItem("AutoPET V Experiments", panel: "autoPET", key: "e"))
         aiMenu.addItem(makeEnginePanelItem("Classify Lesions", panel: "classification", key: "c"))
         aiMenu.addItem(makeEnginePanelItem("Model Manager", panel: "modelManager", key: "w"))
         aiMenu.addItem(makeEnginePanelItem("Cohort Batch", panel: "cohort", key: "b"))

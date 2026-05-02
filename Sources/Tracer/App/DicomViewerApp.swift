@@ -139,6 +139,7 @@ public struct DicomViewerApp: App {
                     enginePanelButton("MONAI Label", panel: "monai", key: "m")
                     enginePanelButton("nnU-Net", panel: "nnunet", key: "n")
                     enginePanelButton("PET Engine", panel: "pet", key: "p")
+                    enginePanelButton("AutoPET V Experiments", panel: "autoPET", key: "e")
                     enginePanelButton("Classify Lesions", panel: "classification", key: "c")
                     enginePanelButton("Model Manager", panel: "modelManager", key: "w")
                     enginePanelButton("Cohort Batch", panel: "cohort", key: "b")

@@ -100,6 +100,39 @@ public struct AutoPETVCaseManifestEntry: Codable, Identifiable, Hashable, Sendab
     }
 }
 
+public struct AutoPETVCasePackageSource: Identifiable, Sendable {
+    public var id: String { caseID }
+    public var caseID: String
+    public var split: AutoPETVCaseManifestEntry.Split
+    public var ctVolume: ImageVolume
+    public var petVolume: ImageVolume
+    public var labelMap: LabelMap?
+    public var labelParentVolume: ImageVolume?
+    public var tracer: String
+    public var center: String
+    public var notes: String
+
+    public init(caseID: String,
+                split: AutoPETVCaseManifestEntry.Split,
+                ctVolume: ImageVolume,
+                petVolume: ImageVolume,
+                labelMap: LabelMap? = nil,
+                labelParentVolume: ImageVolume? = nil,
+                tracer: String = "",
+                center: String = "",
+                notes: String = "") {
+        self.caseID = caseID
+        self.split = split
+        self.ctVolume = ctVolume
+        self.petVolume = petVolume
+        self.labelMap = labelMap
+        self.labelParentVolume = labelParentVolume
+        self.tracer = tracer
+        self.center = center
+        self.notes = notes
+    }
+}
+
 public struct AutoPETVTrainingManifest: Codable, Equatable, Sendable {
     public var version: Int
     public var generator: String
@@ -364,6 +397,27 @@ public enum AutoPETVDGXPipeline {
         )
     }
 
+    public static func buildPackage(experiment: AutoPETVExperimentConfig,
+                                    caseSources: [AutoPETVCasePackageSource],
+                                    rootURL: URL) throws -> Package {
+        let cases = caseSources.map { source -> AutoPETVCaseManifestEntry in
+            let folder = safeComponent(source.caseID)
+            return AutoPETVCaseManifestEntry(
+                caseID: safeCaseID(source.caseID),
+                split: source.split,
+                ctPath: "data/\(folder)/ct.mha",
+                petPath: "data/\(folder)/pet.mha",
+                labelPath: source.labelMap == nil ? nil : "data/\(folder)/label.mha",
+                tracer: source.tracer,
+                center: source.center,
+                notes: source.notes
+            )
+        }
+        let package = try buildPackage(experiment: experiment, cases: cases, rootURL: rootURL)
+        try writeCaseSources(caseSources, into: package.localURL)
+        return package
+    }
+
     @discardableResult
     public static func launchTrainingOnDGX(experiment: AutoPETVExperimentConfig,
                                            cases: [AutoPETVCaseManifestEntry],
@@ -414,6 +468,24 @@ public enum AutoPETVDGXPipeline {
 
         try store?.upsertRun(run)
         return run
+    }
+
+    @discardableResult
+    public static func launchTrainingOnDGX(experiment: AutoPETVExperimentConfig,
+                                           caseSources: [AutoPETVCasePackageSource],
+                                           dgx: DGXSparkConfig,
+                                           packageRoot: URL = FileManager.default.temporaryDirectory,
+                                           store: AutoPETVExperimentStore? = nil,
+                                           timeoutSeconds: TimeInterval? = nil,
+                                           logSink: @escaping @Sendable (String) -> Void = { _ in }) throws -> AutoPETVExperimentRunRecord {
+        let package = try buildPackage(experiment: experiment, caseSources: caseSources, rootURL: packageRoot)
+        return try launchTrainingOnDGX(experiment: experiment,
+                                       package: package,
+                                       caseCount: caseSources.count,
+                                       dgx: dgx,
+                                       store: store,
+                                       timeoutSeconds: timeoutSeconds,
+                                       logSink: logSink)
     }
 
     @discardableResult
@@ -475,6 +547,24 @@ public enum AutoPETVDGXPipeline {
         return run
     }
 
+    @discardableResult
+    public static func launchValidationOnDGX(experiment: AutoPETVExperimentConfig,
+                                             caseSources: [AutoPETVCasePackageSource],
+                                             dgx: DGXSparkConfig,
+                                             packageRoot: URL = FileManager.default.temporaryDirectory,
+                                             store: AutoPETVExperimentStore? = nil,
+                                             timeoutSeconds: TimeInterval? = nil,
+                                             logSink: @escaping @Sendable (String) -> Void = { _ in }) throws -> AutoPETVExperimentRunRecord {
+        let package = try buildPackage(experiment: experiment, caseSources: caseSources, rootURL: packageRoot)
+        return try launchValidationOnDGX(experiment: experiment,
+                                         package: package,
+                                         caseCount: caseSources.count,
+                                         dgx: dgx,
+                                         store: store,
+                                         timeoutSeconds: timeoutSeconds,
+                                         logSink: logSink)
+    }
+
     public static func loadValidationRecords(from url: URL) throws -> [AutoPETVCaseValidationRecord] {
         let data = try Data(contentsOf: url)
         let decoder = JSONDecoder()
@@ -489,6 +579,150 @@ public enum AutoPETVDGXPipeline {
         return "cd \(quotedPath) && python3 scripts/\(scriptName) --manifest manifest.json --workdir work"
     }
 
+    private static func launchTrainingOnDGX(experiment: AutoPETVExperimentConfig,
+                                            package: Package,
+                                            caseCount: Int,
+                                            dgx: DGXSparkConfig,
+                                            store: AutoPETVExperimentStore?,
+                                            timeoutSeconds: TimeInterval?,
+                                            logSink: @escaping @Sendable (String) -> Void) throws -> AutoPETVExperimentRunRecord {
+        let executor = RemoteExecutor(config: dgx)
+        var run = AutoPETVExperimentRunRecord(
+            experimentID: experiment.id,
+            kind: .training,
+            status: .running,
+            localPackagePath: package.localURL.path,
+            remotePackagePath: package.remotePath,
+            command: package.trainCommand,
+            metadata: runMetadata(experiment: experiment, caseCount: caseCount)
+        )
+        try store?.upsertExperiment(experiment)
+        try store?.upsertRun(run)
+
+        do {
+            try executor.uploadDirectory(package.localURL, toRemote: package.remotePath)
+            let result = try executor.run(package.trainCommand,
+                                          timeoutSeconds: timeoutSeconds,
+                                          logSink: logSink)
+            run.finishedAt = Date()
+            run.stdoutTail = tail(String(data: result.stdout, encoding: .utf8) ?? "")
+            run.stderrTail = tail(result.stderr)
+            run.status = result.exitCode == 0 ? .succeeded : .failed
+            if result.exitCode != 0 {
+                try store?.upsertRun(run)
+                throw RemoteExecutor.Error.commandFailed(exitCode: result.exitCode, stderr: result.stderr)
+            }
+        } catch {
+            run.finishedAt = Date()
+            run.status = .failed
+            run.stderrTail = tail(error.localizedDescription)
+            try? store?.upsertRun(run)
+            throw error
+        }
+
+        try store?.upsertRun(run)
+        return run
+    }
+
+    private static func launchValidationOnDGX(experiment: AutoPETVExperimentConfig,
+                                              package: Package,
+                                              caseCount: Int,
+                                              dgx: DGXSparkConfig,
+                                              store: AutoPETVExperimentStore?,
+                                              timeoutSeconds: TimeInterval?,
+                                              logSink: @escaping @Sendable (String) -> Void) throws -> AutoPETVExperimentRunRecord {
+        let executor = RemoteExecutor(config: dgx)
+        var run = AutoPETVExperimentRunRecord(
+            experimentID: experiment.id,
+            kind: .validation,
+            status: .running,
+            localPackagePath: package.localURL.path,
+            remotePackagePath: package.remotePath,
+            command: package.validateCommand,
+            metadata: runMetadata(experiment: experiment, caseCount: caseCount)
+        )
+        try store?.upsertExperiment(experiment)
+        try store?.upsertRun(run)
+
+        do {
+            try executor.uploadDirectory(package.localURL, toRemote: package.remotePath)
+            let result = try executor.run(package.validateCommand,
+                                          timeoutSeconds: timeoutSeconds,
+                                          logSink: logSink)
+            run.finishedAt = Date()
+            run.stdoutTail = tail(String(data: result.stdout, encoding: .utf8) ?? "")
+            run.stderrTail = tail(result.stderr)
+            run.status = result.exitCode == 0 ? .succeeded : .failed
+            if result.exitCode != 0 {
+                try store?.upsertRun(run)
+                throw RemoteExecutor.Error.commandFailed(exitCode: result.exitCode, stderr: result.stderr)
+            }
+
+            let localResults = package.localURL
+                .appendingPathComponent("work", isDirectory: true)
+                .appendingPathComponent(validationResultsFilename)
+            try executor.downloadFile("\(package.remotePath)/work/\(validationResultsFilename)",
+                                      toLocal: localResults)
+            run.validation = try loadValidationRecords(from: localResults)
+        } catch {
+            run.finishedAt = Date()
+            run.status = .failed
+            run.stderrTail = tail(error.localizedDescription)
+            try? store?.upsertRun(run)
+            throw error
+        }
+
+        try store?.upsertRun(run)
+        return run
+    }
+
+    private static func writeCaseSources(_ sources: [AutoPETVCasePackageSource],
+                                         into packageURL: URL) throws {
+        for source in sources {
+            let caseURL = packageURL
+                .appendingPathComponent("data", isDirectory: true)
+                .appendingPathComponent(safeComponent(source.caseID), isDirectory: true)
+            try FileManager.default.createDirectory(at: caseURL, withIntermediateDirectories: true)
+            try MetaImageIO.write(source.ctVolume, to: caseURL.appendingPathComponent("ct.mha"))
+            try MetaImageIO.write(source.petVolume, to: caseURL.appendingPathComponent("pet.mha"))
+            if let labelMap = source.labelMap {
+                let parent = labelParent(for: labelMap, source: source)
+                try MetaImageIO.writeLabelMap(labelMap,
+                                              to: caseURL.appendingPathComponent("label.mha"),
+                                              parentVolume: parent,
+                                              binary: true)
+            }
+        }
+    }
+
+    private static func labelParent(for labelMap: LabelMap,
+                                    source: AutoPETVCasePackageSource) -> ImageVolume {
+        if let explicit = source.labelParentVolume,
+           sameGrid(labelMap, explicit) {
+            return explicit
+        }
+        if sameGrid(labelMap, source.petVolume) {
+            return source.petVolume
+        }
+        return source.ctVolume
+    }
+
+    private static func sameGrid(_ labelMap: LabelMap, _ volume: ImageVolume) -> Bool {
+        labelMap.width == volume.width
+            && labelMap.height == volume.height
+            && labelMap.depth == volume.depth
+    }
+
+    private static func runMetadata(experiment: AutoPETVExperimentConfig,
+                                    caseCount: Int) -> [String: String] {
+        [
+            "datasetID": experiment.datasetID,
+            "promptEncoding": experiment.promptEncoding.rawValue,
+            "promptDistanceMM": String(experiment.promptDistanceMM),
+            "caseCount": String(caseCount)
+        ]
+    }
+
     private static func write(_ string: String, to url: URL) throws {
         guard let data = string.data(using: .utf8) else { return }
         try data.write(to: url, options: [.atomic])
@@ -499,6 +733,12 @@ public enum AutoPETVDGXPipeline {
         let chars = raw.unicodeScalars.map { allowed.contains($0) ? Character($0) : "-" }
         let cleaned = String(chars).trimmingCharacters(in: CharacterSet(charactersIn: "-."))
         return cleaned.isEmpty ? "autopetv" : cleaned
+    }
+
+    private static func safeCaseID(_ raw: String) -> String {
+        let component = safeComponent(raw)
+        let prefixed = component.first?.isNumber == true ? "case-\(component)" : component
+        return prefixed.replacingOccurrences(of: ".", with: "-")
     }
 
     private static func tail(_ text: String, limit: Int = 8000) -> String {
