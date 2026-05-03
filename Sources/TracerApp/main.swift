@@ -22,6 +22,7 @@ private final class TracerAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         installMenu()
+        ContainerRuntimeBootstrapper.shared.startOnAppLaunch()
         openPreferredStudyWindows()
     }
 

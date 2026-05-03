@@ -69,6 +69,11 @@ public struct ContentView: View {
     @State private var cohortStudies: [PACSWorklistStudy] = []
     @State private var showAboutWindow = false
     @State private var showOnboarding = false
+    #if os(macOS)
+    @StateObject private var runtimeSetup = ContainerRuntimeSetupStore.shared
+    @State private var showRuntimeSetup = false
+    @AppStorage(TracerSettings.Keys.containerRuntimeSetupPromptDismissed) private var runtimeSetupPromptDismissed = false
+    #endif
     @State private var showJobCenter = false
     @State private var showActivityLog = false
     @State private var showWindowingPanel = false
@@ -346,23 +351,14 @@ public struct ContentView: View {
         .sheet(isPresented: $showOnboarding) {
             TracerOnboardingView(isPresented: $showOnboarding) {
                 hasSeenOnboarding = true
+                presentRuntimeSetupIfNeeded()
             }
+        }
+        .sheet(isPresented: $showRuntimeSetup) {
+            ContainerRuntimeSetupSheet(store: runtimeSetup, isPresented: $showRuntimeSetup)
         }
         #endif
-        .onAppear {
-            // Focus mode renders a different root layout, so keep the split
-            // view in a predictable state for the next time panels are shown.
-            browserVisibility = .all
-            // Show the onboarding card set once per install, before the
-            // user loads any data.
-            if role.handlesPresentationCommands && !hasSeenOnboarding {
-                // Defer by a runloop so the view hierarchy finishes mounting.
-                DispatchQueue.main.async { showOnboarding = true }
-            }
-            if role.handlesPresentationCommands {
-                activity.log("Tracer ready.", source: "System", level: .success, countAsUnread: false)
-            }
-        }
+        .onAppear { handleWindowAppear() }
         .tooltipHost()  // must wrap the whole window so tooltips escape any clipping
         .background(TracerTheme.windowBackground)
     }
@@ -1428,6 +1424,47 @@ public struct ContentView: View {
     private func byteString(_ bytes: Int64) -> String {
         ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
+
+    private func handleWindowAppear() {
+        // Focus mode renders a different root layout, so keep the split
+        // view in a predictable state for the next time panels are shown.
+        browserVisibility = .all
+        // Show the onboarding card set once per install, before the
+        // user loads any data.
+        if role.handlesPresentationCommands && !hasSeenOnboarding {
+            // Defer by a runloop so the view hierarchy finishes mounting.
+            DispatchQueue.main.async { showOnboarding = true }
+        }
+        if role.handlesPresentationCommands {
+            activity.log("Tracer ready.", source: "System", level: .success, countAsUnread: false)
+            #if os(macOS)
+            refreshRuntimeSetupForLaunch()
+            #endif
+        }
+    }
+
+    #if os(macOS)
+    private func refreshRuntimeSetupForLaunch() {
+        Task {
+            _ = await runtimeSetup.refresh()
+            await MainActor.run {
+                presentRuntimeSetupIfNeeded()
+            }
+        }
+    }
+
+    @MainActor
+    private func presentRuntimeSetupIfNeeded() {
+        guard role.handlesPresentationCommands,
+              hasSeenOnboarding,
+              !runtimeSetupPromptDismissed,
+              runtimeSetup.requiresSetup,
+              !showRuntimeSetup else {
+            return
+        }
+        showRuntimeSetup = true
+    }
+    #endif
 
     // MARK: - File handlers
 

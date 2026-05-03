@@ -245,10 +245,10 @@ public struct DockerWorkerConfiguration: Equatable, Codable, Sendable {
            !override.isEmpty {
             return override
         }
-        if let path = firstExecutable(named: "docker", environment: environment, fileManager: fileManager) {
+        if let path = firstRuntimeExecutable(named: "docker", environment: environment, fileManager: fileManager) {
             return path
         }
-        if let path = firstExecutable(named: "podman", environment: environment, fileManager: fileManager) {
+        if let path = firstRuntimeExecutable(named: "podman", environment: environment, fileManager: fileManager) {
             return path
         }
         return "docker"
@@ -341,11 +341,29 @@ public struct DockerWorkerConfiguration: Equatable, Codable, Sendable {
         return URL(fileURLWithPath: home).appendingPathComponent(".tracer-podman-config", isDirectory: true).path
     }
 
-    private static func firstExecutable(named name: String,
-                                        environment: [String: String],
-                                        fileManager: FileManager) -> String? {
-        let pathValue = environment["PATH"] ?? "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
-        for directory in pathValue.split(separator: ":").map(String.init) {
+    static func firstRuntimeExecutable(named name: String,
+                                       environment: [String: String],
+                                       fileManager: FileManager,
+                                       additionalSearchDirectories: [String] = [
+                                           "/opt/homebrew/bin",
+                                           "/usr/local/bin",
+                                           "/usr/bin",
+                                           "/bin",
+                                           "/usr/sbin",
+                                           "/sbin"
+                                       ]) -> String? {
+        if name.contains("/"), fileManager.isExecutableFile(atPath: name) {
+            return name
+        }
+
+        let pathDirectories = (environment["PATH"] ?? "")
+            .split(separator: ":")
+            .map(String.init)
+        var seen = Set<String>()
+        let directories = (pathDirectories + additionalSearchDirectories).filter { directory in
+            seen.insert(directory).inserted
+        }
+        for directory in directories {
             let candidate = URL(fileURLWithPath: directory).appendingPathComponent(name).path
             if fileManager.isExecutableFile(atPath: candidate) {
                 return candidate

@@ -11,6 +11,7 @@ import SwiftUI
 /// keyboard-shortcut buttons, `MONAILabelViewModel`'s default URL, and so
 /// on.
 public struct TracerSettingsView: View {
+    @StateObject private var runtimeSetup = ContainerRuntimeSetupStore.shared
 
     // Names of the presets bound to ⌘1 … ⌘4. Stored as strings so users
     // can pick any preset available on their modality.
@@ -98,6 +99,10 @@ public struct TracerSettingsView: View {
 
     private var enginesTab: some View {
         Form {
+            Section("Local AI runtime") {
+                ContainerRuntimeSetupInlineView(store: runtimeSetup)
+            }
+
             Section("MONAI Label") {
                 TextField("Server URL",
                           text: $defaultMONAIURL,
@@ -322,6 +327,7 @@ public enum TracerSettings {
         public static let defaultMONAIURL = "Tracer.Prefs.MONAI.DefaultURL"
         public static let defaultNNUnetBinary = "Tracer.Prefs.NNUnet.Binary"
         public static let defaultNNUnetResults = "Tracer.Prefs.NNUnet.Results"
+        public static let containerRuntimeSetupPromptDismissed = "Tracer.ContainerRuntime.SetupPromptDismissed"
         public static let resourceProfile = ResourcePolicy.Keys.profile
         public static let resourceCPULimit = ResourcePolicy.Keys.cpuWorkerLimit
         public static let resourceIndexingLimit = ResourcePolicy.Keys.indexingWorkerLimit

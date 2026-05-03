@@ -101,6 +101,79 @@ final class WorkerProcessTests: XCTestCase {
         XCTAssertEqual(command, docker.path)
     }
 
+    func testRuntimeExecutableSearchUsesFallbackDirectories() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracer-runtime-fallback-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory,
+                                                withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let docker = try makeExecutable(named: "docker", in: directory)
+
+        let command = DockerWorkerConfiguration.firstRuntimeExecutable(
+            named: "docker",
+            environment: ["PATH": "/usr/bin:/bin"],
+            fileManager: .default,
+            additionalSearchDirectories: [directory.path]
+        )
+
+        XCTAssertEqual(command, docker.path)
+    }
+
+    func testContainerRuntimeSetupPlanDetectsInstalledTools() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracer-runtime-plan-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory,
+                                                withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let brew = try makeExecutable(named: "brew", in: directory)
+        let docker = try makeExecutable(named: "docker", in: directory)
+        let colima = try makeExecutable(named: "colima", in: directory)
+
+        let plan = ContainerRuntimeSetupPlan.assess(
+            environment: ["PATH": directory.path],
+            fileManager: .default,
+            additionalSearchDirectories: []
+        )
+
+        XCTAssertEqual(plan.homebrewPath, brew.path)
+        XCTAssertEqual(plan.dockerPath, docker.path)
+        XCTAssertEqual(plan.colimaPath, colima.path)
+        XCTAssertTrue(plan.isComplete)
+        XCTAssertTrue(plan.canInstallWithHomebrew)
+        XCTAssertTrue(plan.missingTools.isEmpty)
+    }
+
+    func testContainerRuntimeSetupPlanRequiresHomebrewWhenInstallerIsMissing() {
+        let plan = ContainerRuntimeSetupPlan.assess(
+            environment: ["PATH": "/definitely/not/a/runtime/path"],
+            fileManager: .default,
+            additionalSearchDirectories: []
+        )
+
+        XCTAssertNil(plan.homebrewPath)
+        XCTAssertNil(plan.dockerPath)
+        XCTAssertNil(plan.colimaPath)
+        XCTAssertFalse(plan.isComplete)
+        XCTAssertFalse(plan.canInstallWithHomebrew)
+        XCTAssertEqual(plan.missingTools, ["Docker CLI", "Colima"])
+    }
+
+    func testContainerRuntimeSetupStoreComposesHomebrewInstallRequest() {
+        let request = ContainerRuntimeSetupStore.homebrewInstallRequest(
+            homebrewPath: "/opt/homebrew/bin/brew",
+            environment: ["HOME": "/Users/tester"]
+        )
+
+        XCTAssertEqual(request.executablePath, "/usr/bin/env")
+        XCTAssertEqual(request.arguments, ["/opt/homebrew/bin/brew", "install", "docker", "colima"])
+        XCTAssertEqual(request.environment["HOME"], "/Users/tester")
+        XCTAssertEqual(request.timeoutSeconds, 1_200)
+        XCTAssertFalse(request.streamStdout)
+        XCTAssertFalse(request.streamStderr)
+    }
+
     func testPodmanRuntimeEnvironmentUsesFallbackWhenHomeConfigHasDifferentOwner() throws {
         let home = FileManager.default.temporaryDirectory
             .appendingPathComponent("tracer-podman-home-\(UUID().uuidString)")
@@ -153,5 +226,159 @@ final class WorkerProcessTests: XCTestCase {
         XCTAssertEqual(result.stdout, "hello")
         XCTAssertEqual(result.stderr, "warn")
         XCTAssertEqual(result.exitCode, 0)
+    }
+
+    func testContainerRuntimeBootstrapperCanBeDisabledByEnvironment() async {
+        let process = RecordingWorkerProcess(outcomes: [])
+        let bootstrapper = ContainerRuntimeBootstrapper(process: process)
+
+        let result = await bootstrapper.bootstrapAtLaunch(
+            environment: [ContainerRuntimeBootstrapper.disabledEnvironmentKey: "true"],
+            userPreference: true
+        )
+
+        XCTAssertEqual(result, .disabled)
+        XCTAssertTrue(process.recordedRequests().isEmpty)
+    }
+
+    func testContainerRuntimeBootstrapperSkipsStartWhenDockerIsReady() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracer-bootstrap-ready-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory,
+                                                withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let docker = try makeExecutable(named: "docker", in: directory)
+        let process = RecordingWorkerProcess(outcomes: [
+            .success(WorkerProcessResult(exitCode: 0,
+                                         timedOut: false,
+                                         stdoutData: Data(),
+                                         stderrData: Data()))
+        ])
+        let bootstrapper = ContainerRuntimeBootstrapper(process: process)
+
+        let result = await bootstrapper.bootstrapAtLaunch(
+            environment: ["PATH": directory.path],
+            userPreference: true
+        )
+
+        XCTAssertEqual(result, .ready(containerCommand: docker.path))
+        let requests = process.recordedRequests()
+        XCTAssertEqual(requests.map(\.arguments), [[docker.path, "version"]])
+    }
+
+    func testContainerRuntimeBootstrapperStartsColimaWhenDockerIsDown() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracer-bootstrap-start-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory,
+                                                withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let docker = try makeExecutable(named: "docker", in: directory)
+        let colima = try makeExecutable(named: "colima", in: directory)
+        let process = RecordingWorkerProcess(outcomes: [
+            .failure(WorkerProcessError.nonZeroExit(exitCode: 1, stderr: "daemon down")),
+            .success(WorkerProcessResult(exitCode: 0,
+                                         timedOut: false,
+                                         stdoutData: Data(),
+                                         stderrData: Data())),
+            .success(WorkerProcessResult(exitCode: 0,
+                                         timedOut: false,
+                                         stdoutData: Data(),
+                                         stderrData: Data()))
+        ])
+        let bootstrapper = ContainerRuntimeBootstrapper(process: process)
+
+        let result = await bootstrapper.bootstrapAtLaunch(
+            environment: ["PATH": directory.path],
+            userPreference: true
+        )
+
+        XCTAssertEqual(result, .started(containerCommand: docker.path))
+        let requests = process.recordedRequests()
+        XCTAssertEqual(requests.map(\.arguments), [
+            [docker.path, "version"],
+            [colima.path, "start", "--runtime", "docker"],
+            [docker.path, "version"]
+        ])
+    }
+
+    func testContainerRuntimeBootstrapperDoesNotAutostartPodman() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracer-bootstrap-podman-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory,
+                                                withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let podman = try makeExecutable(named: "podman", in: directory)
+        let process = RecordingWorkerProcess(outcomes: [
+            .failure(WorkerProcessError.nonZeroExit(exitCode: 1, stderr: "machine down"))
+        ])
+        let bootstrapper = ContainerRuntimeBootstrapper(process: process)
+
+        let result = await bootstrapper.bootstrapAtLaunch(
+            environment: [
+                "PATH": directory.path,
+                "TRACER_CONTAINER_RUNTIME": podman.path
+            ],
+            userPreference: true
+        )
+
+        if case .unavailable(let reason) = result {
+            XCTAssertTrue(reason.contains("Docker/Colima"))
+        } else {
+            XCTFail("Expected Podman startup to be unavailable, got \(result)")
+        }
+        XCTAssertEqual(process.recordedRequests().map(\.arguments), [[podman.path, "version"]])
+    }
+
+    @discardableResult
+    private func makeExecutable(named name: String, in directory: URL) throws -> URL {
+        let url = directory.appendingPathComponent(name)
+        FileManager.default.createFile(atPath: url.path, contents: Data())
+        try FileManager.default.setAttributes([.posixPermissions: 0o755],
+                                              ofItemAtPath: url.path)
+        return url
+    }
+}
+
+private final class RecordingWorkerProcess: WorkerProcess, @unchecked Sendable {
+    private let lock = NSLock()
+    private var outcomes: [Result<WorkerProcessResult, Error>]
+    private var requests: [WorkerProcessRequest] = []
+
+    init(outcomes: [Result<WorkerProcessResult, Error>]) {
+        self.outcomes = outcomes
+    }
+
+    func run(_ request: WorkerProcessRequest,
+             logSink: @escaping @Sendable (String) -> Void) async throws -> WorkerProcessResult {
+        let outcome: Result<WorkerProcessResult, Error> = withLock {
+            requests.append(request)
+            guard !outcomes.isEmpty else {
+                return .failure(WorkerProcessError.nonZeroExit(exitCode: 1,
+                                                               stderr: "missing test outcome"))
+            }
+            return outcomes.removeFirst()
+        }
+
+        switch outcome {
+        case .success(let result):
+            return result
+        case .failure(let error):
+            throw error
+        }
+    }
+
+    func cancel() {}
+
+    func recordedRequests() -> [WorkerProcessRequest] {
+        withLock { requests }
+    }
+
+    private func withLock<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
     }
 }
