@@ -1473,19 +1473,18 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(PACSIndexBuilder.snapshotForNIfTI(url: gzURL).instanceCount, 5)
     }
 
-    func testCompressedDICOMTransferSyntaxFailsBeforePixelRead() {
+    func testCompressedDICOMTransferSyntaxAttemptsDecoderFallbackBeforePixelRead() {
         let dcm = DICOMFile()
         dcm.rows = 1
         dcm.columns = 1
         dcm.transferSyntaxUID = "1.2.840.10008.1.2.4.50"
         dcm.pixelDataLength = 128
-        dcm.filePath = "/does/not/exist.dcm"
+        dcm.filePath = ""
 
         XCTAssertThrowsError(try DICOMLoader.loadSeries([dcm])) { error in
-            guard case DICOMError.unsupportedTransferSyntax(let uid) = error else {
-                return XCTFail("Expected unsupported transfer syntax, got \(error)")
+            guard case DICOMDecompressorError.missingSourcePath = error else {
+                return XCTFail("Expected decompressor fallback, got \(error)")
             }
-            XCTAssertEqual(uid, "1.2.840.10008.1.2.4.50")
         }
     }
 

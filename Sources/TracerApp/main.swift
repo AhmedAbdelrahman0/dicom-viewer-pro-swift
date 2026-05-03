@@ -138,6 +138,7 @@ private final class TracerAppDelegate: NSObject, NSApplicationDelegate {
         labelsMenu.addItem(makeLabelingToolItem("Threshold Seed", tool: "threshold", key: "t"))
         labelsMenu.addItem(makeLabelingToolItem("SUV Gradient Seed", tool: "suvGradient", key: "g"))
         labelsMenu.addItem(makeLabelingToolItem("Region Grow", tool: "regionGrow", key: "y"))
+        labelsMenu.addItem(makeLabelingToolItem("Active Contour Snake", tool: "activeContour", key: "n"))
         labelsMenu.addItem(makeLabelingToolItem("Quick Lesion Sphere", tool: "lesionSphere", key: "q"))
         labelsMenu.addItem(makeLabelingToolItem("Landmark", tool: "landmark", key: "k"))
         labelsMenu.addItem(.separator())

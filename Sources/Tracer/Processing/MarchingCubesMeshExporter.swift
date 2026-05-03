@@ -13,9 +13,20 @@ import simd
 /// a separate mesh file (STL/OBJ) in the output directory.
 public enum MarchingCubesMeshExporter {
 
-    public enum Format: Sendable {
+    public enum Format: String, CaseIterable, Identifiable, Sendable {
         case stl
         case obj
+
+        public var id: String { rawValue }
+
+        public var displayName: String {
+            switch self {
+            case .stl: return "STL"
+            case .obj: return "OBJ"
+            }
+        }
+
+        public var fileExtension: String { rawValue }
     }
 
     public struct ExportOptions: Sendable {

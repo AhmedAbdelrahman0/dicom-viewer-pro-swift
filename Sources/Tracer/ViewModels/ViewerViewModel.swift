@@ -923,7 +923,7 @@ public final class ViewerViewModel: ObservableObject {
             statusMessage = "Freehand ROI armed: drag a closed contour and release to fill"
         case .brush, .eraser:
             statusMessage = "\(tool.displayName) armed: drag on a slice"
-        case .threshold, .suvGradient, .regionGrow:
+        case .threshold, .suvGradient, .regionGrow, .activeContour:
             statusMessage = "\(tool.displayName) armed: click a seed voxel"
         case .landmark:
             statusMessage = "Landmark capture armed"
@@ -7012,6 +7012,39 @@ public final class ViewerViewModel: ObservableObject {
         )
     }
 
+    public func startActiveContourAroundSeed(seed: (z: Int, y: Int, x: Int),
+                                             preferredVolume: ImageVolume? = nil) {
+        let speed: LevelSetSegmentation.SpeedMode
+        switch labeling.activeContourMode {
+        case .regionCompetition:
+            speed = .regionCompetition(
+                midpoint: Float(labeling.activeContourMidpoint),
+                halfWidth: Float(max(0.001, labeling.activeContourHalfWidth))
+            )
+        case .edgeStopping:
+            speed = .edgeStopping(kappa: Float(max(0.001, labeling.activeContourKappa)))
+        }
+        let parameters = LevelSetSegmentation.Parameters(
+            propagation: Float(labeling.activeContourPropagation),
+            curvature: Float(labeling.activeContourCurvature),
+            advection: Float(labeling.activeContourAdvection),
+            iterations: max(1, labeling.activeContourIterations)
+        )
+        runBackgroundLabelOperation(
+            .activeContour(
+                seed: seed,
+                radius: max(1, labeling.activeContourSeedRadius),
+                speed: speed,
+                parameters: parameters
+            ),
+            defaultName: "Active Contours",
+            className: "Snake",
+            category: .organ,
+            color: .green,
+            preferredVolume: preferredVolume
+        )
+    }
+
     public func startThresholdActiveCTLabel(lowerHU: Double, upperHU: Double) {
         runBackgroundLabelOperation(
             .ctRange(lower: lowerHU, upper: upperHU),
@@ -7493,6 +7526,15 @@ public final class ViewerViewModel: ObservableObject {
             }
         case .regionGrow:
             message = "Region grow segmented \(result.voxelCount) voxels"
+        case .activeContour:
+            if let levelSet = result.levelSet {
+                message = "Snake segmented \(levelSet.insideVoxels) voxels in \(levelSet.iterations) iterations"
+                if levelSet.converged {
+                    message += " (converged)"
+                }
+            } else {
+                message = "Snake segmentation finished"
+            }
         case .ctRange:
             message = "Segmented \(result.voxelCount) CT voxels from \(result.operation.thresholdSummary)"
         }

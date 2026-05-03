@@ -16,7 +16,13 @@ struct LabelingPanel: View {
     @State private var showingImporter = false
     @State private var pendingConversion: PendingLabelConversion?
     @State private var exportFormat: LabelIO.Format = .niftiLabelmap
+    @State private var meshExportFormat: MarchingCubesMeshExporter.Format = .stl
+    @State private var meshSmoothingIterations: Int = 1
     @State private var marginIterations: Int = 1
+    @State private var smoothingMode: LabelSmoothingMode = .median
+    @State private var smoothingIterations: Int = 1
+    @State private var hollowThickness: Int = 1
+    @State private var fillBetweenAxis: Int = 2
     @State private var islandMinimumVoxels: Int = 10
     @State private var logicalSourceClassID: UInt16 = 0
     @State private var selectedHUPresetID: String = HUThresholdPreset.presets[1].id
@@ -311,6 +317,58 @@ struct LabelingPanel: View {
                                 .font(.caption).foregroundColor(.secondary)
                         }
 
+                    case .activeContour:
+                        VStack(alignment: .leading, spacing: 8) {
+                            Picker("Speed", selection: $vm.labeling.activeContourMode) {
+                                ForEach(ActiveContourSpeedMode.allCases) { mode in
+                                    Text(mode.displayName).tag(mode)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+
+                            Stepper("Seed radius: \(vm.labeling.activeContourSeedRadius) voxels",
+                                    value: $vm.labeling.activeContourSeedRadius,
+                                    in: 1...40)
+                                .font(.system(size: 11))
+                            Stepper("Iterations: \(vm.labeling.activeContourIterations)",
+                                    value: $vm.labeling.activeContourIterations,
+                                    in: 10...800,
+                                    step: 10)
+                                .font(.system(size: 11))
+
+                            if vm.labeling.activeContourMode == .regionCompetition {
+                                SmallNumberRow("Midpoint", value: $vm.labeling.activeContourMidpoint)
+                                SmallNumberRow("Half width", value: $vm.labeling.activeContourHalfWidth)
+                            } else {
+                                SmallNumberRow("Kappa", value: $vm.labeling.activeContourKappa)
+                            }
+
+                            HStack {
+                                Text("Prop")
+                                Slider(value: $vm.labeling.activeContourPropagation, in: 0...3)
+                                Text(String(format: "%.1f", vm.labeling.activeContourPropagation))
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .frame(width: 34)
+                            }
+                            HStack {
+                                Text("Smooth")
+                                Slider(value: $vm.labeling.activeContourCurvature, in: 0...1)
+                                Text(String(format: "%.2f", vm.labeling.activeContourCurvature))
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .frame(width: 34)
+                            }
+                            HStack {
+                                Text("Edge")
+                                Slider(value: $vm.labeling.activeContourAdvection, in: 0...2)
+                                Text(String(format: "%.1f", vm.labeling.activeContourAdvection))
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .frame(width: 34)
+                            }
+                            Text("Click a seed voxel in any slice to evolve the contour.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+
                     case .lesionSphere:
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
@@ -417,6 +475,84 @@ struct LabelingPanel: View {
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                     }
+
+                    Divider()
+
+                    Text("Smoothing").font(.subheadline)
+                    Picker("Method", selection: $smoothingMode) {
+                        ForEach(LabelSmoothingMode.allCases) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+                    Stepper("Passes: \(smoothingIterations)",
+                            value: $smoothingIterations,
+                            in: 1...6)
+                        .font(.system(size: 11))
+                    HStack {
+                        Button {
+                            let before = vm.labeling.undoDepth
+                            let changed = vm.labeling.smoothActive(mode: smoothingMode,
+                                                                   iterations: smoothingIterations)
+                            vm.recordLabelEditIfChanged(named: "\(smoothingMode.displayName) smooth",
+                                                        beforeUndoDepth: before)
+                            vm.statusMessage = "\(smoothingMode.displayName) smoothing changed \(changed) voxels"
+                        } label: {
+                            Label("Smooth", systemImage: "wand.and.stars")
+                                .frame(maxWidth: .infinity)
+                        }
+                        Button {
+                            let before = vm.labeling.undoDepth
+                            let filled = vm.labeling.fillHolesActive()
+                            vm.recordLabelEditIfChanged(named: "Fill holes", beforeUndoDepth: before)
+                            vm.statusMessage = "Filled \(filled) enclosed voxels"
+                        } label: {
+                            Label("Fill Holes", systemImage: "circle.dotted")
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Divider()
+
+                    Text("Shape").font(.subheadline)
+                    Stepper("Shell: \(hollowThickness) voxel\(hollowThickness == 1 ? "" : "s")",
+                            value: $hollowThickness,
+                            in: 1...12)
+                        .font(.system(size: 11))
+                    HStack {
+                        Button {
+                            let before = vm.labeling.undoDepth
+                            let removed = vm.labeling.hollowActive(thickness: hollowThickness)
+                            vm.recordLabelEditIfChanged(named: "Hollow label", beforeUndoDepth: before)
+                            vm.statusMessage = "Hollowed label by removing \(removed) interior voxels"
+                        } label: {
+                            Label("Hollow", systemImage: "circle.hexagongrid")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+
+                        Picker("Axis", selection: $fillBetweenAxis) {
+                            Text("Sag").tag(0)
+                            Text("Cor").tag(1)
+                            Text("Ax").tag(2)
+                        }
+                        .labelsHidden()
+                        .frame(width: 74)
+                    }
+
+                    Button {
+                        let before = vm.labeling.undoDepth
+                        let filled = vm.labeling.fillBetweenSlicesActive(axis: fillBetweenAxis)
+                        vm.recordLabelEditIfChanged(named: "Fill between slices", beforeUndoDepth: before)
+                        vm.statusMessage = "Interpolated \(filled) voxels between labeled slices"
+                    } label: {
+                        Label("Fill Between Slices", systemImage: "square.stack.3d.forward.dottedline")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
 
                     Divider()
 
@@ -585,6 +721,36 @@ struct LabelingPanel: View {
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                     .disabled(vm.labeling.activeLabelMap == nil)
+
+                    Divider()
+                    Text("Surface Mesh").font(.subheadline)
+                    Picker("Mesh", selection: $meshExportFormat) {
+                        ForEach(MarchingCubesMeshExporter.Format.allCases) { format in
+                            Text(format.displayName).tag(format)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    Stepper("Smooth: \(meshSmoothingIterations)",
+                            value: $meshSmoothingIterations,
+                            in: 0...5)
+                        .font(.system(size: 11))
+                    HStack {
+                        Button {
+                            exportActiveSurfaceMesh()
+                        } label: {
+                            Label("Active Surface", systemImage: "cube.transparent")
+                                .frame(maxWidth: .infinity)
+                        }
+                        Button {
+                            exportAllSurfaceMeshes()
+                        } label: {
+                            Label("All Surfaces", systemImage: "shippingbox")
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(vm.labeling.activeLabelMap == nil || vm.currentVolume == nil)
 
                     Picker("Format", selection: $exportFormat) {
                         ForEach(LabelIO.Format.allCases) { f in
@@ -1493,6 +1659,68 @@ private extension LabelingPanel {
             vm.statusMessage = "Exported label data to \(url.lastPathComponent)"
         } catch {
             vm.statusMessage = "Label data export failed: \(error.localizedDescription)"
+        }
+        #endif
+    }
+
+    func exportActiveSurfaceMesh() {
+        #if canImport(AppKit)
+        guard let volume = vm.currentVolume else {
+            vm.statusMessage = "Load a reference volume before exporting a mesh."
+            return
+        }
+        let className = vm.labeling.activeLabelMap?
+            .classInfo(id: vm.labeling.activeClassID)?
+            .name ?? "active-label"
+        let safeName = className
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: "-")
+            .lowercased()
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "\(safeName.isEmpty ? "active-label" : safeName).\(meshExportFormat.fileExtension)"
+        panel.allowedContentTypes = [.data]
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            if let mesh = try vm.labeling.exportActiveMesh(
+                to: url,
+                format: meshExportFormat,
+                parentVolume: volume,
+                smoothingIterations: meshSmoothingIterations
+            ) {
+                vm.statusMessage = "Exported \(mesh.className) mesh: \(mesh.triangleCount) triangles"
+            }
+        } catch {
+            vm.statusMessage = "Mesh export failed: \(error.localizedDescription)"
+        }
+        #endif
+    }
+
+    func exportAllSurfaceMeshes() {
+        #if canImport(AppKit)
+        guard let volume = vm.currentVolume else {
+            vm.statusMessage = "Load a reference volume before exporting meshes."
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Export"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let meshes = try vm.labeling.exportAllMeshes(
+                to: url,
+                format: meshExportFormat,
+                parentVolume: volume,
+                smoothingIterations: meshSmoothingIterations
+            )
+            let triangles = meshes.reduce(0) { $0 + $1.triangleCount }
+            vm.statusMessage = "Exported \(meshes.count) mesh files (\(triangles) triangles)"
+        } catch {
+            vm.statusMessage = "Mesh export failed: \(error.localizedDescription)"
         }
         #endif
     }

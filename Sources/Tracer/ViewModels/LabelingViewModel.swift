@@ -34,6 +34,15 @@ public final class LabelingViewModel: ObservableObject {
     @Published public var gradientCutoffFraction: Double = 0.45
     @Published public var gradientSearchRadius: Int = 30
     @Published public var regionGrowTolerance: Double = 50  // HU/intensity tolerance
+    @Published public var activeContourMode: ActiveContourSpeedMode = .regionCompetition
+    @Published public var activeContourSeedRadius: Int = 4
+    @Published public var activeContourIterations: Int = 120
+    @Published public var activeContourPropagation: Double = 1.0
+    @Published public var activeContourCurvature: Double = 0.2
+    @Published public var activeContourAdvection: Double = 0.5
+    @Published public var activeContourMidpoint: Double = 2.5
+    @Published public var activeContourHalfWidth: Double = 1.0
+    @Published public var activeContourKappa: Double = 40.0
 
     /// Sphere radius in **mm** for the Quick Lesion tool. 8 mm covers a
     /// typical small (≤ 1 cm) FDG-avid lesion comfortably while leaving
@@ -487,6 +496,42 @@ public final class LabelingViewModel: ObservableObject {
     }
 
     @discardableResult
+    public func smoothActive(mode: LabelSmoothingMode,
+                             iterations: Int = 1) -> Int {
+        applyMutation(named: "\(mode.displayName) smooth") { map in
+            LabelOperations.smooth(label: map,
+                                   classID: activeClassID,
+                                   mode: mode,
+                                   iterations: iterations)
+        } ?? 0
+    }
+
+    @discardableResult
+    public func fillHolesActive() -> Int {
+        applyMutation(named: "Fill holes") { map in
+            LabelOperations.fillHoles(label: map, classID: activeClassID)
+        } ?? 0
+    }
+
+    @discardableResult
+    public func hollowActive(thickness: Int = 1) -> Int {
+        applyMutation(named: "Hollow label") { map in
+            LabelOperations.hollow(label: map,
+                                   classID: activeClassID,
+                                   thickness: thickness)
+        } ?? 0
+    }
+
+    @discardableResult
+    public func fillBetweenSlicesActive(axis: Int = 2) -> Int {
+        applyMutation(named: "Fill between slices") { map in
+            LabelOperations.fillBetweenSlices(label: map,
+                                              classID: activeClassID,
+                                              axis: axis)
+        } ?? 0
+    }
+
+    @discardableResult
     public func keepLargestIslandActive() -> Int {
         applyMutation(named: "Keep largest island") { map in
             LabelOperations.keepLargestIsland(label: map, classID: activeClassID)
@@ -830,6 +875,47 @@ public final class LabelingViewModel: ObservableObject {
     }
 
     @discardableResult
+    public func exportActiveMesh(to url: URL,
+                                 format: MarchingCubesMeshExporter.Format,
+                                 parentVolume: ImageVolume,
+                                 smoothingIterations: Int = 1,
+                                 useWorldCoordinates: Bool = true) throws -> MarchingCubesMeshExporter.ExportedMesh? {
+        guard let map = activeLabelMap else { return nil }
+        let options = MarchingCubesMeshExporter.ExportOptions(
+            format: format,
+            smoothingIterations: max(0, smoothingIterations),
+            useWorldCoordinates: useWorldCoordinates
+        )
+        return try MarchingCubesMeshExporter.exportClass(
+            label: map,
+            volume: parentVolume,
+            classID: activeClassID,
+            to: url,
+            options: options
+        )
+    }
+
+    @discardableResult
+    public func exportAllMeshes(to directory: URL,
+                                format: MarchingCubesMeshExporter.Format,
+                                parentVolume: ImageVolume,
+                                smoothingIterations: Int = 1,
+                                useWorldCoordinates: Bool = true) throws -> [MarchingCubesMeshExporter.ExportedMesh] {
+        guard let map = activeLabelMap else { return [] }
+        let options = MarchingCubesMeshExporter.ExportOptions(
+            format: format,
+            smoothingIterations: max(0, smoothingIterations),
+            useWorldCoordinates: useWorldCoordinates
+        )
+        return try MarchingCubesMeshExporter.exportAllClasses(
+            label: map,
+            volume: parentVolume,
+            to: directory,
+            options: options
+        )
+    }
+
+    @discardableResult
     public func loadLabel(from url: URL, parentVolume: ImageVolume) throws -> LabelImportResult {
         let name = url.lastPathComponent.lowercased()
         let result: LabelImportResult
@@ -1043,7 +1129,7 @@ public struct LabelImportResult {
 }
 
 public enum LabelingTool: String, CaseIterable, Identifiable, Sendable {
-    case none, brush, eraser, freehand, threshold, suvGradient, regionGrow, landmark, lesionSphere
+    case none, brush, eraser, freehand, threshold, suvGradient, regionGrow, activeContour, landmark, lesionSphere
 
     public var id: String { rawValue }
     public var displayName: String {
@@ -1055,6 +1141,7 @@ public enum LabelingTool: String, CaseIterable, Identifiable, Sendable {
         case .threshold:    return "Threshold"
         case .suvGradient:  return "SUV Gradient"
         case .regionGrow:   return "Region Grow"
+        case .activeContour: return "Snake"
         case .landmark:     return "Landmark"
         case .lesionSphere: return "Quick Lesion"
         }
@@ -1068,6 +1155,7 @@ public enum LabelingTool: String, CaseIterable, Identifiable, Sendable {
         case .threshold:    return "thermometer.medium"
         case .suvGradient:  return "waveform.path.ecg"
         case .regionGrow:   return "drop"
+        case .activeContour: return "scribble.variable"
         case .landmark:     return "mappin.and.ellipse"
         case .lesionSphere: return "circle.dashed"
         }
@@ -1107,6 +1195,11 @@ public enum LabelingTool: String, CaseIterable, Identifiable, Sendable {
                  + "Click a seed voxel; flood-fills connected voxels whose intensity\n"
                  + "is within ±tolerance of the seed. Useful for delineating\n"
                  + "homogeneous regions like organs."
+        case .activeContour:
+            return "Active Contour / Snake\n"
+                 + "Click a seed voxel to initialize a 3D bubble, then evolve a\n"
+                 + "level-set contour. Region mode follows an intensity range;\n"
+                 + "edge mode slows at strong gradients."
         case .landmark:
             return "Landmark Registration\n"
                  + "Click matching anatomical points in the fixed and moving\n"
@@ -1121,6 +1214,22 @@ public enum LabelingTool: String, CaseIterable, Identifiable, Sendable {
                  + "as separate connected components in classification.\n"
                  + "Use this to skip the full segmentation pipeline when\n"
                  + "you already know which lesions you want to classify."
+        }
+    }
+}
+
+public enum ActiveContourSpeedMode: String, CaseIterable, Identifiable, Sendable {
+    case regionCompetition
+    case edgeStopping
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .regionCompetition:
+            return "Region"
+        case .edgeStopping:
+            return "Edge"
         }
     }
 }

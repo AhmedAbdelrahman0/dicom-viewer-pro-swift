@@ -16,6 +16,9 @@ containerized workers behind `WorkerProcess`.
 - `workers/medasr`: Google MedASR medical dictation worker. Tracer writes
   one 16 kHz mono WAV per push-to-talk utterance and expects JSON with
   recognised text.
+- `workers/simpleitk`: optional SimpleITK bridge for classical image
+  processing operations such as N4 bias correction, resampling, denoising,
+  and histogram matching.
 
 The GitHub workflow publishes images to GHCR on pushes to `main` that touch
 `workers/**`.
@@ -49,3 +52,19 @@ python3 workers/medasr/transcribe_medasr.py \
 
 If the model requires protected Hugging Face access, pass `HF_TOKEN=...` in
 Tracer's MedASR environment field or the shell environment.
+
+## SimpleITK Bridge
+
+Local setup:
+
+```bash
+python3 -m venv .venv-simpleitk
+.venv-simpleitk/bin/python -m pip install -r workers/simpleitk/requirements.txt
+python3 workers/simpleitk/bridge.py \
+  --operation n4-bias-correction \
+  --input image.nii \
+  --output corrected.nii \
+  --output-json result.json
+```
+
+Set `TRACER_SIMPLEITK_SCRIPT` if the worker is outside the repo or app bundle.

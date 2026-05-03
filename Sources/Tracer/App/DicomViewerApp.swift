@@ -101,6 +101,7 @@ public struct DicomViewerApp: App {
                     labelingToolButton("Threshold Seed", tool: "threshold", key: "t")
                     labelingToolButton("SUV Gradient Seed", tool: "suvGradient", key: "g")
                     labelingToolButton("Region Grow", tool: "regionGrow", key: "y")
+                    labelingToolButton("Active Contour Snake", tool: "activeContour", key: "n")
                     labelingToolButton("Quick Lesion Sphere", tool: "lesionSphere", key: "q")
                     labelingToolButton("Landmark", tool: "landmark", key: "k")
 

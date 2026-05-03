@@ -1375,7 +1375,7 @@ public struct SliceView: View {
 
     private func needsWritableLabelMap(_ tool: LabelingTool) -> Bool {
         switch tool {
-        case .brush, .eraser, .freehand, .threshold, .suvGradient, .regionGrow: return true
+        case .brush, .eraser, .freehand, .threshold, .suvGradient, .regionGrow, .activeContour: return true
         case .none, .landmark, .lesionSphere: return false
         }
     }
@@ -1482,6 +1482,19 @@ public struct SliceView: View {
                     minimumValue: vm.labeling.thresholdValue,
                     gradientCutoffFraction: vm.labeling.gradientCutoffFraction,
                     searchRadius: vm.labeling.gradientSearchRadius
+                )
+                lastPaintPoint = p
+            }
+
+        case .activeContour:
+            if lastPaintPoint == nil {
+                let (z, y, x) = vm.labeling.voxelCoordForClick(
+                    axis: axis, sliceIndex: sliceIndex,
+                    pixelX: p.0, pixelY: p.1
+                )
+                vm.startActiveContourAroundSeed(
+                    seed: (z: z, y: y, x: x),
+                    preferredVolume: volume
                 )
                 lastPaintPoint = p
             }

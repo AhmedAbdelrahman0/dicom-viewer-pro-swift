@@ -334,6 +334,9 @@ public struct AssistantCommandInterpreter {
         if text.containsAny(["region grow", "region-growing", "grow region", "flood fill"]) {
             actions.append(.setLabelingTool(.regionGrow))
         }
+        if text.containsAny(["active contour", "snake", "level set", "level-set"]) {
+            actions.append(.setLabelingTool(.activeContour))
+        }
         if text.containsAny(["landmark", "registration point", "fiducial"]) {
             actions.append(.setLabelingTool(.landmark))
         }

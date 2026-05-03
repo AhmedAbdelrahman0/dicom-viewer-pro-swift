@@ -18,7 +18,8 @@ public enum DICOMError: Error, LocalizedError {
 
 /// Minimal DICOM parser — reads Explicit VR Little Endian and Implicit VR
 /// Little Endian uncompressed pixel data. Sufficient for CT/MR/PT raw-pixel
-/// DICOMs. JPEG-compressed DICOMs are not supported.
+/// DICOMs. Compressed transfer syntaxes are handed to external decoders when
+/// available, then re-enter this parser as Explicit VR Little Endian files.
 public final class DICOMFile: @unchecked Sendable {
     public var patientID: String = ""
     public var patientName: String = ""
@@ -54,6 +55,7 @@ public final class DICOMFile: @unchecked Sendable {
     public var pixelDataUndefinedLength: Bool = false
 
     public var filePath: String = ""
+    public var sourceFilePath: String = ""
 }
 
 public enum DICOMLoader {
@@ -82,6 +84,7 @@ public enum DICOMLoader {
     public static func parseHeader(at url: URL) throws -> DICOMFile {
         let dcm = try parseHeaderPrefixForLoading(at: url)
         dcm.filePath = url.path
+        dcm.sourceFilePath = url.path
         return dcm
     }
 
@@ -90,6 +93,7 @@ public enum DICOMLoader {
         let data = try prefixData(from: url, maxBytes: maxBytes)
         let dcm = try parseHeader(data: data)
         dcm.filePath = url.path
+        dcm.sourceFilePath = url.path
         return dcm
     }
 
@@ -161,14 +165,17 @@ public enum DICOMLoader {
         guard !files.isEmpty else {
             throw DICOMError.invalidFile("Empty series")
         }
-        let firstInput = files[0]
+        let prepared = try prepareRenderableFiles(files)
+        defer { prepared.cleanup() }
+
+        let firstInput = prepared.files[0]
         let rows = firstInput.rows, cols = firstInput.columns
         guard rows > 0, cols > 0 else {
             throw DICOMError.invalidFile("Invalid dimensions")
         }
 
         let directionVectors = orientationVectors(from: firstInput)
-        let sorted = sortedFiles(files, sliceNormal: directionVectors.slice)
+        let sorted = sortedFiles(prepared.files, sliceNormal: directionVectors.slice)
         let first = sorted[0]
 
         let depth = sorted.count
@@ -214,7 +221,7 @@ public enum DICOMLoader {
             studyDescription: first.studyDescription,
             seriesNumber: first.seriesNumber,
             sourceSliceInstanceNumbers: sorted.map(\.instanceNumber),
-            sourceFiles: sorted.map(\.filePath)
+            sourceFiles: sorted.map { $0.sourceFilePath.isEmpty ? $0.filePath : $0.sourceFilePath }
         )
     }
 
@@ -508,6 +515,7 @@ public enum DICOMLoader {
             let data = try prefixData(from: url, maxBytes: byteLimit)
             let dcm = try parseHeader(data: data)
             dcm.filePath = url.path
+            dcm.sourceFilePath = url.path
 
             if dcm.pixelDataOffset > 0 || data.count < byteLimit {
                 return dcm
@@ -581,6 +589,42 @@ public enum DICOMLoader {
             }
         }
         return data
+    }
+
+    private static func prepareRenderableFiles(_ files: [DICOMFile]) throws -> (files: [DICOMFile], cleanup: () -> Void) {
+        var out: [DICOMFile] = []
+        out.reserveCapacity(files.count)
+        var cleanupBlocks: [() -> Void] = []
+
+        do {
+            for file in files {
+                do {
+                    try validateRenderable(file)
+                    out.append(file)
+                } catch DICOMError.unsupportedTransferSyntax where DICOMDecompressor.needsDecompression(file) {
+                    let result = try DICOMDecompressor.decompress(file)
+                    var parsed: DICOMFile?
+                    do {
+                        let decoded = try parseHeader(at: result.url)
+                        decoded.sourceFilePath = file.sourceFilePath.isEmpty ? file.filePath : file.sourceFilePath
+                        try validateRenderable(decoded)
+                        parsed = decoded
+                    } catch {
+                        result.cleanup()
+                        throw error
+                    }
+                    if let parsed {
+                        out.append(parsed)
+                        cleanupBlocks.append(result.cleanup)
+                    }
+                }
+            }
+        } catch {
+            cleanupBlocks.forEach { $0() }
+            throw error
+        }
+
+        return (out, { cleanupBlocks.forEach { $0() } })
     }
 
     // MARK: - Scan a directory for DICOM files
