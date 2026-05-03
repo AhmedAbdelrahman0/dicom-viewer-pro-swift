@@ -79,10 +79,14 @@ struct StudyBrowserView: View {
     @State private var sparkArchiveIsStaging = false
     @State private var sparkArchiveTask: Task<Void, Never>?
     @State private var indexReloadTask: Task<Void, Never>?
+    @State private var adminAuditEvents: [PACSAdminAuditEvent] = []
+    @State private var adminRouteQueue: [PACSAdminRouteQueueItem] = []
 
     private let worklistDisplayPageSize = 300
     private let statusDefaultsKey = "Tracer.WorklistStudyStatuses"
     private let removedWorklistDefaultsKey = "Tracer.WorklistRemovedStudyIDs"
+    private let adminAuditStore = PACSAdminAuditStore()
+    private let adminRouteQueueStore = PACSAdminRoutingQueueStore()
 
     private struct OpenedWorklistBucket {
         var id: String
@@ -131,6 +135,7 @@ struct StudyBrowserView: View {
             vm.reloadSavedArchiveRoots()
             vm.reloadVNAConnections()
             dgxConfig = DGXSparkConfig.load()
+            reloadAdminStores()
             syncVNAConnectionForm()
             reloadIndexResults()
         }
@@ -157,6 +162,8 @@ struct StudyBrowserView: View {
                 browserMode = .admin
                 scheduleIndexResultsReload(delayNanoseconds: 0)
             }
+            appendAdminAudit(kind: .adminMode,
+                             summary: enabled ? "Admin mode enabled" : "Admin mode disabled")
         }
         .onChange(of: vm.activeVNAConnectionID) { _, _ in syncVNAConnectionForm() }
         .onReceive(NotificationCenter.default.publisher(for: .dgxSparkConfigDidChange)) { note in
@@ -1338,9 +1345,16 @@ struct StudyBrowserView: View {
         PACSAdminPanel(
             vm: vm,
             indexedStudies: adminStudies,
+            auditEvents: adminAuditEvents,
+            routeQueue: adminRouteQueue,
             onApplyMetadata: applyAdminMetadata,
+            onApplySnapshots: applyAdminSnapshots,
             onRetireStudy: deleteIndexedStudy,
-            onCreateDICOMSeries: createAdminDICOMSeries
+            onCreateDICOMSeries: createAdminDICOMSeries,
+            onQueueRoute: enqueueAdminRoute,
+            onSendRoute: sendAdminStudyToActiveVNA,
+            onClearCompletedRoutes: clearCompletedAdminRoutes,
+            onClearAudit: clearAdminAudit
         )
     }
 
@@ -2376,6 +2390,9 @@ struct StudyBrowserView: View {
             reloadIndexResults()
             vm.indexRevision += 1
             vm.statusMessage = "Retired indexed study: \(firstMeaningful(study.studyDescription, study.patientName, study.id))"
+            appendAdminAudit(kind: .retire,
+                             studyID: study.id,
+                             summary: "Retired \(firstMeaningful(study.studyDescription, study.patientName, study.id))")
         } catch {
             vm.statusMessage = "Index delete error: \(error.localizedDescription)"
         }
@@ -2391,8 +2408,33 @@ struct StudyBrowserView: View {
             vm.indexRevision += 1
             reloadIndexResults()
             vm.statusMessage = "Updated index metadata for \(firstMeaningful(draft.studyDescription, study.studyDescription, study.id))"
+            appendAdminAudit(kind: .metadataEdit,
+                             studyID: study.id,
+                             summary: "Updated metadata for \(firstMeaningful(draft.studyDescription, study.studyDescription, study.id))")
         } catch {
             vm.statusMessage = "Admin metadata update failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func applyAdminSnapshots(_ snapshots: [PACSIndexedSeriesSnapshot],
+                                     reason: String,
+                                     auditKind: PACSAdminAuditEventKind) {
+        guard !snapshots.isEmpty else {
+            vm.statusMessage = "Admin operation produced no index changes."
+            return
+        }
+        do {
+            for snapshot in snapshots {
+                try upsertAdminIndexSnapshot(snapshot)
+            }
+            try modelContext.save()
+            vm.indexRevision += 1
+            reloadIndexResults()
+            vm.statusMessage = "\(reason): updated \(snapshots.count) series"
+            appendAdminAudit(kind: auditKind,
+                             summary: "\(reason): \(snapshots.count) series")
+        } catch {
+            vm.statusMessage = "\(reason) failed: \(error.localizedDescription)"
         }
     }
 
@@ -2405,9 +2447,110 @@ struct StudyBrowserView: View {
             reloadIndexResults()
             browserMode = .admin
             vm.statusMessage = "Created \(result.snapshot.instanceCount) DICOM files at \(result.outputDirectory.lastPathComponent)"
+            appendAdminAudit(kind: .createDICOM,
+                             studyID: result.snapshot.studyUID,
+                             summary: "Created \(result.snapshot.instanceCount) DICOM files for \(result.snapshot.studyDescription)")
         } catch {
             vm.statusMessage = "DICOM creation failed: \(error.localizedDescription)"
         }
+    }
+
+    private func enqueueAdminRoute(_ study: PACSWorklistStudy) {
+        guard let connection = vm.activeVNAConnection else {
+            vm.statusMessage = "No active DICOMweb destination."
+            return
+        }
+        let item = PACSAdminRouteQueueItem(
+            endpointName: connection.displayName,
+            endpointURL: connection.normalizedBaseURLString,
+            studyID: study.id,
+            studyDescription: firstMeaningful(study.studyDescription, study.patientName, study.id),
+            instanceCount: study.instanceCount,
+            message: "Queued for STOW-RS"
+        )
+        adminRouteQueue = adminRouteQueueStore.upsert(item)
+        appendAdminAudit(kind: .route,
+                         studyID: study.id,
+                         summary: "Queued \(item.studyDescription) for \(connection.displayName)")
+        vm.statusMessage = "Queued \(item.instanceCount) instances for \(connection.displayName)"
+    }
+
+    private func sendAdminStudyToActiveVNA(_ study: PACSWorklistStudy) {
+        guard let connection = vm.activeVNAConnection else {
+            vm.statusMessage = "No active DICOMweb destination."
+            return
+        }
+        let filePaths = study.series
+            .filter { $0.kind == .dicom }
+            .flatMap(\.filePaths)
+        guard !filePaths.isEmpty else {
+            vm.statusMessage = "No DICOM Part 10 files available for STOW-RS."
+            return
+        }
+
+        var item = PACSAdminRouteQueueItem(
+            endpointName: connection.displayName,
+            endpointURL: connection.normalizedBaseURLString,
+            studyID: study.id,
+            studyDescription: firstMeaningful(study.studyDescription, study.patientName, study.id),
+            instanceCount: filePaths.count,
+            status: .sending,
+            message: "Sending via STOW-RS"
+        )
+        adminRouteQueue = adminRouteQueueStore.upsert(item)
+        vm.statusMessage = "Sending \(filePaths.count) DICOM instances to \(connection.displayName)..."
+
+        Task {
+            do {
+                let instances = try filePaths.map { try Data(contentsOf: URL(fileURLWithPath: $0)) }
+                let client = try DICOMwebClient(configuration: .init(connection: connection))
+                try await client.storeInstances(instances,
+                                                studyInstanceUID: study.studyUID.isEmpty ? nil : study.studyUID)
+                await MainActor.run {
+                    item.status = .sent
+                    item.updatedAt = Date()
+                    item.message = "Sent \(instances.count) instances"
+                    adminRouteQueue = adminRouteQueueStore.upsert(item)
+                    appendAdminAudit(kind: .route,
+                                     studyID: study.id,
+                                     summary: "Sent \(instances.count) instances to \(connection.displayName)")
+                    vm.statusMessage = "Sent \(instances.count) DICOM instances to \(connection.displayName)"
+                }
+            } catch {
+                await MainActor.run {
+                    item.status = .failed
+                    item.updatedAt = Date()
+                    item.message = error.localizedDescription
+                    adminRouteQueue = adminRouteQueueStore.upsert(item)
+                    appendAdminAudit(kind: .route,
+                                     studyID: study.id,
+                                     summary: "Route failed for \(firstMeaningful(study.studyDescription, study.id)): \(error.localizedDescription)")
+                    vm.statusMessage = "DICOMweb send failed: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func clearCompletedAdminRoutes() {
+        adminRouteQueue = adminRouteQueueStore.clearCompleted()
+    }
+
+    private func reloadAdminStores() {
+        adminAuditEvents = adminAuditStore.load()
+        adminRouteQueue = adminRouteQueueStore.load()
+    }
+
+    private func appendAdminAudit(kind: PACSAdminAuditEventKind,
+                                  studyID: String = "",
+                                  summary: String) {
+        adminAuditEvents = adminAuditStore.append(
+            PACSAdminAuditEvent(kind: kind, studyID: studyID, summary: summary)
+        )
+    }
+
+    private func clearAdminAudit() {
+        adminAuditStore.clear()
+        adminAuditEvents = []
     }
 
     private func updateIndexedSeries(_ snapshot: PACSIndexedSeriesSnapshot) throws {

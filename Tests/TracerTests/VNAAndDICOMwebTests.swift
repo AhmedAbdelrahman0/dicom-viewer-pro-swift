@@ -138,10 +138,92 @@ final class VNAAndDICOMwebTests: XCTestCase {
         XCTAssertFalse(url.path.contains(":"))
         XCTAssertFalse(url.path.contains(" "))
     }
+
+    func testDICOMwebStoreInstancesBuildsSTOWMultipartRequest() async throws {
+        let connection = VNAConnection(
+            id: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
+            name: "VNA",
+            baseURLString: "https://vna.example.org/dicomweb",
+            bearerToken: "secret"
+        )
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DICOMwebStoreMockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+
+        DICOMwebStoreMockURLProtocol.handler = { request in
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.url?.path, "/dicomweb/studies/1.2.3")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer secret")
+            XCTAssertTrue(request.value(forHTTPHeaderField: "Content-Type")?.contains("multipart/related") == true)
+            let body = try XCTUnwrap(request.httpBody ?? request.httpBodyStream?.readAllData())
+            let text = String(data: body, encoding: .utf8) ?? ""
+            XCTAssertTrue(text.contains("DICOM-A"))
+            XCTAssertTrue(text.contains("DICOM-B"))
+            let response = HTTPURLResponse(url: request.url!,
+                                           statusCode: 200,
+                                           httpVersion: "HTTP/1.1",
+                                           headerFields: ["Content-Type": "application/dicom+json"])!
+            return (response, Data("[]".utf8))
+        }
+        defer { DICOMwebStoreMockURLProtocol.handler = nil }
+
+        let client = try DICOMwebClient(configuration: .init(connection: connection),
+                                        session: session)
+        try await client.storeInstances([Data("DICOM-A".utf8), Data("DICOM-B".utf8)],
+                                        studyInstanceUID: "1.2.3")
+    }
 }
 
 private extension Data {
     mutating func append(_ string: String) {
         append(Data(string.utf8))
     }
+}
+
+private extension InputStream {
+    func readAllData() -> Data {
+        open()
+        defer { close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while hasBytesAvailable {
+            let count = read(&buffer, maxLength: buffer.count)
+            if count > 0 {
+                data.append(buffer, count: count)
+            } else {
+                break
+            }
+        }
+        return data
+    }
+}
+
+private final class DICOMwebStoreMockURLProtocol: URLProtocol {
+    static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        guard let handler = Self.handler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+
+        do {
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
 }

@@ -142,6 +142,47 @@ public final class DICOMwebClient: @unchecked Sendable {
         return first
     }
 
+    public func storeInstances(_ instances: [Data],
+                               studyInstanceUID: String? = nil) async throws {
+        guard !instances.isEmpty else { return }
+        var path = ["studies"]
+        if let studyInstanceUID,
+           !studyInstanceUID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            path.append(studyInstanceUID)
+        }
+        let url = makeURL(path: path)
+        let boundary = "TRACER-STOW-\(UUID().uuidString)"
+        var request = URLRequest(url: url,
+                                 cachePolicy: .reloadIgnoringLocalCacheData,
+                                 timeoutInterval: configuration.connection.timeoutSeconds)
+        request.httpMethod = "POST"
+        request.setValue("multipart/related; type=\"application/dicom\"; boundary=\(boundary)",
+                         forHTTPHeaderField: "Content-Type")
+        request.setValue("application/dicom+json", forHTTPHeaderField: "Accept")
+        request.setValue("Tracer/1.0 DICOMweb", forHTTPHeaderField: "User-Agent")
+        let token = configuration.connection.bearerToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        var body = Data()
+        for instance in instances {
+            body.append("--\(boundary)\r\n")
+            body.append("Content-Type: application/dicom\r\n\r\n")
+            body.append(instance)
+            body.append("\r\n")
+        }
+        body.append("--\(boundary)--\r\n")
+        request.httpBody = body
+
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw ClientError.invalidResponse }
+        guard (200..<300).contains(http.statusCode) else {
+            throw ClientError.httpError(status: http.statusCode,
+                                        body: String(data: data, encoding: .utf8) ?? "")
+        }
+    }
+
     private func searchStudiesSingle(query: VNAStudyQuery) async throws -> [VNAStudy] {
         let url = makeURL(path: ["studies"], queryItems: query.queryItems)
         let data = try await get(url: url, accept: "application/dicom+json")
@@ -492,6 +533,10 @@ public enum DICOMwebMultipartParser {
 }
 
 private extension Data {
+    mutating func append(_ string: String) {
+        append(Data(string.utf8))
+    }
+
     func hasBytes(_ string: String, at index: Int) -> Bool {
         let bytes = Array(string.utf8)
         guard index >= 0, index + bytes.count <= count else { return false }
