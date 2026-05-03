@@ -10,6 +10,7 @@ private enum StudyBrowserMode: String, CaseIterable, Identifiable {
     case vna
     case archives
     case viewer
+    case admin
 
     var id: String { rawValue }
 
@@ -19,6 +20,7 @@ private enum StudyBrowserMode: String, CaseIterable, Identifiable {
         case .vna: return "VNA"
         case .archives: return "Archives"
         case .viewer: return "Viewer"
+        case .admin: return "Admin"
         }
     }
 
@@ -28,6 +30,7 @@ private enum StudyBrowserMode: String, CaseIterable, Identifiable {
         case .vna: return "network"
         case .archives: return "externaldrive.connected.to.line.below"
         case .viewer: return "rectangle.3.group"
+        case .admin: return "person.badge.key"
         }
     }
 }
@@ -66,6 +69,7 @@ struct StudyBrowserView: View {
     @State private var fileBrowserEntries: [LocalFileBrowserEntry] = []
     @State private var fileBrowserError: String?
     @State private var fileBrowserLoadTask: Task<Void, Never>?
+    @AppStorage("Tracer.AdminMode.Enabled") private var adminModeEnabled: Bool = false
     @AppStorage(SparkArchiveBrowser.storageKey) private var sparkArchiveRootPath: String = SparkArchiveBrowser.defaultRoot
     @State private var dgxConfig = DGXSparkConfig.load()
     @State private var sparkArchiveCurrentPath: String?
@@ -112,6 +116,8 @@ struct StudyBrowserView: View {
                     archivesContent
                 case .viewer:
                     viewerContent
+                case .admin:
+                    adminContent
                 }
             }
             .searchable(text: $searchText, prompt: searchPrompt)
@@ -138,6 +144,17 @@ struct StudyBrowserView: View {
         }
         .onChange(of: browserMode) { _, mode in
             if mode == .archives {
+                scheduleIndexResultsReload(delayNanoseconds: 0)
+            }
+            if mode == .admin {
+                scheduleIndexResultsReload(delayNanoseconds: 0)
+            }
+        }
+        .onChange(of: adminModeEnabled) { _, enabled in
+            if !enabled, browserMode == .admin {
+                browserMode = .worklist
+            } else if enabled {
+                browserMode = .admin
                 scheduleIndexResultsReload(delayNanoseconds: 0)
             }
         }
@@ -380,13 +397,17 @@ struct StudyBrowserView: View {
 
     private var header: some View {
         VStack(spacing: 8) {
-            Picker("Panel", selection: $browserMode) {
-                ForEach(StudyBrowserMode.allCases) { mode in
-                    Label(mode.displayName, systemImage: mode.systemImage).tag(mode)
+            HStack(spacing: 6) {
+                Picker("Panel", selection: $browserMode) {
+                    ForEach(availableBrowserModes) { mode in
+                        Label(mode.displayName, systemImage: mode.systemImage).tag(mode)
+                    }
                 }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+
+                adminModeButton
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
 
             HStack(alignment: .firstTextBaseline) {
                 Text(browserMode.displayName)
@@ -427,10 +448,32 @@ struct StudyBrowserView: View {
                 archiveControls
             case .viewer:
                 viewerControls
+            case .admin:
+                adminControls
             }
         }
         .padding(8)
         .background(TracerTheme.worklistGradient)
+    }
+
+    private var availableBrowserModes: [StudyBrowserMode] {
+        StudyBrowserMode.allCases.filter { mode in
+            mode != .admin || adminModeEnabled
+        }
+    }
+
+    private var adminModeButton: some View {
+        Button {
+            adminModeEnabled.toggle()
+        } label: {
+            Image(systemName: adminModeEnabled ? "person.badge.key.fill" : "person.badge.key")
+                .font(.system(size: 13, weight: .semibold))
+                .frame(width: 28, height: 22)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .help(adminModeEnabled ? "Exit Admin Mode" : "Enter Admin Mode")
+        .accessibilityLabel(adminModeEnabled ? "Exit Admin Mode" : "Enter Admin Mode")
     }
 
     private var headerCountText: String {
@@ -444,6 +487,8 @@ struct StudyBrowserView: View {
             return "\(vm.savedArchiveRoots.count) roots · \(indexedArchiveStudies.count) studies · \(indexedTotalCount) series"
         case .viewer:
             return "\(vm.viewerSessions.count) sessions · \(vm.openStudies.count) studies · \(vm.activeSessionVolumes.count) series"
+        case .admin:
+            return "\(adminStudies.count) studies · \(indexedTotalCount) series"
         }
     }
 
@@ -457,6 +502,8 @@ struct StudyBrowserView: View {
             return "Search archives..."
         case .viewer:
             return "Search viewer session or files..."
+        case .admin:
+            return "Search PACS admin index..."
         }
     }
 
@@ -737,6 +784,48 @@ struct StudyBrowserView: View {
             .buttonStyle(.bordered)
             .controlSize(.small)
             .disabled(vm.currentVolume == nil)
+        }
+    }
+
+    private var adminControls: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                Button {
+                    onIndexFolder()
+                } label: {
+                    Label("Index", systemImage: "externaldrive.badge.plus")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+
+                Button {
+                    reloadIndexResults()
+                } label: {
+                    Label("Reload", systemImage: "arrow.clockwise")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+
+            HStack(spacing: 6) {
+                Image(systemName: "person.badge.key.fill")
+                    .foregroundColor(TracerTheme.accentBright)
+                Text("Admin Mode")
+                    .font(.system(size: 10, weight: .medium))
+                Spacer()
+                Toggle("", isOn: $adminModeEnabled)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(TracerTheme.panelRaised)
+            )
         }
     }
 
@@ -1245,8 +1334,27 @@ struct StudyBrowserView: View {
         .background(TracerTheme.sidebarBackground)
     }
 
+    private var adminContent: some View {
+        PACSAdminPanel(
+            vm: vm,
+            indexedStudies: adminStudies,
+            onApplyMetadata: applyAdminMetadata,
+            onRetireStudy: deleteIndexedStudy,
+            onCreateDICOMSeries: createAdminDICOMSeries
+        )
+    }
+
     private var indexedArchiveStudies: [PACSWorklistStudy] {
         PACSWorklistStudy.grouped(from: indexedSeries, statuses: studyStatuses)
+    }
+
+    private var adminStudies: [PACSWorklistStudy] {
+        indexedArchiveStudies.filter {
+            $0.matches(searchText: searchText,
+                       statusFilter: .all,
+                       modalityFilter: "All",
+                       dateFilter: .all)
+        }
     }
 
     private var worklistStudies: [PACSWorklistStudy] {
@@ -2266,8 +2374,63 @@ struct StudyBrowserView: View {
             studyStatuses.removeValue(forKey: study.id)
             persistStatusOverrides()
             reloadIndexResults()
+            vm.indexRevision += 1
+            vm.statusMessage = "Retired indexed study: \(firstMeaningful(study.studyDescription, study.patientName, study.id))"
         } catch {
             vm.statusMessage = "Index delete error: \(error.localizedDescription)"
+        }
+    }
+
+    private func applyAdminMetadata(_ draft: PACSStudyMetadataDraft, to study: PACSWorklistStudy) {
+        do {
+            for series in study.series {
+                let edited = draft.applying(to: series)
+                try updateIndexedSeries(edited)
+            }
+            try modelContext.save()
+            vm.indexRevision += 1
+            reloadIndexResults()
+            vm.statusMessage = "Updated index metadata for \(firstMeaningful(draft.studyDescription, study.studyDescription, study.id))"
+        } catch {
+            vm.statusMessage = "Admin metadata update failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func createAdminDICOMSeries(_ draft: DICOMSeriesCreationDraft) {
+        do {
+            let result = try PACSAdminDICOMFactory.createSyntheticSeries(draft: draft)
+            try upsertAdminIndexSnapshot(result.snapshot)
+            try modelContext.save()
+            vm.indexRevision += 1
+            reloadIndexResults()
+            browserMode = .admin
+            vm.statusMessage = "Created \(result.snapshot.instanceCount) DICOM files at \(result.outputDirectory.lastPathComponent)"
+        } catch {
+            vm.statusMessage = "DICOM creation failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func updateIndexedSeries(_ snapshot: PACSIndexedSeriesSnapshot) throws {
+        let id = snapshot.id
+        var descriptor = FetchDescriptor<PACSIndexedSeries>(
+            predicate: #Predicate { $0.id == id }
+        )
+        descriptor.fetchLimit = 1
+        if let entry = try modelContext.fetch(descriptor).first {
+            entry.update(from: snapshot)
+        }
+    }
+
+    private func upsertAdminIndexSnapshot(_ snapshot: PACSIndexedSeriesSnapshot) throws {
+        let id = snapshot.id
+        var descriptor = FetchDescriptor<PACSIndexedSeries>(
+            predicate: #Predicate { $0.id == id }
+        )
+        descriptor.fetchLimit = 1
+        if let entry = try modelContext.fetch(descriptor).first {
+            entry.update(from: snapshot)
+        } else {
+            modelContext.insert(PACSIndexedSeries(snapshot: snapshot))
         }
     }
 
