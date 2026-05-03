@@ -1213,20 +1213,20 @@ def image_array(image, dtype=None):
 
 
 def ensure_same_geometry(reference, moving, field):
-    ref = {
-        "size": reference.GetSize(),
-        "spacing": tuple(round(v, 5) for v in reference.GetSpacing()),
-        "origin": tuple(round(v, 5) for v in reference.GetOrigin()),
-        "direction": tuple(round(v, 5) for v in reference.GetDirection()),
-    }
-    mov = {
-        "size": moving.GetSize(),
-        "spacing": tuple(round(v, 5) for v in moving.GetSpacing()),
-        "origin": tuple(round(v, 5) for v in moving.GetOrigin()),
-        "direction": tuple(round(v, 5) for v in moving.GetDirection()),
-    }
-    if ref != mov:
-        raise ValueError(f"{field} geometry does not match CT/PET reference: {mov} vs {ref}")
+    if reference.GetSize() != moving.GetSize():
+        raise ValueError(f"{field} size does not match CT/PET reference: {moving.GetSize()} vs {reference.GetSize()}")
+
+    def close_tuple(a, b, tolerance):
+        return len(a) == len(b) and all(abs(float(x) - float(y)) <= tolerance for x, y in zip(a, b))
+
+    checks = [
+        ("spacing", reference.GetSpacing(), moving.GetSpacing(), 1e-4),
+        ("origin", reference.GetOrigin(), moving.GetOrigin(), 1e-3),
+        ("direction", reference.GetDirection(), moving.GetDirection(), 1e-5),
+    ]
+    for name, ref, mov, tolerance in checks:
+        if not close_tuple(ref, mov, tolerance):
+            raise ValueError(f"{field} {name} does not match CT/PET reference: {mov} vs {ref}")
 
 
 def cast_label(label_image):
@@ -1256,46 +1256,59 @@ def point_to_dict(point):
     return {"x": int(x), "y": int(y), "z": int(z)}
 
 
-def foreground_points(label_arr, pet_arr, max_points):
-    np, _, ndi = require_imaging_stack()
-    if max_points <= 0 or not np.any(label_arr > 0):
-        return []
-    labels, count = ndi.label(label_arr > 0, structure=structure18(np))
-    components = []
-    for comp_id in range(1, count + 1):
-        voxels = np.argwhere(labels == comp_id)
-        if voxels.size == 0:
-            continue
-        values = pet_arr[labels == comp_id]
-        seed = voxels[int(np.argmax(values))]
-        components.append((float(np.max(values)), int(voxels.shape[0]), tuple(int(v) for v in seed)))
-    components.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    return [item[2] for item in components[:max_points]]
+def suppression_radius(spacing_xyz, min_distance_mm):
+    np, _, _ = require_imaging_stack()
+    if spacing_xyz is None:
+        return (8, 8, 8)
+    spacing_zyx = (
+        max(float(spacing_xyz[2]), 1e-6),
+        max(float(spacing_xyz[1]), 1e-6),
+        max(float(spacing_xyz[0]), 1e-6),
+    )
+    return tuple(max(1, int(np.ceil(min_distance_mm / spacing))) for spacing in spacing_zyx)
 
 
-def background_points(label_arr, pet_arr, max_points):
-    np, _, ndi = require_imaging_stack()
-    if max_points <= 0:
+def suppress_box(scores, point, radius):
+    z, y, x = point
+    z0, z1 = max(0, z - radius[0]), min(scores.shape[0], z + radius[0] + 1)
+    y0, y1 = max(0, y - radius[1]), min(scores.shape[1], y + radius[1] + 1)
+    x0, x1 = max(0, x - radius[2]), min(scores.shape[2], x + radius[2] + 1)
+    scores[z0:z1, y0:y1, x0:x1] = -float("inf")
+
+
+def top_pet_points(mask, pet_arr, max_points, spacing_xyz=None, min_distance_mm=30):
+    np, _, _ = require_imaging_stack()
+    if max_points <= 0 or not np.any(mask):
         return []
-    outside = label_arr == 0
-    if not np.any(outside):
-        return []
-    values = pet_arr[outside]
-    threshold = np.percentile(values, 99) if values.size > 10 else np.max(values)
-    candidate = outside & (pet_arr >= threshold)
-    labels, count = ndi.label(candidate, structure=structure18(np))
+    scores = pet_arr.astype(np.float32, copy=True)
+    scores[~mask] = -float("inf")
+    radius = suppression_radius(spacing_xyz, min_distance_mm)
     points = []
-    for comp_id in range(1, count + 1):
-        voxels = np.argwhere(labels == comp_id)
-        if voxels.size == 0:
-            continue
-        seed = voxels[int(np.argmax(pet_arr[labels == comp_id]))]
-        points.append((float(pet_arr[tuple(seed)]), tuple(int(v) for v in seed)))
-    if not points:
-        seed = np.argwhere(outside)[int(np.argmax(values))]
-        points.append((float(pet_arr[tuple(seed)]), tuple(int(v) for v in seed)))
-    points.sort(key=lambda item: item[0], reverse=True)
-    return [item[1] for item in points[:max_points]]
+    for _ in range(max_points):
+        flat_index = int(np.argmax(scores))
+        best = float(scores.flat[flat_index])
+        if not np.isfinite(best):
+            break
+        point = tuple(int(v) for v in np.unravel_index(flat_index, scores.shape))
+        points.append(point)
+        suppress_box(scores, point, radius)
+    return points
+
+
+def foreground_points(label_arr, pet_arr, max_points, spacing_xyz=None):
+    return top_pet_points(label_arr > 0,
+                          pet_arr,
+                          max_points,
+                          spacing_xyz=spacing_xyz,
+                          min_distance_mm=30)
+
+
+def background_points(label_arr, pet_arr, max_points, spacing_xyz=None):
+    return top_pet_points(label_arr == 0,
+                          pet_arr,
+                          max_points,
+                          spacing_xyz=spacing_xyz,
+                          min_distance_mm=40)
 
 
 def prompt_channel(shape, spacing_xyz, points, experiment):
@@ -1311,27 +1324,49 @@ def prompt_channel(shape, spacing_xyz, points, experiment):
         return out
 
     max_distance = float(experiment.get("promptDistanceMM", 40) or 40)
-    seed_mask = np.ones(shape, dtype=bool)
+    out = np.zeros(shape, dtype=np.float32)
+    spacing_zyx = (
+        float(spacing_xyz[2]),
+        float(spacing_xyz[1]),
+        float(spacing_xyz[0]),
+    )
+    radius = [max(1, int(np.ceil(max_distance / spacing))) for spacing in spacing_zyx]
     for z, y, x in points:
-        if 0 <= z < shape[0] and 0 <= y < shape[1] and 0 <= x < shape[2]:
-            seed_mask[z, y, x] = False
-    spacing_zyx = (float(spacing_xyz[2]), float(spacing_xyz[1]), float(spacing_xyz[0]))
-    distance = ndi.distance_transform_edt(seed_mask, sampling=spacing_zyx)
-    return np.maximum(0, 1.0 - distance / max_distance).astype(np.float32)
+        if not (0 <= z < shape[0] and 0 <= y < shape[1] and 0 <= x < shape[2]):
+            continue
+        z0, z1 = max(0, z - radius[0]), min(shape[0], z + radius[0] + 1)
+        y0, y1 = max(0, y - radius[1]), min(shape[1], y + radius[1] + 1)
+        x0, x1 = max(0, x - radius[2]), min(shape[2], x + radius[2] + 1)
+        zz, yy, xx = np.ogrid[z0:z1, y0:y1, x0:x1]
+        distance = np.sqrt(
+            ((zz - z) * spacing_zyx[0]) ** 2
+            + ((yy - y) * spacing_zyx[1]) ** 2
+            + ((xx - x) * spacing_zyx[2]) ** 2
+        )
+        values = np.maximum(0, 1.0 - distance / max_distance).astype(np.float32)
+        region = out[z0:z1, y0:y1, x0:x1]
+        np.maximum(region, values, out=region)
+    return out
 
 
-def initial_scribbles(label_arr, pet_arr, experiment):
+def initial_scribbles(label_arr, pet_arr, experiment, spacing_xyz=None):
     fg_max = int(experiment.get("maxForegroundScribblesPerStep", 3) or 3)
     bg_max = int(experiment.get("maxBackgroundScribblesPerStep", 3) or 3)
-    return foreground_points(label_arr, pet_arr, max(1, min(fg_max, 1))), background_points(label_arr, pet_arr, max(1, min(bg_max, 1)))
+    return (
+        foreground_points(label_arr, pet_arr, max(1, min(fg_max, 1)), spacing_xyz=spacing_xyz),
+        background_points(label_arr, pet_arr, max(1, min(bg_max, 1)), spacing_xyz=spacing_xyz),
+    )
 
 
-def simulated_corrective_scribbles(pred_arr, label_arr, pet_arr, experiment):
+def simulated_corrective_scribbles(pred_arr, label_arr, pet_arr, experiment, spacing_xyz=None):
     fg_max = int(experiment.get("maxForegroundScribblesPerStep", 3) or 3)
     bg_max = int(experiment.get("maxBackgroundScribblesPerStep", 3) or 3)
     missed = (label_arr > 0) & (pred_arr == 0)
     false_positive = (pred_arr > 0) & (label_arr == 0)
-    return foreground_points(missed.astype("uint8"), pet_arr, fg_max), foreground_points(false_positive.astype("uint8"), pet_arr, bg_max)
+    return (
+        foreground_points(missed, pet_arr, fg_max, spacing_xyz=spacing_xyz),
+        foreground_points(false_positive, pet_arr, bg_max, spacing_xyz=spacing_xyz),
+    )
 
 
 def write_nnunet_case(ct_image, pet_image, fg_points, bg_points, case_id, out_dir, experiment):
@@ -1369,8 +1404,14 @@ def prepare_case_for_nnunet(case, dataset_dir, experiment):
     if label_arr is None:
         fg_points, bg_points = [], []
     else:
-        fg_points = foreground_points(label_arr, pet_arr, int(experiment.get("maxForegroundScribblesPerStep", 3) or 3))
-        bg_points = background_points(label_arr, pet_arr, int(experiment.get("maxBackgroundScribblesPerStep", 3) or 3))
+        fg_points = foreground_points(label_arr,
+                                      pet_arr,
+                                      int(experiment.get("maxForegroundScribblesPerStep", 3) or 3),
+                                      spacing_xyz=ct_image.GetSpacing())
+        bg_points = background_points(label_arr,
+                                      pet_arr,
+                                      int(experiment.get("maxBackgroundScribblesPerStep", 3) or 3),
+                                      spacing_xyz=ct_image.GetSpacing())
 
     images_dir = dataset_dir / ("imagesTs" if split == "test" else "imagesTr")
     write_nnunet_case(ct_image, pet_image, fg_points, bg_points, case_id, images_dir, experiment)
@@ -1413,8 +1454,23 @@ def prepare_nnunet_dataset(manifest, workdir, args=None):
     dataset_dir = raw / dataset_dir_name(dataset_id)
     for subdir in ("imagesTr", "labelsTr", "imagesTs"):
         (dataset_dir / subdir).mkdir(parents=True, exist_ok=True)
-    for case in manifest.cases:
+    cases = manifest.cases
+    for index, case in enumerate(cases, start=1):
+        print(json.dumps({
+            "stage": "prepare_case",
+            "index": index,
+            "total": len(cases),
+            "caseID": case["caseID"],
+            "split": case.get("split", "train"),
+        }), flush=True)
         prepare_case_for_nnunet(case, dataset_dir, manifest.experiment)
+        print(json.dumps({
+            "stage": "prepare_case_done",
+            "index": index,
+            "total": len(cases),
+            "caseID": case["caseID"],
+            "split": case.get("split", "train"),
+        }), flush=True)
     write_dataset_json(dataset_dir, dataset_id, len(manifest.labeled_cases))
     write_splits(pre, dataset_id, manifest.train_cases, manifest.validation_cases)
     return {
@@ -1714,7 +1770,10 @@ def main():
         pet_image = read_image(case["petPath"])
         label_image, label_arr = load_label_array(case["labelPath"])
         pet_arr = __import__("SimpleITK").GetArrayFromImage(pet_image).astype("float32")
-        fg_points, bg_points = initial_scribbles(label_arr, pet_arr, manifest.experiment)
+        fg_points, bg_points = initial_scribbles(label_arr,
+                                                 pet_arr,
+                                                 manifest.experiment,
+                                                 spacing_xyz=label_image.GetSpacing())
         steps = []
 
         for step in range(int(manifest.experiment.get("maxInteractionSteps", 4) or 4)):
@@ -1754,7 +1813,11 @@ def main():
                 pred_path = step_output / f"{case_id}.nii"
             pred_image, pred_arr = load_label_array(pred_path)
             steps.append(compute_step_metrics(pred_arr, label_arr, label_image.GetSpacing(), step))
-            add_fg, add_bg = simulated_corrective_scribbles(pred_arr, label_arr, pet_arr, manifest.experiment)
+            add_fg, add_bg = simulated_corrective_scribbles(pred_arr,
+                                                            label_arr,
+                                                            pet_arr,
+                                                            manifest.experiment,
+                                                            spacing_xyz=label_image.GetSpacing())
             fg_points.extend(add_fg)
             bg_points.extend(add_bg)
 
