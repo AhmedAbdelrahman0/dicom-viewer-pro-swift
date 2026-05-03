@@ -5,20 +5,28 @@ import Tracer
 #if os(macOS)
 import AppKit
 
+@MainActor
 private final class TracerAppDelegate: NSObject, NSApplicationDelegate {
-    private var mainWindow: NSWindow?
+    private enum StudyWindowLayout: String {
+        case split
+        case unified
+    }
+
+    private var studyWindowLayout: StudyWindowLayout = .unified
+    private var unifiedWindow: NSWindow?
+    private var navigatorWindow: NSWindow?
+    private var viewerWindow: NSWindow?
     private var settingsWindow: NSWindow?
+    private let sharedViewer = ViewerViewModel()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         installMenu()
-        openMainWindow()
+        openPreferredStudyWindows()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag {
-            openMainWindow()
-        }
+        openPreferredStudyWindows()
         return true
     }
 
@@ -26,27 +34,134 @@ private final class TracerAppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
-    private func openMainWindow() {
-        if let mainWindow {
-            mainWindow.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
+    private func openPreferredStudyWindows() {
+        switch studyWindowLayout {
+        case .split:
+            openSplitStudyWindows()
+        case .unified:
+            openUnifiedStudyWindow()
+        }
+    }
+
+    private func openSplitStudyWindows() {
+        studyWindowLayout = .split
+        openStudyNavigator(activate: false)
+        openStudyViewer(activate: true)
+        unifiedWindow?.orderOut(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @discardableResult
+    private func openUnifiedStudyWindow(activate: Bool = true) -> NSWindow {
+        studyWindowLayout = .unified
+        if let unifiedWindow {
+            if activate {
+                unifiedWindow.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
+            } else {
+                unifiedWindow.orderFront(nil)
+            }
+            navigatorWindow?.orderOut(nil)
+            viewerWindow?.orderOut(nil)
+            return unifiedWindow
         }
 
-        let screen = NSScreen.main
-        let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 960)
-        let width = min(max(1180, visible.width * 0.82), visible.width)
-        let height = min(max(760, visible.height * 0.84), visible.height)
-        let frame = NSRect(x: visible.midX - width / 2,
-                           y: visible.midY - height / 2,
-                           width: width,
-                           height: height)
+        let frame = defaultUnifiedStudyWindowFrame()
+        let root = ContentView(vm: sharedViewer, role: .unified)
+            .modelContainer(for: PACSIndexedSeries.self)
+            .frame(minWidth: 1100, minHeight: 680)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .preferredColorScheme(.dark)
+        let window = makeStudyWindow(
+            title: "Tracer",
+            frame: frame,
+            minSize: NSSize(width: 1100, height: 680),
+            root: root
+        )
+        unifiedWindow = window
+        navigatorWindow?.orderOut(nil)
+        viewerWindow?.orderOut(nil)
+        if activate {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        } else {
+            window.orderFront(nil)
+        }
+        return window
+    }
 
-        let root = ContentView()
+    @discardableResult
+    private func openStudyNavigator(activate: Bool = true) -> NSWindow {
+        if let navigatorWindow {
+            if activate {
+                navigatorWindow.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
+            } else {
+                navigatorWindow.orderFront(nil)
+            }
+            return navigatorWindow
+        }
+
+        let frames = defaultStudyWindowFrames()
+        let root = ContentView(vm: sharedViewer, role: .navigator)
+            .modelContainer(for: PACSIndexedSeries.self)
+            .frame(minWidth: 420, minHeight: 600)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .preferredColorScheme(.dark)
+        let window = makeStudyWindow(
+            title: "Tracer Study Navigator",
+            frame: frames.navigator,
+            minSize: NSSize(width: 420, height: 600),
+            root: root
+        )
+        navigatorWindow = window
+        if activate {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        } else {
+            window.orderFront(nil)
+        }
+        return window
+    }
+
+    @discardableResult
+    private func openStudyViewer(activate: Bool = true) -> NSWindow {
+        if let viewerWindow {
+            if activate {
+                viewerWindow.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
+            } else {
+                viewerWindow.orderFront(nil)
+            }
+            return viewerWindow
+        }
+
+        let frames = defaultStudyWindowFrames()
+        let root = ContentView(vm: sharedViewer, role: .viewer)
             .modelContainer(for: PACSIndexedSeries.self)
             .frame(minWidth: 900, minHeight: 600)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .preferredColorScheme(.dark)
+        let window = makeStudyWindow(
+            title: "Tracer Study Viewer",
+            frame: frames.viewer,
+            minSize: NSSize(width: 900, height: 600),
+            root: root
+        )
+        viewerWindow = window
+        if activate {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        } else {
+            window.orderFront(nil)
+        }
+        return window
+    }
+
+    private func makeStudyWindow<Root: View>(title: String,
+                                             frame: NSRect,
+                                             minSize: NSSize,
+                                             root: Root) -> NSWindow {
         let hostingView = NSHostingView(rootView: root)
         hostingView.autoresizingMask = [.width, .height]
         hostingView.frame = NSRect(origin: .zero, size: frame.size)
@@ -56,20 +171,65 @@ private final class TracerAppDelegate: NSObject, NSApplicationDelegate {
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false,
-            screen: screen
+            screen: NSScreen.main
         )
-        window.title = "Tracer"
-        window.minSize = NSSize(width: 900, height: 600)
+        window.title = title
+        window.minSize = minSize
         window.contentView = hostingView
         window.backgroundColor = .black
         window.isReleasedWhenClosed = false
         window.isRestorable = false
         window.collectionBehavior = [.managed, .fullScreenPrimary]
         window.setFrame(frame, display: true, animate: false)
-        window.makeKeyAndOrderFront(nil)
         window.orderFrontRegardless()
-        mainWindow = window
-        NSApp.activate(ignoringOtherApps: true)
+        return window
+    }
+
+    private func defaultStudyWindowFrames() -> (navigator: NSRect, viewer: NSRect) {
+        let screen = NSScreen.main
+        let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 960)
+        let margin: CGFloat = 18
+        let gap: CGFloat = 12
+        let height = min(max(720, visible.height * 0.88), visible.height - margin * 2)
+        let y = visible.midY - height / 2
+        let contentWidth = max(900, visible.width - margin * 2)
+        let availableSideBySideWidth = max(900, contentWidth - gap)
+        let navigatorWidth = min(max(420, availableSideBySideWidth * 0.28), 560)
+        let viewerWidth = max(900, availableSideBySideWidth - navigatorWidth)
+
+        if navigatorWidth + gap + viewerWidth <= contentWidth {
+            let navigatorFrame = NSRect(x: visible.minX + margin,
+                                        y: y,
+                                        width: navigatorWidth,
+                                        height: height)
+            let viewerFrame = NSRect(x: navigatorFrame.maxX + gap,
+                                     y: y,
+                                     width: viewerWidth,
+                                     height: height)
+            return (navigatorFrame, viewerFrame)
+        }
+
+        let viewerFrame = NSRect(x: visible.midX - min(max(1080, visible.width * 0.78), visible.width - margin * 2) / 2,
+                                 y: y,
+                                 width: min(max(1080, visible.width * 0.78), visible.width - margin * 2),
+                                 height: height)
+        let navigatorFrame = NSRect(x: visible.minX + margin,
+                                    y: y + 28,
+                                    width: navigatorWidth,
+                                    height: max(620, height - 56))
+        return (navigatorFrame, viewerFrame)
+    }
+
+    private func defaultUnifiedStudyWindowFrame() -> NSRect {
+        let screen = NSScreen.main
+        let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 960)
+        let margin: CGFloat = 18
+        let width = min(max(1280, visible.width * 0.86), visible.width - margin * 2)
+        let height = min(max(780, visible.height * 0.88), visible.height - margin * 2)
+        return NSRect(x: visible.midX - width / 2,
+                      y: visible.midY - height / 2,
+                      width: width,
+                      height: height)
     }
 
     private func installMenu() {
@@ -184,8 +344,26 @@ private final class TracerAppDelegate: NSObject, NSApplicationDelegate {
 
         let windowMenuItem = NSMenuItem()
         let windowMenu = NSMenu(title: "Window")
-        windowMenu.addItem(makeMenuItem(title: "Fit Window to Display",
-                                        action: #selector(fitMainWindowToDisplay),
+        windowMenu.addItem(makeMenuItem(title: "Merge Into Single Study Window",
+                                        action: #selector(mergeStudyWindows),
+                                        key: "m",
+                                        modifiers: [.command, .option]))
+        windowMenu.addItem(makeMenuItem(title: "Split Into Navigator + Viewer",
+                                        action: #selector(splitStudyWindows),
+                                        key: "3",
+                                        modifiers: [.command, .option]))
+        windowMenu.addItem(.separator())
+        windowMenu.addItem(makeMenuItem(title: "Show Study Navigator",
+                                        action: #selector(showStudyNavigator),
+                                        key: "1",
+                                        modifiers: [.command, .option]))
+        windowMenu.addItem(makeMenuItem(title: "Show Study Viewer",
+                                        action: #selector(showStudyViewer),
+                                        key: "2",
+                                        modifiers: [.command, .option]))
+        windowMenu.addItem(.separator())
+        windowMenu.addItem(makeMenuItem(title: "Fit Active Window to Display",
+                                        action: #selector(fitActiveWindowToDisplay),
                                         key: "f",
                                         modifiers: [.command, .option]))
         windowMenu.addItem(.separator())
@@ -226,46 +404,90 @@ private final class TracerAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openDICOMDirectory() {
-        NotificationCenter.default.post(name: .openDICOMDirectory, object: nil)
+        postToStudyNavigator(.openDICOMDirectory)
     }
 
     @objc private func openNIfTIFile() {
-        NotificationCenter.default.post(name: .openNIfTIFile, object: nil)
+        postToStudyNavigator(.openNIfTIFile)
     }
 
-    @objc private func undoLastEdit() { NotificationCenter.default.post(name: .undoLastEdit, object: nil) }
-    @objc private func redoLastEdit() { NotificationCenter.default.post(name: .redoLastEdit, object: nil) }
-    @objc private func resetEditableChanges() { NotificationCenter.default.post(name: .resetEditableChanges, object: nil) }
-    @objc private func createLabelMap() { NotificationCenter.default.post(name: .createLabelMap, object: nil) }
-    @objc private func clearMeasurements() { NotificationCenter.default.post(name: .clearMeasurements, object: nil) }
-    @objc private func saveStudySession() { NotificationCenter.default.post(name: .saveStudySession, object: nil) }
-    @objc private func newStudySession() { NotificationCenter.default.post(name: .newStudySession, object: nil) }
-    @objc private func toggleLinkedZoomPan() { NotificationCenter.default.post(name: .toggleLinkedZoomPan, object: nil) }
-    @objc private func toggleFocusMode() { NotificationCenter.default.post(name: .toggleFocusMode, object: nil) }
+    @objc private func undoLastEdit() { postToStudyViewer(.undoLastEdit) }
+    @objc private func redoLastEdit() { postToStudyViewer(.redoLastEdit) }
+    @objc private func resetEditableChanges() { postToStudyViewer(.resetEditableChanges) }
+    @objc private func createLabelMap() { postToStudyViewer(.createLabelMap) }
+    @objc private func clearMeasurements() { postToStudyViewer(.clearMeasurements) }
+    @objc private func saveStudySession() { postToStudyViewer(.saveStudySession) }
+    @objc private func newStudySession() { postToStudyViewer(.newStudySession) }
+    @objc private func toggleLinkedZoomPan() { postToStudyViewer(.toggleLinkedZoomPan) }
+    @objc private func toggleFocusMode() { postToStudyViewer(.toggleFocusMode) }
 
     @objc private func selectViewerTool(_ sender: NSMenuItem) {
         guard let tool = sender.representedObject as? String else { return }
-        NotificationCenter.default.post(name: .selectViewerTool, object: nil, userInfo: ["tool": tool])
+        postToStudyViewer(.selectViewerTool, userInfo: ["tool": tool])
     }
 
     @objc private func selectLabelingTool(_ sender: NSMenuItem) {
         guard let tool = sender.representedObject as? String else { return }
-        NotificationCenter.default.post(name: .selectLabelingTool, object: nil, userInfo: ["tool": tool])
+        postToStudyViewer(.selectLabelingTool, userInfo: ["tool": tool])
     }
 
     @objc private func showEngineInspector(_ sender: NSMenuItem) {
         guard let panel = sender.representedObject as? String else { return }
-        NotificationCenter.default.post(name: .showEngineInspector, object: nil, userInfo: ["panel": panel])
+        postToStudyViewer(.showEngineInspector, userInfo: ["panel": panel])
     }
 
-    @objc private func fitMainWindowToDisplay() {
-        guard let window = mainWindow,
+    @objc private func mergeStudyWindows() {
+        openUnifiedStudyWindow()
+    }
+
+    @objc private func splitStudyWindows() {
+        openSplitStudyWindows()
+    }
+
+    @objc private func showStudyNavigator() {
+        studyWindowLayout = .split
+        unifiedWindow?.orderOut(nil)
+        openStudyNavigator()
+    }
+
+    @objc private func showStudyViewer() {
+        studyWindowLayout = .split
+        unifiedWindow?.orderOut(nil)
+        openStudyViewer()
+    }
+
+    @objc private func fitActiveWindowToDisplay() {
+        guard let window = NSApp.keyWindow ?? unifiedWindow ?? viewerWindow ?? navigatorWindow,
               let screen = window.screen ?? NSScreen.main else { return }
         window.setFrame(screen.visibleFrame, display: true, animate: true)
     }
 
     @objc private func showAbout() {
-        NotificationCenter.default.post(name: .showAboutWindow, object: nil)
+        postToStudyNavigator(.showAboutWindow)
+    }
+
+    private func postToStudyNavigator(_ name: Notification.Name,
+                                      userInfo: [AnyHashable: Any]? = nil) {
+        if studyWindowLayout == .unified {
+            openUnifiedStudyWindow()
+        } else {
+            openStudyNavigator()
+        }
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: name, object: nil, userInfo: userInfo)
+        }
+    }
+
+    private func postToStudyViewer(_ name: Notification.Name,
+                                   userInfo: [AnyHashable: Any]? = nil) {
+        if studyWindowLayout == .unified {
+            openUnifiedStudyWindow()
+        } else {
+            openStudyViewer()
+        }
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: name, object: nil, userInfo: userInfo)
+        }
     }
 
     @objc private func showSettings() {
@@ -291,9 +513,12 @@ private final class TracerAppDelegate: NSObject, NSApplicationDelegate {
 }
 
 let app = NSApplication.shared
-private let delegate = TracerAppDelegate()
-app.delegate = delegate
-app.run()
+MainActor.assumeIsolated {
+    let delegate = TracerAppDelegate()
+    app.delegate = delegate
+    app.run()
+    _ = delegate
+}
 #else
 DicomViewerApp.main()
 #endif

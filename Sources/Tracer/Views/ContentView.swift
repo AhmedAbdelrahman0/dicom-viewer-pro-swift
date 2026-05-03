@@ -5,12 +5,32 @@ import UniformTypeIdentifiers
 import AppKit
 #endif
 
+public enum TracerWindowRole {
+    case unified
+    case navigator
+    case viewer
+}
+
+private extension TracerWindowRole {
+    var handlesStudyImportCommands: Bool {
+        self == .unified || self == .navigator
+    }
+
+    var handlesViewerCommands: Bool {
+        self == .unified || self == .viewer
+    }
+
+    var handlesPresentationCommands: Bool {
+        self == .unified || self == .navigator
+    }
+}
+
 public struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     #if canImport(UIKit)
     @Environment(\.horizontalSizeClass) private var hSizeClass
     #endif
-    @StateObject private var vm = ViewerViewModel()
+    @StateObject private var vm: ViewerViewModel
     @StateObject private var monai = MONAILabelViewModel()
     @StateObject private var nnunet = NNUnetViewModel()
     @StateObject private var pet = PETEngineViewModel()
@@ -63,6 +83,7 @@ public struct ContentView: View {
     @AppStorage("focusModeEnabled") private var focusModeEnabled = false
     @AppStorage("Tracer.Prefs.ImageDetailsOverlay") private var showImageStudyDetailsOverlay = true
     @State private var browserVisibility: NavigationSplitViewVisibility = .all
+    private let role: TracerWindowRole
 
     // User-rebindable W/L preset names for ⌘1 / ⌘2 / ⌘3. Defaults are set
     // to match most radiologists' muscle memory (Lung / Bone / Brain)
@@ -80,7 +101,16 @@ public struct ContentView: View {
     enum FileImporterMode { case volume, overlay }
     enum DirectoryImporterMode { case open, index }
 
-    public init() {}
+    @MainActor
+    public init(role: TracerWindowRole = .unified) {
+        self.role = role
+        _vm = StateObject(wrappedValue: ViewerViewModel())
+    }
+
+    public init(vm: ViewerViewModel, role: TracerWindowRole = .unified) {
+        self.role = role
+        _vm = StateObject(wrappedValue: vm)
+    }
 
     public var body: some View {
         VStack(spacing: 0) {
@@ -234,22 +264,28 @@ public struct ContentView: View {
             handleDirectoryImport(result: result)
         }
         .onReceive(NotificationCenter.default.publisher(for: .openDICOMDirectory)) { _ in
+            guard role.handlesStudyImportCommands else { return }
             directoryImporterMode = .open
             showingDirectoryPicker = true
         }
         .onReceive(NotificationCenter.default.publisher(for: .openNIfTIFile)) { _ in
+            guard role.handlesStudyImportCommands else { return }
             requestFileImport(mode: .volume)
         }
         .onReceive(NotificationCenter.default.publisher(for: .showAboutWindow)) { _ in
+            guard role.handlesPresentationCommands else { return }
             showAboutWindow = true
         }
         .onReceive(NotificationCenter.default.publisher(for: .showOnboarding)) { _ in
+            guard role.handlesPresentationCommands else { return }
             showOnboarding = true
         }
         .modifier(TracerMenuCommandHandler(vm: vm,
+                                           isEnabled: role.handlesViewerCommands,
                                            toggleFocusMode: toggleFocusMode,
                                            showEngineInspector: showEngineInspector(named:)))
         .onReceive(NotificationCenter.default.publisher(for: .toggleImageStudyDetailsOverlay)) { _ in
+            guard role.handlesViewerCommands else { return }
             toggleImageStudyDetailsOverlay()
         }
         .onReceive(NotificationCenter.default.publisher(for: .recentVolumesDidChange)) { _ in
@@ -269,26 +305,33 @@ public struct ContentView: View {
                                    dosimetry: dosimetry,
                                    activity: activity))
         .onReceive(NotificationCenter.default.publisher(for: .assistantDidRequestClassification)) { _ in
+            guard role.handlesViewerCommands else { return }
             handleAssistantClassificationRequest()
         }
         .onReceive(NotificationCenter.default.publisher(for: .assistantDidRequestClassificationExport)) { note in
+            guard role.handlesViewerCommands else { return }
             let formatRaw = (note.userInfo?["format"] as? String) ?? "csv"
             handleAssistantClassificationExport(format: formatRaw)
         }
         .onReceive(NotificationCenter.default.publisher(for: .assistantDidRequestCohortPanel)) { _ in
+            guard role.handlesViewerCommands else { return }
             refreshCohortStudies()
             showInspector(.cohort)
         }
         .onReceive(NotificationCenter.default.publisher(for: .assistantDidRequestLesionDetection)) { _ in
+            guard role.handlesViewerCommands else { return }
             handleAssistantLesionDetection()
         }
         .onReceive(NotificationCenter.default.publisher(for: .assistantDidRequestLesionDetectorPanel)) { _ in
+            guard role.handlesViewerCommands else { return }
             showInspector(.lesionDetector)
         }
         .onReceive(NotificationCenter.default.publisher(for: .assistantDidRequestPETAttenuationCorrection)) { _ in
+            guard role.handlesViewerCommands else { return }
             handleAssistantPETACRequest()
         }
         .onReceive(NotificationCenter.default.publisher(for: .assistantDidRequestPETACPanel)) { _ in
+            guard role.handlesViewerCommands else { return }
             showInspector(.petAC)
         }
         .onChange(of: focusModeEnabled) { _, enabled in
@@ -312,11 +355,13 @@ public struct ContentView: View {
             browserVisibility = .all
             // Show the onboarding card set once per install, before the
             // user loads any data.
-            if !hasSeenOnboarding {
+            if role.handlesPresentationCommands && !hasSeenOnboarding {
                 // Defer by a runloop so the view hierarchy finishes mounting.
                 DispatchQueue.main.async { showOnboarding = true }
             }
-            activity.log("Tracer ready.", source: "System", level: .success, countAsUnread: false)
+            if role.handlesPresentationCommands {
+                activity.log("Tracer ready.", source: "System", level: .success, countAsUnread: false)
+            }
         }
         .tooltipHost()  // must wrap the whole window so tooltips escape any clipping
         .background(TracerTheme.windowBackground)
@@ -324,30 +369,52 @@ public struct ContentView: View {
 
     @ViewBuilder
     private var rootLayout: some View {
+        switch role {
+        case .unified:
+            if focusModeEnabled {
+                workstationScaffold
+            } else {
+                splitWorkstation
+            }
+        case .navigator:
+            navigatorScaffold
+        case .viewer:
+            viewerScaffold
+        }
+    }
+
+    private var navigatorScaffold: some View {
+        NavigationStack {
+            studyBrowser
+        }
+        .background(TracerTheme.worklistGradient)
+    }
+
+    @ViewBuilder
+    private var viewerScaffold: some View {
         if focusModeEnabled {
             workstationScaffold
         } else {
-            splitWorkstation
+            HStack(spacing: 0) {
+                workstationScaffold
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .layoutPriority(1)
+
+                Rectangle()
+                    .fill(TracerTheme.hairline)
+                    .frame(width: 1)
+
+                ControlsPanel()
+                    .environmentObject(vm)
+                    .frame(minWidth: 280, idealWidth: 320, maxWidth: 380, maxHeight: .infinity)
+            }
+            .background(TracerTheme.windowBackground)
         }
     }
 
     private var splitWorkstation: some View {
         NavigationSplitView(columnVisibility: $browserVisibility) {
-            StudyBrowserView(vm: vm,
-                             onImportFolder: {
-                                 directoryImporterMode = .open
-                                 showingDirectoryPicker = true
-                             },
-                             onIndexFolder: {
-                                 directoryImporterMode = .index
-                                 showingDirectoryPicker = true
-                             },
-                             onImportVolume: {
-                                 requestFileImport(mode: .volume)
-                             },
-                             onImportOverlay: {
-                                 requestFileImport(mode: .overlay)
-                             })
+            studyBrowser
                 .navigationSplitViewColumnWidth(min: 240, ideal: 320, max: 400)
         } content: {
             workstationScaffold
@@ -359,9 +426,28 @@ public struct ContentView: View {
         }
     }
 
+    private var studyBrowser: some View {
+        StudyBrowserView(vm: vm,
+                         onImportFolder: {
+                             directoryImporterMode = .open
+                             showingDirectoryPicker = true
+                         },
+                         onIndexFolder: {
+                             directoryImporterMode = .index
+                             showingDirectoryPicker = true
+                         },
+                         onImportVolume: {
+                             requestFileImport(mode: .volume)
+                         },
+                         onImportOverlay: {
+                             requestFileImport(mode: .overlay)
+                         })
+    }
+
     private var workstationScaffold: some View {
         VStack(spacing: 0) {
             customToolbar
+            workstationHeader
             MPRLayoutView()
                 .environmentObject(vm)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1796,42 +1882,50 @@ private struct KeyboardShortcutIfAvailable: ViewModifier {
 
 private struct TracerMenuCommandHandler: ViewModifier {
     @ObservedObject var vm: ViewerViewModel
+    let isEnabled: Bool
     let toggleFocusMode: () -> Void
     let showEngineInspector: (String) -> Void
 
     func body(content: Content) -> some View {
         content
-            .modifier(TracerToolMenuCommandHandler(vm: vm))
-            .modifier(TracerEditMenuCommandHandler(vm: vm, toggleFocusMode: toggleFocusMode))
-            .modifier(TracerEngineMenuCommandHandler(showEngineInspector: showEngineInspector))
+            .modifier(TracerToolMenuCommandHandler(vm: vm, isEnabled: isEnabled))
+            .modifier(TracerEditMenuCommandHandler(vm: vm, isEnabled: isEnabled, toggleFocusMode: toggleFocusMode))
+            .modifier(TracerEngineMenuCommandHandler(isEnabled: isEnabled, showEngineInspector: showEngineInspector))
     }
 }
 
 private struct TracerToolMenuCommandHandler: ViewModifier {
     @ObservedObject var vm: ViewerViewModel
+    let isEnabled: Bool
 
     func body(content: Content) -> some View {
         content
             .onReceive(NotificationCenter.default.publisher(for: .selectViewerTool)) { note in
+                guard isEnabled else { return }
                 guard let raw = note.userInfo?["tool"] as? String,
                       let tool = ViewerTool(rawValue: raw) else { return }
                 vm.setActiveViewerTool(tool)
             }
             .onReceive(NotificationCenter.default.publisher(for: .selectLabelingTool)) { note in
+                guard isEnabled else { return }
                 guard let raw = note.userInfo?["tool"] as? String,
                       let tool = LabelingTool(rawValue: raw) else { return }
                 vm.setActiveLabelingTool(tool)
             }
             .onReceive(NotificationCenter.default.publisher(for: .createLabelMap)) { _ in
+                guard isEnabled else { return }
                 vm.ensureActiveLabelMapForCurrentContext()
             }
             .onReceive(NotificationCenter.default.publisher(for: .clearMeasurements)) { _ in
+                guard isEnabled else { return }
                 vm.clearAllMeasurements()
             }
             .onReceive(NotificationCenter.default.publisher(for: .saveStudySession)) { _ in
+                guard isEnabled else { return }
                 vm.saveCurrentStudySession()
             }
             .onReceive(NotificationCenter.default.publisher(for: .newStudySession)) { _ in
+                guard isEnabled else { return }
                 vm.newStudyMeasurementSession()
             }
     }
@@ -1839,34 +1933,42 @@ private struct TracerToolMenuCommandHandler: ViewModifier {
 
 private struct TracerEditMenuCommandHandler: ViewModifier {
     @ObservedObject var vm: ViewerViewModel
+    let isEnabled: Bool
     let toggleFocusMode: () -> Void
 
     func body(content: Content) -> some View {
         content
             .onReceive(NotificationCenter.default.publisher(for: .undoLastEdit)) { _ in
+                guard isEnabled else { return }
                 vm.undoLastEdit()
             }
             .onReceive(NotificationCenter.default.publisher(for: .redoLastEdit)) { _ in
+                guard isEnabled else { return }
                 vm.redoLastEdit()
             }
             .onReceive(NotificationCenter.default.publisher(for: .resetEditableChanges)) { _ in
+                guard isEnabled else { return }
                 vm.resetEditableChanges()
             }
             .onReceive(NotificationCenter.default.publisher(for: .toggleLinkedZoomPan)) { _ in
+                guard isEnabled else { return }
                 vm.setLinkZoomPanAcrossPanes(!vm.linkZoomPanAcrossPanes)
             }
             .onReceive(NotificationCenter.default.publisher(for: .toggleFocusMode)) { _ in
+                guard isEnabled else { return }
                 toggleFocusMode()
             }
     }
 }
 
 private struct TracerEngineMenuCommandHandler: ViewModifier {
+    let isEnabled: Bool
     let showEngineInspector: (String) -> Void
 
     func body(content: Content) -> some View {
         content
             .onReceive(NotificationCenter.default.publisher(for: .showEngineInspector)) { note in
+                guard isEnabled else { return }
                 guard let raw = note.userInfo?["panel"] as? String else { return }
                 showEngineInspector(raw)
             }
