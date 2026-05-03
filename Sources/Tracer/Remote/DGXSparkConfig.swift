@@ -132,37 +132,80 @@ public struct DGXSparkConfig: Codable, Equatable, Sendable {
             "\(home)/Library/Application Support/NVIDIA/Sync/config/ssh_config"
         ]
 
-        let host = candidateConfigs
+        let profile = candidateConfigs
             .compactMap { try? String(contentsOfFile: $0) }
-            .compactMap(firstSparkHostAlias)
+            .compactMap(firstSparkHostProfile)
             .first
 
-        guard let host else { return nil }
+        guard let profile else { return nil }
+        let identityFile = profile.identityFile ?? (fm.fileExists(atPath: identity) ? identity : "")
         return DGXSparkConfig(
-            host: host,
-            user: NSUserName().isEmpty ? "ahmed" : NSUserName(),
-            port: 22,
-            identityFile: fm.fileExists(atPath: identity) ? identity : "",
+            host: profile.hostName ?? profile.alias,
+            user: profile.user ?? (NSUserName().isEmpty ? "ahmed" : NSUserName()),
+            port: profile.port ?? 22,
+            identityFile: identityFile,
             remoteWorkdir: "~/tracer-remote",
             enabled: enabled
         )
     }
 
-    private static func firstSparkHostAlias(in contents: String) -> String? {
+    private struct SSHHostProfile {
+        var alias: String
+        var hostName: String?
+        var user: String?
+        var port: Int?
+        var identityFile: String?
+    }
+
+    private static func firstSparkHostProfile(in contents: String) -> SSHHostProfile? {
+        var aliases: [String] = []
+        var options: [String: String] = [:]
+
+        func finishBlock() -> SSHHostProfile? {
+            guard let alias = aliases.first(where: {
+                !$0.contains("*") && !$0.contains("?") && $0.lowercased().contains("spark")
+            }) else {
+                return nil
+            }
+            let identity = options["identityfile"].map {
+                $0.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            }
+            return SSHHostProfile(
+                alias: alias,
+                hostName: options["hostname"],
+                user: options["user"],
+                port: options["port"].flatMap(Int.init),
+                identityFile: identity
+            )
+        }
+
         for rawLine in contents.split(whereSeparator: \.isNewline) {
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty, !line.hasPrefix("#") else { continue }
             let lower = line.lowercased()
-            guard lower.hasPrefix("host ") else { continue }
-            let aliases = line
-                .dropFirst(5)
+            if lower.hasPrefix("host ") {
+                if let profile = finishBlock() {
+                    return profile
+                }
+                aliases = line
+                    .dropFirst(5)
+                    .split(separator: " ")
+                    .map(String.init)
+                options = [:]
+                continue
+            }
+            guard !aliases.isEmpty else { continue }
+            let parts = line
                 .split(separator: " ")
                 .map(String.init)
-                .filter { !$0.contains("*") && !$0.contains("?") }
-            if let alias = aliases.first(where: { $0.lowercased().contains("spark") }) {
-                return alias
+            guard parts.count >= 2 else { continue }
+            let key = parts[0].lowercased()
+            let value = parts.dropFirst().joined(separator: " ")
+            if ["hostname", "user", "port", "identityfile"].contains(key) {
+                options[key] = value.trimmingCharacters(in: .whitespacesAndNewlines)
             }
         }
-        return nil
+        return finishBlock()
     }
 }
 

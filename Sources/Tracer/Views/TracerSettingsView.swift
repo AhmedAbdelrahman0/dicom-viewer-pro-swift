@@ -392,7 +392,7 @@ public struct DGXSparkSettingsTab: View {
             Section("Connection") {
                 Toggle("Enable DGX Spark remote execution", isOn: $config.enabled)
                 if let detected = DGXSparkConfig.detectedNVIDIASparkProfile(enabled: true),
-                   (config.host.isEmpty || config.host != detected.host) {
+                   config != detected {
                     Button {
                         config = detected
                         config.save()

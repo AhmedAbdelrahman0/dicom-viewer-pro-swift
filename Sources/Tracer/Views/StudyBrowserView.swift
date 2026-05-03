@@ -66,6 +66,14 @@ struct StudyBrowserView: View {
     @State private var fileBrowserEntries: [LocalFileBrowserEntry] = []
     @State private var fileBrowserError: String?
     @State private var fileBrowserLoadTask: Task<Void, Never>?
+    @AppStorage(SparkArchiveBrowser.storageKey) private var sparkArchiveRootPath: String = SparkArchiveBrowser.defaultRoot
+    @State private var dgxConfig = DGXSparkConfig.load()
+    @State private var sparkArchiveCurrentPath: String?
+    @State private var sparkArchiveEntries: [SparkArchiveEntry] = []
+    @State private var sparkArchiveError: String?
+    @State private var sparkArchiveIsLoading = false
+    @State private var sparkArchiveIsStaging = false
+    @State private var sparkArchiveTask: Task<Void, Never>?
     @State private var indexReloadTask: Task<Void, Never>?
 
     private let worklistDisplayPageSize = 300
@@ -116,6 +124,7 @@ struct StudyBrowserView: View {
             loadRemovedWorklistStudies()
             vm.reloadSavedArchiveRoots()
             vm.reloadVNAConnections()
+            dgxConfig = DGXSparkConfig.load()
             syncVNAConnectionForm()
             reloadIndexResults()
         }
@@ -133,6 +142,13 @@ struct StudyBrowserView: View {
             }
         }
         .onChange(of: vm.activeVNAConnectionID) { _, _ in syncVNAConnectionForm() }
+        .onReceive(NotificationCenter.default.publisher(for: .dgxSparkConfigDidChange)) { note in
+            if let config = note.object as? DGXSparkConfig {
+                dgxConfig = config
+            } else {
+                dgxConfig = DGXSparkConfig.load()
+            }
+        }
         .onChange(of: statusFilter) { _, _ in worklistDisplayLimit = worklistDisplayPageSize }
         .onChange(of: modalityFilter) { _, _ in worklistDisplayLimit = worklistDisplayPageSize }
         .onChange(of: dateFilter) { _, _ in worklistDisplayLimit = worklistDisplayPageSize }
@@ -926,6 +942,8 @@ struct StudyBrowserView: View {
                 }
             }
 
+            sparkArchiveSection
+
             if !filteredArchiveTreeRoots.isEmpty {
                 Section("Dataset Tree") {
                     ForEach(filteredArchiveTreeRoots) { node in
@@ -950,6 +968,104 @@ struct StudyBrowserView: View {
         }
         .scrollContentBackground(.hidden)
         .background(TracerTheme.sidebarBackground)
+    }
+
+    @ViewBuilder
+    private var sparkArchiveSection: some View {
+        Section("DGX Spark Archives") {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: "bolt.horizontal.fill")
+                        .foregroundColor(TracerTheme.accentBright)
+                    Text("Spark archive root")
+                        .font(.system(size: 11, weight: .semibold))
+                    Spacer()
+                    if sparkArchiveIsLoading || sparkArchiveIsStaging {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
+
+                TextField("Remote path", text: $sparkArchiveRootPath)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 10, design: .monospaced))
+                    .disabled(sparkArchiveIsLoading || sparkArchiveIsStaging)
+
+                HStack(spacing: 8) {
+                    Button {
+                        sparkArchiveRootPath = SparkArchiveBrowser.defaultRoot
+                        openSparkArchiveRoot()
+                    } label: {
+                        Label("AutoPET V", systemImage: "scope")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(!sparkArchiveIsReady || sparkArchiveIsLoading || sparkArchiveIsStaging)
+
+                    Button {
+                        openSparkArchiveRoot()
+                    } label: {
+                        Label("Browse", systemImage: "folder.badge.gearshape")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(!sparkArchiveIsReady || sparkArchiveIsLoading || sparkArchiveIsStaging)
+                }
+
+                if let readiness = dgxConfig.readinessMessage {
+                    Label(readiness, systemImage: "bolt.slash")
+                        .font(.system(size: 10))
+                        .foregroundColor(.orange)
+                } else {
+                    Text("Connected through \(dgxConfig.sshDestination). Remote folders are staged into a local cache before loading.")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
+                }
+            }
+            .padding(.vertical, 2)
+
+            if let current = sparkArchiveCurrentPath {
+                SparkArchiveHeaderRow(
+                    path: current,
+                    entryCount: filteredSparkArchiveEntries.count,
+                    totalCount: sparkArchiveEntries.count,
+                    isBusy: sparkArchiveIsLoading || sparkArchiveIsStaging,
+                    onUp: navigateSparkArchiveUp,
+                    onRefresh: reloadSparkArchiveEntries,
+                    onLoad: { loadSparkArchivePath(current, isDirectory: true) },
+                    onIndex: { indexSparkArchivePath(current) }
+                )
+            }
+
+            if let sparkArchiveError {
+                Label(sparkArchiveError, systemImage: "exclamationmark.triangle")
+                    .font(.system(size: 10))
+                    .foregroundColor(.orange)
+            }
+
+            if !filteredSparkArchiveEntries.isEmpty {
+                ForEach(filteredSparkArchiveEntries) { entry in
+                    SparkArchiveEntryRow(
+                        entry: entry,
+                        isBusy: sparkArchiveIsLoading || sparkArchiveIsStaging,
+                        onOpen: { openSparkArchiveEntry(entry) },
+                        onLoad: { loadSparkArchiveEntry(entry) },
+                        onIndex: { indexSparkArchiveEntry(entry) }
+                    )
+                }
+            } else if sparkArchiveCurrentPath != nil,
+                      !sparkArchiveIsLoading,
+                      sparkArchiveError == nil {
+                EmptyBrowserRow(
+                    systemImage: "folder",
+                    title: "No remote entries",
+                    subtitle: "This Spark archive folder is empty or filtered out"
+                )
+            }
+        }
     }
 
     private var viewerContent: some View {
@@ -1556,6 +1672,20 @@ struct StudyBrowserView: View {
         }
     }
 
+    private var filteredSparkArchiveEntries: [SparkArchiveEntry] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return sparkArchiveEntries }
+        return sparkArchiveEntries.filter {
+            $0.name.localizedCaseInsensitiveContains(query)
+            || $0.kindLabel.localizedCaseInsensitiveContains(query)
+            || $0.path.localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    private var sparkArchiveIsReady: Bool {
+        dgxConfig.readinessMessage == nil
+    }
+
     private func study(_ study: PACSWorklistStudy, belongsTo root: PACSArchiveRoot) -> Bool {
         study.series.contains { series in
             if root.contains(path: series.sourcePath) {
@@ -1839,6 +1969,152 @@ struct StudyBrowserView: View {
         #else
         vm.statusMessage = "Directory browsing is available on macOS."
         #endif
+    }
+
+    private func openSparkArchiveRoot() {
+        let trimmed = sparkArchiveRootPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            sparkArchiveError = "Set a Spark archive path first."
+            return
+        }
+        setSparkArchiveDirectory(trimmed)
+    }
+
+    private func setSparkArchiveDirectory(_ path: String) {
+        sparkArchiveCurrentPath = path
+        reloadSparkArchiveEntries()
+    }
+
+    private func reloadSparkArchiveEntries() {
+        guard let path = sparkArchiveCurrentPath else { return }
+        guard sparkArchiveIsReady else {
+            sparkArchiveError = dgxConfig.readinessMessage
+            return
+        }
+        sparkArchiveTask?.cancel()
+        sparkArchiveIsLoading = true
+        sparkArchiveError = nil
+        vm.statusMessage = "Browsing Spark archive \(path)..."
+        let config = dgxConfig
+        sparkArchiveTask = Task { @MainActor [path, config] in
+            let result = await Task.detached(priority: .userInitiated) {
+                do {
+                    let entries = try SparkArchiveBrowser.listDirectory(path: path, config: config)
+                    return (entries: entries, error: String?.none)
+                } catch {
+                    return (entries: [SparkArchiveEntry](), error: Optional(error.localizedDescription))
+                }
+            }.value
+            guard !Task.isCancelled, sparkArchiveCurrentPath == path else { return }
+            sparkArchiveIsLoading = false
+            if let error = result.error {
+                sparkArchiveEntries = []
+                sparkArchiveError = error
+                vm.statusMessage = error
+            } else {
+                sparkArchiveEntries = result.entries
+                sparkArchiveError = nil
+                vm.statusMessage = "Spark archive: \(result.entries.count) entries at \(path)"
+            }
+            sparkArchiveTask = nil
+        }
+    }
+
+    private func navigateSparkArchiveUp() {
+        guard let current = sparkArchiveCurrentPath else { return }
+        let parent = sparkParentPath(current)
+        guard parent != current else { return }
+        setSparkArchiveDirectory(parent)
+    }
+
+    private func openSparkArchiveEntry(_ entry: SparkArchiveEntry) {
+        if entry.isDirectory {
+            setSparkArchiveDirectory(entry.path)
+        } else {
+            loadSparkArchiveEntry(entry)
+        }
+    }
+
+    private func loadSparkArchiveEntry(_ entry: SparkArchiveEntry) {
+        loadSparkArchivePath(entry.path, isDirectory: entry.isDirectory)
+    }
+
+    private func indexSparkArchiveEntry(_ entry: SparkArchiveEntry) {
+        guard entry.isDirectory else { return }
+        indexSparkArchivePath(entry.path)
+    }
+
+    private func loadSparkArchivePath(_ path: String, isDirectory: Bool) {
+        stageSparkArchivePath(path, isDirectory: isDirectory) { localURL in
+            Task { @MainActor in
+                if isDirectory {
+                    await vm.loadDICOMDirectory(url: localURL)
+                } else {
+                    await dispatchDroppedURL(localURL)
+                }
+            }
+        }
+    }
+
+    private func indexSparkArchivePath(_ path: String) {
+        guard !vm.isIndexing else { return }
+        stageSparkArchivePath(path, isDirectory: true) { localURL in
+            Task { @MainActor in
+                await vm.indexDirectory(url: localURL, modelContext: modelContext)
+                reloadIndexResults()
+            }
+        }
+    }
+
+    private func stageSparkArchivePath(_ path: String,
+                                       isDirectory: Bool,
+                                       completion: @escaping (URL) -> Void) {
+        guard sparkArchiveIsReady else {
+            sparkArchiveError = dgxConfig.readinessMessage
+            return
+        }
+        sparkArchiveIsStaging = true
+        sparkArchiveError = nil
+        vm.statusMessage = "Staging Spark archive \(sparkLastPathComponent(path))..."
+        let config = dgxConfig
+        Task { @MainActor [path, isDirectory, config] in
+            let result = await Task.detached(priority: .userInitiated) {
+                do {
+                    let localURL = try SparkArchiveBrowser.stage(path: path,
+                                                                 isDirectory: isDirectory,
+                                                                 config: config)
+                    return (url: Optional(localURL), error: String?.none)
+                } catch {
+                    return (url: URL?.none, error: Optional(error.localizedDescription))
+                }
+            }.value
+            sparkArchiveIsStaging = false
+            if let error = result.error {
+                sparkArchiveError = error
+                vm.statusMessage = "Spark stage error: \(error)"
+                return
+            }
+            guard let localURL = result.url else { return }
+            vm.statusMessage = "Staged Spark archive to \(localURL.lastPathComponent)"
+            completion(localURL)
+        }
+    }
+
+    private func sparkParentPath(_ path: String) -> String {
+        if path == "/" || path == "~" { return path }
+        if path.hasPrefix("~/") {
+            let suffix = String(path.dropFirst(2))
+            let parent = (suffix as NSString).deletingLastPathComponent
+            if parent == "." || parent.isEmpty { return "~" }
+            return "~/" + parent
+        }
+        let parent = (path as NSString).deletingLastPathComponent
+        return parent.isEmpty || parent == "." ? "/" : parent
+    }
+
+    private func sparkLastPathComponent(_ path: String) -> String {
+        let trimmed = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return trimmed.split(separator: "/").last.map(String.init) ?? path
     }
 
     private func setFileBrowserDirectory(_ url: URL) {
@@ -3246,6 +3522,168 @@ private struct FileBrowserEntryRow: View {
                     Label("Index Directory", systemImage: "externaldrive.badge.plus")
                 }
             }
+        }
+    }
+}
+
+private struct SparkArchiveHeaderRow: View {
+    let path: String
+    let entryCount: Int
+    let totalCount: Int
+    let isBusy: Bool
+    let onUp: () -> Void
+    let onRefresh: () -> Void
+    let onLoad: () -> Void
+    let onIndex: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "network")
+                    .foregroundColor(TracerTheme.accent)
+                Text((path as NSString).lastPathComponent.isEmpty ? path : (path as NSString).lastPathComponent)
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+                Spacer()
+                Button(action: onUp) {
+                    Image(systemName: "arrow.up")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .disabled(isBusy)
+                .help("Go to parent directory")
+                Button(action: onRefresh) {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .disabled(isBusy)
+                .help("Refresh Spark directory")
+            }
+
+            Text(path)
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundColor(.secondary)
+                .lineLimit(2)
+
+            HStack(spacing: 6) {
+                Button(action: onLoad) {
+                    Label("Stage + Load", systemImage: "rectangle.3.group")
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(isBusy)
+
+                Button(action: onIndex) {
+                    Label("Stage + Index", systemImage: "externaldrive.badge.plus")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(isBusy)
+
+                Spacer()
+                Text("\(entryCount)/\(totalCount) items")
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+private struct SparkArchiveEntryRow: View {
+    let entry: SparkArchiveEntry
+    let isBusy: Bool
+    let onOpen: () -> Void
+    let onLoad: () -> Void
+    let onIndex: () -> Void
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: systemImage)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(entry.isDirectory ? TracerTheme.accent : .secondary)
+                .frame(width: 20)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.name)
+                    .font(.system(size: 11, weight: entry.isDirectory ? .semibold : .regular))
+                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(entry.detailText)
+                    if let modifiedAt = entry.modifiedAt {
+                        Text(modifiedAt.formatted(date: .abbreviated, time: .shortened))
+                    }
+                }
+                .font(.system(size: 9))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+            }
+
+            Spacer(minLength: 4)
+
+            Button(action: onOpen) {
+                Image(systemName: entry.isDirectory ? "chevron.right" : "arrow.down.circle")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .disabled(isBusy)
+            .help(entry.isDirectory ? "Open remote folder" : "Stage and open remote file")
+
+            Button(action: onLoad) {
+                Image(systemName: "rectangle.3.group")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .disabled(isBusy)
+            .help(entry.isDirectory ? "Stage and load this remote directory" : "Stage and load this remote file")
+
+            if entry.isDirectory {
+                Button(action: onIndex) {
+                    Image(systemName: "externaldrive.badge.plus")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .disabled(isBusy)
+                .help("Stage and index this remote directory")
+            }
+        }
+        .padding(.vertical, 2)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if !isBusy { onOpen() }
+        }
+        .contextMenu {
+            Button {
+                onOpen()
+            } label: {
+                Label(entry.isDirectory ? "Open Remote Folder" : "Stage and Open File",
+                      systemImage: entry.isDirectory ? "folder" : "arrow.down.circle")
+            }
+            Button {
+                onLoad()
+            } label: {
+                Label(entry.isDirectory ? "Stage Directory as Study" : "Stage File",
+                      systemImage: "rectangle.3.group")
+            }
+            if entry.isDirectory {
+                Button {
+                    onIndex()
+                } label: {
+                    Label("Stage and Index Directory", systemImage: "externaldrive.badge.plus")
+                }
+            }
+        }
+    }
+
+    private var systemImage: String {
+        if entry.isDirectory { return "folder" }
+        switch entry.kindLabel {
+        case "NIfTI", "MetaImage": return "cube.box"
+        case "DICOM": return "square.stack.3d.up"
+        case "JSON": return "curlybraces"
+        case "Table": return "tablecells"
+        default: return "doc"
         }
     }
 }

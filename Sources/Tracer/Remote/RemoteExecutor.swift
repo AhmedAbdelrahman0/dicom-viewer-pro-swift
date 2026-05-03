@@ -156,6 +156,32 @@ public final class RemoteExecutor: @unchecked Sendable {
         }
     }
 
+    /// Pull a remote directory tree down to `localURL`.
+    public func downloadDirectory(_ remotePath: String, toLocal localURL: URL) throws {
+        try FileManager.default.createDirectory(
+            at: localURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        if FileManager.default.fileExists(atPath: localURL.path) {
+            try FileManager.default.removeItem(at: localURL)
+        }
+        var args: [String] = []
+        if !config.identityFile.isEmpty {
+            args.append(contentsOf: ["-i", (config.identityFile as NSString).expandingTildeInPath])
+        }
+        args.append(contentsOf: [
+            "-P", String(config.port),
+            "-r",
+            "-q",
+            "\(config.sshDestination):\(remotePath)",
+            localURL.path
+        ])
+        let result = try runLocalBinary(path: "/usr/bin/scp", arguments: args)
+        if result.exitCode != 0 {
+            throw Error.downloadFailed("exit \(result.exitCode): \(result.stderr)")
+        }
+    }
+
     /// Remove a file or directory on the remote host. Swallows "not found"
     /// errors because cleanup is always best-effort.
     public func remove(_ remotePath: String) {
