@@ -1213,8 +1213,15 @@ def image_array(image, dtype=None):
 
 
 def ensure_same_geometry(reference, moving, field):
+    mismatch = geometry_mismatch(reference, moving)
+    if mismatch:
+        name, ref, mov = mismatch
+        raise ValueError(f"{field} {name} does not match CT/PET reference: {mov} vs {ref}")
+
+
+def geometry_mismatch(reference, moving):
     if reference.GetSize() != moving.GetSize():
-        raise ValueError(f"{field} size does not match CT/PET reference: {moving.GetSize()} vs {reference.GetSize()}")
+        return ("size", reference.GetSize(), moving.GetSize())
 
     def close_tuple(a, b, tolerance):
         return len(a) == len(b) and all(abs(float(x) - float(y)) <= tolerance for x, y in zip(a, b))
@@ -1226,7 +1233,33 @@ def ensure_same_geometry(reference, moving, field):
     ]
     for name, ref, mov, tolerance in checks:
         if not close_tuple(ref, mov, tolerance):
-            raise ValueError(f"{field} {name} does not match CT/PET reference: {mov} vs {ref}")
+            return (name, ref, mov)
+    return None
+
+
+def resample_to_reference(moving, reference, field, pixel_kind="float"):
+    mismatch = geometry_mismatch(reference, moving)
+    if not mismatch:
+        return moving
+    _, sitk, _ = require_imaging_stack()
+    name, ref, mov = mismatch
+    print(json.dumps({
+        "stage": "resample_to_reference",
+        "field": field,
+        "mismatch": name,
+        "moving": str(mov),
+        "reference": str(ref),
+        "interpolator": "nearest" if pixel_kind == "label" else "linear",
+    }), flush=True)
+    interpolator = sitk.sitkNearestNeighbor if pixel_kind == "label" else sitk.sitkLinear
+    output_type = sitk.sitkUInt8 if pixel_kind == "label" else sitk.sitkFloat32
+    resampled = sitk.Resample(moving,
+                              reference,
+                              sitk.Transform(),
+                              interpolator,
+                              0,
+                              output_type)
+    return resampled
 
 
 def cast_label(label_image):
@@ -1384,18 +1417,40 @@ def write_nnunet_case(ct_image, pet_image, fg_points, bg_points, case_id, out_di
     write_like(bg_arr, ct_image, out_dir / f"{case_id}_0003.nii.gz")
 
 
+def expected_case_outputs(case, dataset_dir):
+    case_id = case["caseID"]
+    split = case.get("split", "train")
+    images_dir = dataset_dir / ("imagesTs" if split == "test" else "imagesTr")
+    outputs = [images_dir / f"{case_id}_{channel:04d}.nii.gz" for channel in range(4)]
+    if case.get("labelPath"):
+        outputs.append(dataset_dir / "labelsTr" / f"{case_id}.nii.gz")
+    return outputs
+
+
+def case_outputs_exist(case, dataset_dir):
+    return all(path.exists() for path in expected_case_outputs(case, dataset_dir))
+
+
 def prepare_case_for_nnunet(case, dataset_dir, experiment):
     np, _, _ = require_imaging_stack()
     case_id = case["caseID"]
     split = case.get("split", "train")
     ct_image = read_image(case["ctPath"])
     pet_image = read_image(case["petPath"])
+    pet_image = resample_to_reference(pet_image,
+                                      ct_image,
+                                      f"{case_id} PET",
+                                      pixel_kind="float")
     ensure_same_geometry(ct_image, pet_image, f"{case_id} PET")
     pet_arr = image_array(pet_image, np.float32)
 
     label_arr = None
     if case.get("labelPath"):
         label_image = cast_label(read_image(case["labelPath"]))
+        label_image = resample_to_reference(label_image,
+                                            ct_image,
+                                            f"{case_id} label",
+                                            pixel_kind="label")
         ensure_same_geometry(ct_image, label_image, f"{case_id} label")
         label_arr = image_array(label_image, np.uint8)
     elif split in ("train", "validation"):
@@ -1463,13 +1518,18 @@ def prepare_nnunet_dataset(manifest, workdir, args=None):
             "caseID": case["caseID"],
             "split": case.get("split", "train"),
         }), flush=True)
-        prepare_case_for_nnunet(case, dataset_dir, manifest.experiment)
+        skipped = False
+        if case_outputs_exist(case, dataset_dir):
+            skipped = True
+        else:
+            prepare_case_for_nnunet(case, dataset_dir, manifest.experiment)
         print(json.dumps({
             "stage": "prepare_case_done",
             "index": index,
             "total": len(cases),
             "caseID": case["caseID"],
             "split": case.get("split", "train"),
+            "skipped": skipped,
         }), flush=True)
     write_dataset_json(dataset_dir, dataset_id, len(manifest.labeled_cases))
     write_splits(pre, dataset_id, manifest.train_cases, manifest.validation_cases)
