@@ -60,6 +60,8 @@ struct AutoContourPanel: View {
 
             if let selectedTemplate {
                 HStack(spacing: 6) {
+                    Label(selectedTemplate.clinicalPerspective.rawValue,
+                          systemImage: perspectiveIcon(selectedTemplate.clinicalPerspective))
                     Label(selectedTemplate.modalities.map(\.displayName).joined(separator: "/"),
                           systemImage: "rectangle.stack")
                     if let entry = selectedTemplate.preferredNNUnetEntryID.flatMap(NNUnetCatalog.byID) {
@@ -151,6 +153,11 @@ struct AutoContourPanel: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
+
+            Label(session.protocolTemplate.clinicalPerspective.rawValue,
+                  systemImage: perspectiveIcon(session.protocolTemplate.clinicalPerspective))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
 
             if !session.volumeDescription.isEmpty {
                 Text(session.volumeDescription)
@@ -378,6 +385,14 @@ struct AutoContourPanel: View {
         case .info: return .secondary
         case .warning: return .orange
         case .error: return .red
+        }
+    }
+
+    private func perspectiveIcon(_ perspective: AutoContourClinicalPerspective) -> String {
+        switch perspective {
+        case .radiationOncology: return "scope"
+        case .nuclearRadiology: return "atom"
+        case .neuroOncology: return "brain.head.profile"
         }
     }
 }

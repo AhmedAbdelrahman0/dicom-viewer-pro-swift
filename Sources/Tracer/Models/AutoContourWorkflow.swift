@@ -29,6 +29,14 @@ public enum AutoContourQAFindingSeverity: String, CaseIterable, Identifiable, Se
     public var id: String { rawValue }
 }
 
+public enum AutoContourClinicalPerspective: String, CaseIterable, Identifiable, Sendable {
+    case radiationOncology = "Radiation Oncology"
+    case nuclearRadiology = "Nuclear Radiology"
+    case neuroOncology = "Neuro Oncology"
+
+    public var id: String { rawValue }
+}
+
 public struct AutoContourStructureTemplate: Identifiable, Sendable {
     public let id: String
     public let name: String
@@ -64,6 +72,7 @@ public struct AutoContourProtocolTemplate: Identifiable, Sendable {
     public let shortName: String
     public let description: String
     public let modalities: [Modality]
+    public let clinicalPerspective: AutoContourClinicalPerspective
     public let presetName: String
     public let preferredRoutePrompt: String
     public let preferredNNUnetEntryID: String?
@@ -74,6 +83,7 @@ public struct AutoContourProtocolTemplate: Identifiable, Sendable {
                 shortName: String,
                 description: String,
                 modalities: [Modality],
+                clinicalPerspective: AutoContourClinicalPerspective = .radiationOncology,
                 presetName: String,
                 preferredRoutePrompt: String,
                 preferredNNUnetEntryID: String? = nil,
@@ -83,6 +93,7 @@ public struct AutoContourProtocolTemplate: Identifiable, Sendable {
         self.shortName = shortName
         self.description = description
         self.modalities = modalities
+        self.clinicalPerspective = clinicalPerspective
         self.presetName = presetName
         self.preferredRoutePrompt = preferredRoutePrompt
         self.preferredNNUnetEntryID = preferredNNUnetEntryID
@@ -191,7 +202,11 @@ public enum AutoContourWorkflow {
         abdomenOAR,
         pelvisProstateOAR,
         neuroBrainTumor,
-        petOncologyLesions
+        petOncologyLesions,
+        fdgPETTumorBurden,
+        psmaPETTumorBurden,
+        rptDosimetryVOI,
+        brainPETQuantification
     ]
 
     public static func template(id: String) -> AutoContourProtocolTemplate? {
@@ -321,6 +336,25 @@ public enum AutoContourWorkflow {
             ))
         }
 
+        if template.clinicalPerspective == .nuclearRadiology {
+            let modality = referenceVolume.map { Modality.normalize($0.modality) }
+            if let modality, modality != .PT, modality != .NM {
+                findings.append(AutoContourQAFinding(
+                    severity: .warning,
+                    message: "Nuclear medicine contours should be reviewed with the PET/SPECT/NM activity series or fused activity overlay."
+                ))
+            }
+            if template.structures.contains(where: { $0.category == .nuclearUptake }) {
+                let presentUptakeClasses = labelMap.classes.filter { $0.category == .nuclearUptake }
+                if presentUptakeClasses.isEmpty {
+                    findings.append(AutoContourQAFinding(
+                        severity: .warning,
+                        message: "No physiologic or excretion uptake review labels are present."
+                    ))
+                }
+            }
+        }
+
         let duplicateNames = Dictionary(grouping: labelMap.classes.map { normalized($0.name) }, by: { $0 })
             .filter { !$0.key.isEmpty && $0.value.count > 1 }
             .map(\.key)
@@ -382,6 +416,7 @@ public enum AutoContourWorkflow {
         var metadata: [String: String] = [
             "autoContour.protocolID": session.protocolTemplate.id,
             "autoContour.protocol": session.protocolTemplate.displayName,
+            "autoContour.perspective": session.protocolTemplate.clinicalPerspective.rawValue,
             "autoContour.status": session.status.rawValue,
             "autoContour.expectedStructures": "\(session.protocolTemplate.structures.count)",
             "autoContour.routedStructures": "\(session.routedStructureCount)"
@@ -455,6 +490,50 @@ public enum AutoContourWorkflow {
                                      aliases: aliases,
                                      priority: priority,
                                      reviewHint: "Physician review required before treatment-planning export.",
+                                     color: color)
+    }
+
+    private static func nuclearUptake(_ id: String,
+                                      _ name: String,
+                                      _ aliases: [String] = [],
+                                      priority: AutoContourStructurePriority = .recommended,
+                                      requiresNonEmptyMask: Bool = false,
+                                      color: Color) -> AutoContourStructureTemplate {
+        AutoContourStructureTemplate(id: id,
+                                     name: name,
+                                     category: .nuclearUptake,
+                                     aliases: aliases,
+                                     priority: priority,
+                                     requiresNonEmptyMask: requiresNonEmptyMask,
+                                     reviewHint: "Review uptake pattern, excretion, motion, and expected tracer biodistribution.",
+                                     color: color)
+    }
+
+    private static func lesionVOI(_ id: String,
+                                  _ name: String,
+                                  _ aliases: [String] = [],
+                                  priority: AutoContourStructurePriority = .required,
+                                  color: Color) -> AutoContourStructureTemplate {
+        AutoContourStructureTemplate(id: id,
+                                     name: name,
+                                     category: .lesion,
+                                     aliases: aliases,
+                                     priority: priority,
+                                     reviewHint: "Confirm malignant uptake, exclude physiologic activity, and verify lesion VOI boundaries.",
+                                     color: color)
+    }
+
+    private static func brainVOI(_ id: String,
+                                 _ name: String,
+                                 _ aliases: [String] = [],
+                                 priority: AutoContourStructurePriority = .recommended,
+                                 color: Color) -> AutoContourStructureTemplate {
+        AutoContourStructureTemplate(id: id,
+                                     name: name,
+                                     category: .brain,
+                                     aliases: aliases,
+                                     priority: priority,
+                                     reviewHint: "Review PET/MR alignment and reference-region suitability before quantification.",
                                      color: color)
     }
 
@@ -581,6 +660,7 @@ public enum AutoContourWorkflow {
         shortName: "Brain Tumor",
         description: "Brain MRI tumor-compartment review set.",
         modalities: [.MR],
+        clinicalPerspective: .neuroOncology,
         presetName: "AutoContour Brain Tumor",
         preferredRoutePrompt: "brain tumor glioma BraTS edema enhancing tumor core",
         preferredNNUnetEntryID: "BraTS-GLI",
@@ -598,6 +678,7 @@ public enum AutoContourWorkflow {
         shortName: "PET Lesions",
         description: "Whole-body PET/CT lesion workflow with uptake classification review labels.",
         modalities: [.PT, .CT],
+        clinicalPerspective: .nuclearRadiology,
         presetName: "AutoContour PET Oncology",
         preferredRoutePrompt: "whole body PET CT FDG PSMA lesion tumor burden LesionTracer AutoPET",
         preferredNNUnetEntryID: "LesionTracer-AutoPETIII",
@@ -641,6 +722,151 @@ public enum AutoContourWorkflow {
                                          requiresNonEmptyMask: false,
                                          reviewHint: "Use for diffuse marrow activation patterns.",
                                          color: Color(r: 210, g: 140, b: 210))
+        ]
+    )
+
+    private static let fdgPETTumorBurden = AutoContourProtocolTemplate(
+        id: "fdg-pet-tumor-burden",
+        displayName: "FDG PET Tumor Burden VOIs",
+        shortName: "FDG Tumor Burden",
+        description: "Nuclear radiology PET/CT VOI workflow for TMTV/TLG review and physiologic-uptake exclusions.",
+        modalities: [.PT, .CT],
+        clinicalPerspective: .nuclearRadiology,
+        presetName: "AutoContour FDG PET Tumor Burden",
+        preferredRoutePrompt: "whole body FDG PET CT tumor burden tmtv tlg lymphoma metastases LesionTracer AutoPET",
+        preferredNNUnetEntryID: "LesionTracer-AutoPETIII",
+        structures: [
+            lesionVOI("fdg-avid-lesion", "FDG-avid lesion",
+                      ["pet_lesion", "fdg_avid_lesion", "tumor", "tumour", "metastasis", "lymphoma"],
+                      color: Color(r: 255, g: 70, b: 64)),
+            lesionVOI("primary-tumor", "Primary tumor",
+                      ["primary", "primary lesion", "primary tumor"], priority: .recommended,
+                      color: Color(r: 240, g: 105, b: 70)),
+            lesionVOI("nodal-disease", "Nodal disease",
+                      ["node", "lymph node", "nodal", "adenopathy"], priority: .recommended,
+                      color: Color(r: 255, g: 120, b: 90)),
+            lesionVOI("extranodal-disease", "Extranodal disease",
+                      ["extranodal", "distant metastasis", "metastases"], priority: .recommended,
+                      color: Color(r: 230, g: 95, b: 145)),
+            nuclearUptake("physiologic-uptake", "Physiological uptake",
+                          ["physiologic uptake", "normal uptake", "brain uptake", "myocardial uptake"],
+                          color: Color(r: 90, g: 175, b: 235)),
+            nuclearUptake("urinary-activity", "Urinary excretion",
+                          ["urine", "renal pelvis", "ureter", "bladder activity", "urinary activity"],
+                          color: Color(r: 95, g: 210, b: 230)),
+            nuclearUptake("inflammation", "Inflammation",
+                          ["infection", "reactive", "sarcoid"], priority: .optional,
+                          color: Color(r: 245, g: 180, b: 70)),
+            nuclearUptake("brown-fat", "Brown fat",
+                          ["brown fat", "supraclavicular fat"], priority: .optional,
+                          color: Color(r: 170, g: 120, b: 80)),
+            nuclearUptake("injection-site", "Injection site activity",
+                          ["injection site", "dose infiltration", "extravasation"], priority: .optional,
+                          color: Color(r: 210, g: 115, b: 185))
+        ]
+    )
+
+    private static let psmaPETTumorBurden = AutoContourProtocolTemplate(
+        id: "psma-pet-tumor-burden",
+        displayName: "PSMA PET Tumor Burden VOIs",
+        shortName: "PSMA Tumor Burden",
+        description: "PSMA PET/CT VOI workflow for prostate-cancer disease burden, eligibility review, and physiologic uptake exclusions.",
+        modalities: [.PT, .CT],
+        clinicalPerspective: .nuclearRadiology,
+        presetName: "AutoContour PSMA PET Tumor Burden",
+        preferredRoutePrompt: "whole body PSMA PET CT prostate cancer metastases lesion tumor burden LesionTracer",
+        preferredNNUnetEntryID: "LesionTracer-AutoPETIII",
+        structures: [
+            lesionVOI("psma-avid-lesion", "PSMA-avid lesion",
+                      ["pet_lesion", "psma lesion", "psma_avid_lesion", "prostate cancer lesion"],
+                      color: Color(r: 255, g: 75, b: 82)),
+            lesionVOI("prostate-bed", "Prostate/prostate bed",
+                      ["prostate", "prostate bed", "local recurrence"], priority: .recommended,
+                      color: Color(r: 245, g: 120, b: 85)),
+            lesionVOI("nodal-metastasis", "Nodal metastasis",
+                      ["node", "lymph node", "nodal disease"], priority: .recommended,
+                      color: Color(r: 255, g: 150, b: 90)),
+            lesionVOI("bone-metastasis", "Bone metastasis",
+                      ["osseous metastasis", "skeletal metastasis", "bone lesion"], priority: .recommended,
+                      color: Color(r: 230, g: 210, b: 120)),
+            lesionVOI("visceral-metastasis", "Visceral metastasis",
+                      ["liver metastasis", "lung metastasis", "visceral disease"], priority: .recommended,
+                      color: Color(r: 230, g: 95, b: 145)),
+            nuclearUptake("salivary-uptake", "Salivary gland uptake",
+                          ["parotid uptake", "submandibular uptake", "salivary"], color: Color(r: 85, g: 205, b: 145)),
+            nuclearUptake("lacrimal-uptake", "Lacrimal gland uptake",
+                          ["lacrimal uptake", "tear gland"], priority: .optional,
+                          color: Color(r: 130, g: 210, b: 245)),
+            nuclearUptake("renal-urinary-activity", "Renal/urinary excretion",
+                          ["kidney uptake", "renal activity", "urine", "bladder activity"],
+                          color: Color(r: 95, g: 210, b: 230)),
+            nuclearUptake("bowel-activity", "Bowel activity",
+                          ["bowel uptake", "intestinal activity"], priority: .optional,
+                          color: Color(r: 220, g: 140, b: 105))
+        ]
+    )
+
+    private static let rptDosimetryVOI = AutoContourProtocolTemplate(
+        id: "rpt-dosimetry-voi",
+        displayName: "RPT Dosimetry VOIs",
+        shortName: "RPT Dosimetry",
+        description: "Radiopharmaceutical therapy VOI set for absorbed-dose, organ-risk, and lesion time-activity review.",
+        modalities: [.NM, .PT, .CT],
+        clinicalPerspective: .nuclearRadiology,
+        presetName: "AutoContour RPT Dosimetry",
+        preferredRoutePrompt: "radiopharmaceutical therapy dosimetry SPECT PET kidneys liver spleen salivary glands tumor VOI",
+        preferredNNUnetEntryID: "TotalSegmentatorCT",
+        structures: [
+            lesionVOI("treated-lesion", "Treated lesion",
+                      ["tumor", "lesion", "target lesion", "dominant lesion"], color: Color(r: 255, g: 75, b: 82)),
+            organ("kidney-left", "Left kidney", ["kidney_left", "left kidney", "left renal cortex"], priority: .required, color: Color(r: 95, g: 140, b: 235)),
+            organ("kidney-right", "Right kidney", ["kidney_right", "right kidney", "right renal cortex"], priority: .required, color: Color(r: 85, g: 120, b: 215)),
+            organ("liver", "Liver", ["liver", "hepatic"], priority: .required, color: Color(r: 230, g: 164, b: 72)),
+            organ("spleen", "Spleen", ["spleen"], priority: .recommended, color: Color(r: 180, g: 82, b: 160)),
+            organ("parotid-left", "Left parotid", ["left parotid", "parotid left"], priority: .recommended, color: Color(r: 115, g: 215, b: 145)),
+            organ("parotid-right", "Right parotid", ["right parotid", "parotid right"], priority: .recommended, color: Color(r: 90, g: 195, b: 125)),
+            organ("submandibular-left", "Left submandibular gland", ["left submandibular", "submandibular left"], priority: .recommended, color: Color(r: 90, g: 205, b: 170)),
+            organ("submandibular-right", "Right submandibular gland", ["right submandibular", "submandibular right"], priority: .recommended, color: Color(r: 80, g: 185, b: 150)),
+            organ("bone-marrow", "Bone marrow", ["marrow", "vertebral marrow", "red marrow"], priority: .recommended, color: Color(r: 210, g: 140, b: 210)),
+            organ("blood-pool", "Blood pool", ["aorta", "blood pool", "cardiac blood pool"], priority: .optional, color: Color(r: 220, g: 64, b: 64)),
+            nuclearUptake("urinary-excretion", "Urinary excretion",
+                          ["urine", "bladder activity", "renal pelvis", "ureter"], priority: .recommended,
+                          color: Color(r: 95, g: 210, b: 230))
+        ]
+    )
+
+    private static let brainPETQuantification = AutoContourProtocolTemplate(
+        id: "brain-pet-quantification",
+        displayName: "Brain PET Quantification VOIs",
+        shortName: "Brain PET",
+        description: "Brain PET VOI workflow for cortical uptake, reference regions, and PET/MR alignment review.",
+        modalities: [.PT, .MR, .CT],
+        clinicalPerspective: .nuclearRadiology,
+        presetName: "AutoContour Brain PET Quantification",
+        preferredRoutePrompt: "brain PET quantification cortex cerebellum striatum reference region MRI assisted",
+        structures: [
+            brainVOI("composite-cortical-target", "Composite cortical target",
+                     ["cortical target", "global cortex", "neocortex"], priority: .required,
+                     color: Color(r: 255, g: 135, b: 85)),
+            brainVOI("cerebellar-gray", "Cerebellar gray",
+                     ["cerebellum gray", "cerebellar cortex", "reference cerebellum"], priority: .required,
+                     color: Color(r: 95, g: 210, b: 130)),
+            brainVOI("cerebellar-white", "Cerebellar white matter",
+                     ["cerebellar white", "white matter reference"], color: Color(r: 150, g: 200, b: 160)),
+            brainVOI("frontal-cortex", "Frontal cortex",
+                     ["frontal"], color: Color(r: 245, g: 145, b: 90)),
+            brainVOI("temporal-cortex", "Temporal cortex",
+                     ["temporal"], color: Color(r: 235, g: 105, b: 145)),
+            brainVOI("parietal-cortex", "Parietal cortex",
+                     ["parietal"], color: Color(r: 110, g: 175, b: 245)),
+            brainVOI("occipital-cortex", "Occipital cortex",
+                     ["occipital"], color: Color(r: 150, g: 135, b: 235)),
+            brainVOI("caudate", "Caudate",
+                     ["caudate nucleus"], color: Color(r: 240, g: 210, b: 90)),
+            brainVOI("putamen", "Putamen",
+                     ["putamen"], color: Color(r: 225, g: 190, b: 85)),
+            brainVOI("white-matter", "White matter",
+                     ["centrum semiovale", "deep white matter"], color: Color(r: 200, g: 200, b: 200))
         ]
     )
 }
