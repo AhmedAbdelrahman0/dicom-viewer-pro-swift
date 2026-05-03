@@ -10,6 +10,8 @@ public enum BrainPETTracer: String, CaseIterable, Identifiable, Codable, Sendabl
     case tauMK6240
     case tauPI2620
     case tauRO948
+    case spectHMPAO
+    case spectDaTscan
     case unknown
 
     public var id: String { rawValue }
@@ -25,6 +27,8 @@ public enum BrainPETTracer: String, CaseIterable, Identifiable, Codable, Sendabl
         case .tauMK6240: return "MK-6240 tau"
         case .tauPI2620: return "PI-2620 tau"
         case .tauRO948: return "RO948 tau"
+        case .spectHMPAO: return "HMPAO SPECT"
+        case .spectDaTscan: return "DaTscan SPECT"
         case .unknown: return "Unknown brain PET"
         }
     }
@@ -37,6 +41,10 @@ public enum BrainPETTracer: String, CaseIterable, Identifiable, Codable, Sendabl
             return .amyloid
         case .tauFlortaucipir, .tauMK6240, .tauPI2620, .tauRO948:
             return .tau
+        case .spectHMPAO:
+            return .spectPerfusion
+        case .spectDaTscan:
+            return .dopamineTransporter
         case .unknown:
             return .generic
         }
@@ -62,6 +70,8 @@ public enum BrainPETAnalysisFamily: String, Codable, Sendable {
     case fdg
     case amyloid
     case tau
+    case spectPerfusion
+    case dopamineTransporter
     case generic
 }
 
@@ -236,6 +246,14 @@ public enum BrainPETNormalDatabaseCatalog {
             access: "Free keycode request; license-controlled software/data",
             suggestedUse: "FDG brain z-score surface projection workflow and test normal databases",
             url: "https://neurostat-3d-ssp.github.io/neurostat/"
+        ),
+        BrainPETNormalDatasetDescriptor(
+            id: "spect-neuro-local",
+            name: "Local SPECT normal database",
+            tracerFamilies: [.spectPerfusion, .dopamineTransporter],
+            access: "Institution-built/reference phantom controlled",
+            suggestedUse: "HMPAO perfusion z-scores and DaTscan striatal binding ratio reference ranges",
+            url: "local://neuro-spect-reference"
         )
     ]
 }
@@ -615,6 +633,13 @@ public struct BrainPETReport: Codable, Equatable, Sendable {
         case .tau:
             return tauGrade.map { "Tau \(String(format: "%.3f", targetSUVR ?? 0)); \($0.stage)." }
                 ?? String(format: "Tau target SUVR %.3f.", targetSUVR ?? 0)
+        case .spectPerfusion:
+            let lowRegions = regions.filter { ($0.zScore ?? 0) <= -2 }
+            return lowRegions.isEmpty
+                ? "SPECT perfusion analysis complete; no z <= -2 regions with the selected normal database."
+                : "SPECT perfusion analysis: \(lowRegions.count) low-perfusion region(s)."
+        case .dopamineTransporter:
+            return String(format: "DaTscan striatal binding ratio %.3f.", targetSUVR ?? 0)
         case .generic:
             return "Brain PET regional analysis complete."
         }
@@ -1015,6 +1040,10 @@ public enum BrainPETAnalysis {
             keywords = ["whole cerebellum", "cerebellum", "cerebellar"]
         case .tau:
             keywords = ["inferior cerebell", "cerebellar gray", "cerebellum"]
+        case .spectPerfusion:
+            keywords = ["cerebellum", "cerebellar", "whole brain", "global"]
+        case .dopamineTransporter:
+            keywords = ["occipital", "background", "cerebellum"]
         case .generic:
             keywords = ["cerebellum", "pons"]
         }
@@ -1048,6 +1077,18 @@ public enum BrainPETAnalysis {
             return atlas.classes.filter { cls in
                 let name = normalizedRegionName(cls.name)
                 return !name.contains("cerebell") && !name.contains("pons")
+            }.map(\.labelID)
+        case .spectPerfusion:
+            return atlas.classes
+                .filter {
+                    let name = normalizedRegionName($0.name)
+                    return !name.contains("cerebell") && !name.contains("background")
+                }
+                .map(\.labelID)
+        case .dopamineTransporter:
+            return atlas.classes.filter { cls in
+                let name = normalizedRegionName(cls.name)
+                return ["caudate", "putamen", "striatum"].contains { name.contains($0) }
             }.map(\.labelID)
         case .generic:
             return atlas.classes.map(\.labelID)

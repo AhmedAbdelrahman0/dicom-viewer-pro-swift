@@ -3,9 +3,28 @@ import UniformTypeIdentifiers
 
 struct BrainPETPanel: View {
     @EnvironmentObject var vm: ViewerViewModel
-    @State private var tracer: BrainPETTracer = .fdg
+    @State private var workflow: NeuroQuantWorkflowProtocol = .fdgDementia
     @State private var anatomyMode: BrainPETAnatomyMode = .automatic
     @State private var tauThreshold: Double = 1.34
+    @State private var clinicalQuestion: NeuroClinicalQuestion = .cognitiveDecline
+    @State private var includeAtypicalDementia = false
+    @State private var includeEarlyOnset = false
+    @State private var antiAmyloidEligibility = false
+    @State private var hasRecentMRI = false
+    @State private var hippocampalAtrophy = false
+    @State private var vascularBurden: NeuroVascularBurden = .none
+    @State private var microhemorrhageCount = 0
+    @State private var antiAmyloidAgent: NeuroAntiAmyloidAgent = .lecanemab
+    @State private var apoEStatus: NeuroApoEStatus = .unknown
+    @State private var antithromboticStatus: NeuroAntithromboticStatus = .none
+    @State private var visualReadImpression: NeuroVisualReadImpression = .notAssessed
+    @State private var datscanVisualGrade: NeuroDaTscanVisualGrade = .notAssessed
+    @State private var datscanMedicationFlag = false
+    @State private var includePriorStudy = false
+    @State private var priorTargetSUVR = 1.0
+    @State private var priorCentiloid = 0.0
+    @State private var priorYearsAgo = 1.0
+    @State private var readerName = ""
     @State private var showNormalDatabaseImporter = false
     @State private var gaainSummary: GAAINReferenceDatasetSummary?
     @State private var gaainPackage: GAAINReferenceBuildPackage?
@@ -24,6 +43,9 @@ struct BrainPETPanel: View {
             } else {
                 emptyState
             }
+            if let result = vm.neuroQuantWorkbenchResult {
+                neuroWorkbenchView(result)
+            }
             gaainReferenceBuilder
             normalSources
         }
@@ -31,7 +53,7 @@ struct BrainPETPanel: View {
 
     private var header: some View {
         HStack {
-            Label("Brain PET", systemImage: "brain.head.profile")
+            Label("Neuro Quant", systemImage: "brain.head.profile")
                 .font(.headline)
             Spacer()
             if let pet = vm.activePETQuantificationVolume {
@@ -45,11 +67,22 @@ struct BrainPETPanel: View {
 
     private var controls: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Picker("Tracer", selection: $tracer) {
-                ForEach(BrainPETTracer.allCases) { tracer in
-                    Text(tracer.displayName).tag(tracer)
+            Picker("Protocol", selection: $workflow) {
+                ForEach(NeuroQuantWorkflowProtocol.allCases) { protocolID in
+                    Text(protocolID.displayName).tag(protocolID)
                 }
             }
+
+            Text(workflow.lockedSummary)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            metric("Tracer", workflow.tracer.displayName)
+            metric("Template", workflow.preferredTemplateSpace.displayName)
+
+            clinicalIntakeControls
+            clinicalWorkflowControls
 
             Picker("Anatomy", selection: $anatomyMode) {
                 ForEach(BrainPETAnatomyMode.allCases) { mode in
@@ -71,7 +104,7 @@ struct BrainPETPanel: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            if tracer.family == .tau {
+            if workflow == .tauBraak {
                 HStack {
                     Text("Tau threshold")
                         .font(.caption)
@@ -97,11 +130,18 @@ struct BrainPETPanel: View {
             }
 
             Button {
-                vm.runActiveBrainPETAnalysis(tracer: tracer,
-                                             tauSUVRThreshold: tauThreshold,
-                                             anatomyMode: anatomyMode)
+                _ = vm.runActiveNeuroQuantification(workflow: workflow,
+                                                    anatomyMode: anatomyMode,
+                                                    tauSUVRThreshold: workflow == .tauBraak ? tauThreshold : nil,
+                                                    clinicalIntake: makeClinicalIntake(),
+                                                    mriContext: makeMRIContext(),
+                                                    antiAmyloidContext: makeAntiAmyloidContext(),
+                                                    visualRead: makeVisualReadInput(),
+                                                    movementDisorderContext: makeMovementDisorderContext(),
+                                                    timelineEvents: makeTimelineEvents(),
+                                                    signoff: makeSignoff())
             } label: {
-                Label("Analyze", systemImage: "chart.xyaxis.line")
+                Label("Run Protocol", systemImage: "chart.xyaxis.line")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
@@ -109,7 +149,7 @@ struct BrainPETPanel: View {
             .disabled(vm.activePETQuantificationVolume == nil)
             .help(vm.labeling.activeLabelMap == nil
                   ? "Analyze will create a coarse PET-derived quick atlas if no PET-aligned brain atlas is loaded."
-                  : "Run FDG, amyloid, or tau regional brain PET analysis.")
+                  : "Run the locked neuroquantification protocol.")
 
             HStack(spacing: 8) {
                 Button {
@@ -142,9 +182,169 @@ struct BrainPETPanel: View {
                       allowsMultipleSelection: false) { result in
             if case .success(let urls) = result,
                let url = urls.first {
-                vm.importBrainPETNormalDatabase(from: url, tracer: tracer)
+                vm.importBrainPETNormalDatabase(from: url, tracer: workflow.tracer)
             }
         }
+    }
+
+    private var clinicalIntakeControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Picker("Question", selection: $clinicalQuestion) {
+                ForEach(NeuroClinicalQuestion.allCases) { question in
+                    Text(question.displayName).tag(question)
+                }
+            }
+
+            Toggle("Atypical", isOn: $includeAtypicalDementia)
+                .toggleStyle(.checkbox)
+            Toggle("Early onset", isOn: $includeEarlyOnset)
+                .toggleStyle(.checkbox)
+            Toggle("Therapy eligibility", isOn: $antiAmyloidEligibility)
+                .toggleStyle(.checkbox)
+
+            Divider()
+
+            Toggle("Recent MRI", isOn: $hasRecentMRI)
+                .toggleStyle(.checkbox)
+            Toggle("Hippocampal atrophy", isOn: $hippocampalAtrophy)
+                .toggleStyle(.checkbox)
+            Picker("Vascular", selection: $vascularBurden) {
+                ForEach(NeuroVascularBurden.allCases) { burden in
+                    Text(burden.displayName).tag(burden)
+                }
+            }
+            Stepper("Microhemorrhages \(microhemorrhageCount)", value: $microhemorrhageCount, in: 0...50)
+        }
+        .font(.caption)
+    }
+
+    private var clinicalWorkflowControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Picker("Visual", selection: $visualReadImpression) {
+                ForEach(NeuroVisualReadImpression.allCases) { impression in
+                    Text(impression.displayName).tag(impression)
+                }
+            }
+
+            if antiAmyloidEligibility {
+                Picker("Agent", selection: $antiAmyloidAgent) {
+                    ForEach(NeuroAntiAmyloidAgent.allCases) { agent in
+                        Text(agent.displayName).tag(agent)
+                    }
+                }
+                Picker("ApoE", selection: $apoEStatus) {
+                    ForEach(NeuroApoEStatus.allCases) { status in
+                        Text(status.displayName).tag(status)
+                    }
+                }
+                Picker("Blood thinner", selection: $antithromboticStatus) {
+                    ForEach(NeuroAntithromboticStatus.allCases) { status in
+                        Text(status.displayName).tag(status)
+                    }
+                }
+            }
+
+            if workflow == .datscanStriatal {
+                Picker("DaT visual", selection: $datscanVisualGrade) {
+                    ForEach(NeuroDaTscanVisualGrade.allCases) { grade in
+                        Text(grade.displayName).tag(grade)
+                    }
+                }
+                Toggle("DAT-interfering med", isOn: $datscanMedicationFlag)
+                    .toggleStyle(.checkbox)
+            }
+
+            Toggle("Prior study", isOn: $includePriorStudy)
+                .toggleStyle(.checkbox)
+            if includePriorStudy {
+                Stepper("Prior years \(String(format: "%.1f", priorYearsAgo))", value: $priorYearsAgo, in: 0.25...10, step: 0.25)
+                Stepper("Prior SUVR \(String(format: "%.2f", priorTargetSUVR))", value: $priorTargetSUVR, in: 0...5, step: 0.05)
+                if workflow == .amyloidCentiloid {
+                    Stepper("Prior CL \(String(format: "%.0f", priorCentiloid))", value: $priorCentiloid, in: -50...200, step: 1)
+                }
+            }
+
+            TextField("Reader", text: $readerName)
+                .textFieldStyle(.roundedBorder)
+        }
+        .font(.caption)
+    }
+
+    private func makeClinicalIntake() -> NeuroAUCIntake {
+        var questions = [clinicalQuestion]
+        if includeAtypicalDementia { questions.append(.atypicalDementia) }
+        if includeEarlyOnset { questions.append(.earlyOnsetDementia) }
+        if antiAmyloidEligibility { questions.append(.antiAmyloidTherapyEligibility) }
+        let uniqueQuestions = Array(Set(questions)).sorted { $0.rawValue < $1.rawValue }
+        return NeuroAUCIntake(
+            questions: uniqueQuestions,
+            treatmentEligibilityQuestion: antiAmyloidEligibility,
+            hasRecentMRI: hasRecentMRI
+        )
+    }
+
+    private func makeMRIContext() -> NeuroMRIContextInput? {
+        guard hasRecentMRI ||
+                hippocampalAtrophy ||
+                vascularBurden != .none ||
+                microhemorrhageCount > 0 else {
+            return nil
+        }
+        return NeuroMRIContextInput(
+            hasT1: hasRecentMRI,
+            hippocampalAtrophy: hippocampalAtrophy,
+            microhemorrhageCount: microhemorrhageCount,
+            vascularBurden: vascularBurden
+        )
+    }
+
+    private func makeAntiAmyloidContext() -> NeuroAntiAmyloidTherapyContext? {
+        guard antiAmyloidEligibility else { return nil }
+        return NeuroAntiAmyloidTherapyContext(
+            candidateForTherapy: true,
+            agent: antiAmyloidAgent,
+            apoEStatus: apoEStatus,
+            antithromboticStatus: antithromboticStatus
+        )
+    }
+
+    private func makeVisualReadInput() -> NeuroVisualReadInput {
+        NeuroVisualReadInput(
+            impression: visualReadImpression,
+            confidence: visualReadImpression == .notAssessed ? 0 : 0.8
+        )
+    }
+
+    private func makeMovementDisorderContext() -> NeuroMovementDisorderContext? {
+        guard workflow == .datscanStriatal else { return nil }
+        return NeuroMovementDisorderContext(
+            medications: datscanMedicationFlag ? [.bupropion] : [],
+            visualGrade: datscanVisualGrade,
+            clinicalQuestion: clinicalQuestion == .essentialTremorQuestion ? .essentialTremorQuestion : .parkinsonism
+        )
+    }
+
+    private func makeTimelineEvents() -> [NeuroTimelineEvent] {
+        guard includePriorStudy else { return [] }
+        let priorDate = Date().addingTimeInterval(-priorYearsAgo * 365.25 * 24 * 60 * 60)
+        return [
+            NeuroTimelineEvent(
+                date: priorDate,
+                studyUID: "prior-neuroquant",
+                workflow: workflow,
+                targetSUVR: priorTargetSUVR,
+                centiloid: workflow == .amyloidCentiloid ? priorCentiloid : nil
+            )
+        ]
+    }
+
+    private func makeSignoff() -> NeuroClinicalSignoff? {
+        let trimmed = readerName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return NeuroClinicalSignoff(
+            readerName: trimmed,
+            attestation: "Reader reviewed quantitative output, visual read, reference compatibility, and clinical warnings."
+        )
     }
 
     private var emptyState: some View {
@@ -152,7 +352,7 @@ struct BrainPETPanel: View {
             Label("Atlas required", systemImage: "map")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.secondary)
-            Text("Use a PET-aligned brain atlas label map for regional SUVR, Centiloid, and tau staging.")
+            Text("Use a PET/SPECT-aligned brain atlas label map for regional SUVR, Centiloid, SBR, z-score maps, clusters, and surface projections.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -321,6 +521,382 @@ struct BrainPETPanel: View {
                 .stroke(TracerTheme.hairline, lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: 7))
+    }
+
+    private func neuroWorkbenchView(_ result: NeuroQuantWorkbenchResult) -> some View {
+        DisclosureGroup {
+            VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 5) {
+                    metric("Workflow", result.workflow.displayName)
+                    metric("Atlas", "\(result.atlasValidation.pack.name) \(result.atlasValidation.pack.version)")
+                    metric("Atlas score", String(format: "%.0f%%", result.atlasValidation.score * 100))
+                    metric("Template", result.templatePlan.templateSpace.displayName)
+                    metric("Registration", result.registrationPipeline.afterQA?.grade.displayName ?? result.registrationPipeline.templateSpace.displayName)
+                    metric("Readiness", result.clinicalReadiness.status.displayName)
+                    metric("Validation", result.validationDashboard.status.displayName)
+                    metric("Z-map peak", String(format: "%.2f", result.zScoreMap.peakMagnitude))
+                    metric("Clusters", "\(result.clusters.count)")
+                    metric("DICOM objects", "\(result.dicomAuditTrail.entries.count)")
+                    metric("AI hook", String(format: "%@ %.0f%%", result.aiClassifierPrediction.predictedLabel, result.aiClassifierPrediction.confidence * 100))
+                    if let auc = result.aucDecision {
+                        metric("AUC", auc.rating.displayName)
+                    }
+                    if let pattern = result.diseasePatterns.first {
+                        metric("Pattern", pattern.kind.displayName)
+                    }
+                    if let mri = result.mriContextAssessment {
+                        metric("MRI risk", mri.riskLevel.displayName)
+                    }
+                    if let qa = result.clinicalQA {
+                        metric("QA", qa.status.displayName)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Registration Pipeline")
+                        .font(.system(size: 11, weight: .semibold))
+                    metric("Fixed space", result.registrationPipeline.fixedSpaceDescription)
+                    if let mode = result.registrationPipeline.registrationMode {
+                        metric("Mode", mode.displayName)
+                    }
+                    ForEach(result.registrationPipeline.reportLines.prefix(5), id: \.self) { line in
+                        Text(line)
+                            .font(.caption2)
+                            .foregroundStyle(line.contains("Warning") ? .orange : .secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                if let auc = result.aucDecision {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Appropriateness")
+                            .font(.system(size: 11, weight: .semibold))
+                        ForEach(auc.reportLines.prefix(5), id: \.self) { line in
+                            Text(line)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+
+                if !result.diseasePatterns.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Disease Pattern")
+                            .font(.system(size: 11, weight: .semibold))
+                        ForEach(result.diseasePatterns.prefix(3)) { finding in
+                            HStack {
+                                Text(finding.kind.displayName)
+                                    .font(.caption2)
+                                    .lineLimit(1)
+                                Spacer()
+                                Text(String(format: "%.0f%%", finding.confidence * 100))
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(.secondary)
+                            }
+                            Text(finding.summary)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+
+                if let mri = result.mriContextAssessment {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("MRI Context")
+                            .font(.system(size: 11, weight: .semibold))
+                        ForEach(mri.reportLines.prefix(5), id: \.self) { line in
+                            Text(line)
+                                .font(.caption2)
+                                .foregroundStyle(line.contains("Warning") ? .orange : .secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+
+                if let board = result.biomarkerBoard {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("AT(N)")
+                            .font(.system(size: 11, weight: .semibold))
+                        metric("Profile", board.phenotype)
+                        Text(board.summary)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                if let therapy = result.antiAmyloidAssessment {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Anti-Amyloid")
+                            .font(.system(size: 11, weight: .semibold))
+                        metric("Action", therapy.action.displayName)
+                        metric("Risk", therapy.riskLevel.displayName)
+                        ForEach((therapy.blockers + therapy.warnings).prefix(4), id: \.self) { line in
+                            Text(line)
+                                .font(.caption2)
+                                .foregroundStyle(therapy.blockers.contains(line) ? .red : .orange)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+
+                if let visual = result.visualReadAssist {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Visual Read")
+                            .font(.system(size: 11, weight: .semibold))
+                        metric("Template", visual.templateName)
+                        metric("Concordance", visual.concordance.displayName)
+                        ForEach(visual.warnings.prefix(3), id: \.self) { warning in
+                            Text(warning)
+                                .font(.caption2)
+                                .foregroundStyle(.orange)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+
+                if let governance = result.normalGovernance {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Reference Governance")
+                            .font(.system(size: 11, weight: .semibold))
+                        metric("Status", governance.status.displayName)
+                        ForEach((governance.blockers + governance.warnings).prefix(4), id: \.self) { line in
+                            Text(line)
+                                .font(.caption2)
+                                .foregroundStyle(governance.blockers.contains(line) ? .red : .secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+
+                if !result.clinicalReadiness.blockers.isEmpty || !result.clinicalReadiness.warnings.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(result.clinicalReadiness.blockers, id: \.self) { blocker in
+                            Label(blocker, systemImage: "xmark.octagon")
+                                .foregroundStyle(.red)
+                        }
+                        ForEach(result.clinicalReadiness.warnings.prefix(4), id: \.self) { warning in
+                            Label(warning, systemImage: "exclamationmark.triangle")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .font(.caption2)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Validation")
+                        .font(.system(size: 11, weight: .semibold))
+                    Text(result.validationDashboard.lockRecommendation)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    ForEach(result.validationDashboard.reportLines.prefix(5), id: \.self) { line in
+                        Text(line)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Comparison Workspace")
+                        .font(.system(size: 11, weight: .semibold))
+                    metric("Layout", result.comparisonWorkspace.layoutName)
+                    metric("Panes", "\(result.comparisonWorkspace.panes.count)")
+                    ForEach(result.comparisonWorkspace.panes.prefix(4)) { pane in
+                        HStack {
+                            Text(pane.kind.displayName)
+                                .font(.caption2)
+                                .lineLimit(1)
+                            Spacer()
+                            Text(pane.linkedCrosshair ? "linked" : "free")
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
+                if let metrics = result.striatalMetrics {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Striatal Binding")
+                            .font(.system(size: 11, weight: .semibold))
+                        if let mean = metrics.meanStriatalBindingRatio {
+                            metric("Mean SBR", String(format: "%.3f", mean))
+                        }
+                        if let asymmetry = metrics.asymmetryPercent {
+                            metric("Asymmetry", String(format: "%.1f%%", asymmetry))
+                        }
+                        if let ratio = metrics.putamenCaudateRatio {
+                            metric("Put/Caud", String(format: "%.3f", ratio))
+                        }
+                        if let drop = metrics.caudatePutamenDropoffPercent {
+                            metric("Drop-off", String(format: "%.1f%%", drop))
+                        }
+                        if let assessment = result.datscanAssessment {
+                            Text(assessment.summary)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+
+                if let perfusion = result.perfusionAssessment {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Perfusion")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text(perfusion.globalSummary)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        ForEach(perfusion.territorySummaries.prefix(4)) { summary in
+                            HStack {
+                                Text(summary.territory.displayName)
+                                    .font(.caption2)
+                                Spacer()
+                                Text(summary.meanZScore.map { String(format: "z %.2f", $0) } ?? "z --")
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+
+                if let seizure = result.seizureComparison {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Seizure Perfusion")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text(seizure.summary)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                if let timeline = result.longitudinalTimeline {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Timeline")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text(timeline.trendSummary)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        ForEach(timeline.slopeLines.prefix(3), id: \.self) { line in
+                            Text(line)
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
+                if let qa = result.clinicalQA {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Clinical QA")
+                            .font(.system(size: 11, weight: .semibold))
+                        metric("Status", qa.status.displayName)
+                        ForEach((qa.blockers + qa.warnings).prefix(5), id: \.self) { line in
+                            Text(line)
+                                .font(.caption2)
+                                .foregroundStyle(qa.blockers.contains(line) ? .red : .secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+
+                if let tracker = result.antiAmyloidClinicTracker {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Therapy Tracker")
+                            .font(.system(size: 11, weight: .semibold))
+                        metric("Action", tracker.action.displayName)
+                        Text(tracker.nextMRIDescription)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text(tracker.responseSummary)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("AI Classifier Hook")
+                        .font(.system(size: 11, weight: .semibold))
+                    metric("Model", result.aiClassifierPrediction.request.modelIdentifier)
+                    metric("Prediction", String(format: "%@ %.0f%%", result.aiClassifierPrediction.predictedLabel, result.aiClassifierPrediction.confidence * 100))
+                    ForEach(result.aiClassifierPrediction.warnings.prefix(2), id: \.self) { warning in
+                        Text(warning)
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("DICOM Export")
+                        .font(.system(size: 11, weight: .semibold))
+                    metric("SR", result.dicomExportManifest.structuredReportTitle)
+                    metric("Maps", "\(result.dicomExportManifest.parametricMaps.count)")
+                    ForEach(result.dicomAuditTrail.reportLines.prefix(5), id: \.self) { line in
+                        Text(line)
+                            .font(.caption2)
+                            .foregroundStyle(line.contains("Warning") ? .orange : .secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                if !result.clusters.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Abnormal Clusters")
+                            .font(.system(size: 11, weight: .semibold))
+                        ForEach(result.clusters.prefix(5)) { cluster in
+                            HStack {
+                                Text(cluster.dominantRegion)
+                                    .font(.caption2)
+                                    .lineLimit(1)
+                                Spacer()
+                                Text("\(cluster.voxelCount)")
+                                    .font(.caption2.monospaced())
+                                Text(String(format: "z %.2f", cluster.peakZScore))
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(zColor(cluster.peakZScore, family: result.report.family))
+                            }
+                        }
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Surface Projections")
+                        .font(.system(size: 11, weight: .semibold))
+                    ForEach(result.surfaceProjections) { projection in
+                        HStack {
+                            Text(projection.view.displayName)
+                                .font(.caption2)
+                            Spacer()
+                            Text(String(format: "peak %.2f", projection.peakMagnitude))
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Structured Report")
+                        .font(.system(size: 11, weight: .semibold))
+                    Text(result.structuredReport.impression)
+                        .font(.caption2)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+            }
+            .padding(.top, 6)
+        } label: {
+            Label("Neuroquant Workbench", systemImage: "brain.head.profile")
+                .font(.system(size: 12, weight: .semibold))
+        }
     }
 
     private func regionRow(_ region: BrainPETRegionStatistic,
@@ -627,13 +1203,15 @@ struct BrainPETPanel: View {
         case .fdg: return "bolt.heart"
         case .amyloid: return "aqi.medium"
         case .tau: return "point.3.connected.trianglepath.dotted"
+        case .spectPerfusion: return "waveform.path.ecg"
+        case .dopamineTransporter: return "circle.grid.cross"
         case .generic: return "chart.xyaxis.line"
         }
     }
 
     private func zColor(_ z: Double, family: BrainPETAnalysisFamily) -> Color {
         switch family {
-        case .fdg:
+        case .fdg, .spectPerfusion, .dopamineTransporter:
             return z <= -2 ? .red : .secondary
         case .amyloid, .tau:
             return z >= 2 ? .orange : .secondary

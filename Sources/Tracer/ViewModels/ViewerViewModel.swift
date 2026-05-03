@@ -544,6 +544,7 @@ public final class ViewerViewModel: ObservableObject {
     @Published public private(set) var brainPETReport: BrainPETReport?
     @Published public private(set) var brainPETAnatomyAwareReport: BrainPETAnatomyAwareReport?
     @Published public private(set) var brainPETNormalDatabase: BrainPETNormalDatabase?
+    @Published public private(set) var neuroQuantWorkbenchResult: NeuroQuantWorkbenchResult?
     @Published public var dynamicStudy: DynamicImageStudy?
     @Published public var selectedDynamicFrameIndex: Int = 0
     @Published public var dynamicPlaybackFPS: Double = 2.0
@@ -2592,6 +2593,76 @@ public final class ViewerViewModel: ObservableObject {
             brainPETReport = nil
             brainPETAnatomyAwareReport = nil
             statusMessage = "Brain PET analysis failed: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    @discardableResult
+    public func runActiveNeuroQuantification(workflow: NeuroQuantWorkflowProtocol,
+                                             anatomyMode: BrainPETAnatomyMode = .automatic,
+                                             tauSUVRThreshold: Double? = nil,
+                                             localValidation: NeuroQuantClinicalValidationResult? = nil,
+                                             referenceManifest: NeuroQuantReferencePackManifest? = nil,
+                                             clinicalIntake: NeuroAUCIntake? = nil,
+                                             mriContext: NeuroMRIContextInput? = nil,
+                                             antiAmyloidContext: NeuroAntiAmyloidTherapyContext? = nil,
+                                             visualRead: NeuroVisualReadInput? = nil,
+                                             movementDisorderContext: NeuroMovementDisorderContext? = nil,
+                                             timelineEvents: [NeuroTimelineEvent] = [],
+                                             signoff: NeuroClinicalSignoff? = nil) -> NeuroQuantWorkbenchResult? {
+        let fallbackNuclear = currentVolume.flatMap { volume -> ImageVolume? in
+            let modality = Modality.normalize(volume.modality)
+            return modality == .PT || modality == .NM ? volume : nil
+        }
+        guard let nuclear = activePETQuantificationVolume ?? fallbackNuclear else {
+            neuroQuantWorkbenchResult = nil
+            brainPETReport = nil
+            brainPETAnatomyAwareReport = nil
+            statusMessage = "Load a brain PET/SPECT volume before running neuroquantification"
+            return nil
+        }
+        let atlas = activeBrainPETAtlas(for: nuclear) ?? createQuickBrainPETAtlas(for: nuclear, announce: false)
+        guard let atlas else {
+            neuroQuantWorkbenchResult = nil
+            brainPETReport = nil
+            brainPETAnatomyAwareReport = nil
+            statusMessage = "\(workflow.displayName) needs a PET/SPECT-aligned atlas. Quick atlas creation could not find enough brain uptake."
+            return nil
+        }
+        do {
+            let result = try NeuroQuantWorkbench.run(
+                volume: nuclear,
+                atlas: atlas,
+                normalDatabase: matchingBrainPETNormalDatabase(for: workflow.tracer),
+                workflow: workflow,
+                anatomyVolume: activeBrainPETAnatomyVolume(for: anatomyMode, pet: nuclear),
+                anatomyMode: anatomyMode,
+                tauSUVRThreshold: tauSUVRThreshold,
+                localValidation: localValidation,
+                referenceManifest: referenceManifest,
+                clinicalIntake: clinicalIntake,
+                mriContext: mriContext,
+                acquisitionSignature: NeuroAcquisitionSignature(
+                    tracer: workflow.tracer,
+                    reconstructionDescription: nuclear.seriesDescription.isEmpty ? nuclear.modality : nuclear.seriesDescription,
+                    patientAge: clinicalIntake?.age ?? movementDisorderContext?.age
+                ),
+                antiAmyloidContext: antiAmyloidContext,
+                visualRead: visualRead,
+                movementDisorderContext: movementDisorderContext,
+                timelineEvents: timelineEvents,
+                signoff: signoff
+            )
+            neuroQuantWorkbenchResult = result
+            brainPETReport = result.report
+            brainPETAnatomyAwareReport = result.anatomyAwareReport
+            statusMessage = result.structuredReport.impression
+            return result
+        } catch {
+            neuroQuantWorkbenchResult = nil
+            brainPETReport = nil
+            brainPETAnatomyAwareReport = nil
+            statusMessage = "Neuroquantification failed: \(error.localizedDescription)"
             return nil
         }
     }
