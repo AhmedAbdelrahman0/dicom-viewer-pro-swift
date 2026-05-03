@@ -5,6 +5,7 @@ struct JobCenterPanel: View {
     let cancel: (JobRecord) -> Void
 
     @State private var filter: JobCenterFilter = .all
+    @State private var now = Date()
 
     private var activeRecords: [JobRecord] {
         jobs.activeRecords
@@ -33,7 +34,7 @@ struct JobCenterPanel: View {
                         emptyState
                     } else {
                         ForEach(visibleRecords) { record in
-                            JobRecordRow(record: record) {
+                            JobRecordRow(record: record, now: now) {
                                 cancel(record)
                             }
                         }
@@ -43,6 +44,11 @@ struct JobCenterPanel: View {
             }
         }
         .background(TracerTheme.panelBackground)
+        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { tick in
+            if !activeRecords.isEmpty {
+                now = tick
+            }
+        }
     }
 
     private var header: some View {
@@ -129,7 +135,15 @@ private enum JobCenterFilter: String, CaseIterable, Identifiable {
 
 private struct JobRecordRow: View {
     let record: JobRecord
+    let now: Date
     let cancel: () -> Void
+
+    private var timeEstimate: TaskTimeEstimate {
+        TaskTimeEstimator.estimate(kind: record.kind,
+                                   progress: record.progress,
+                                   startedAt: record.startedAt,
+                                   now: now)
+    }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -167,13 +181,23 @@ private struct JobRecordRow: View {
                 }
 
                 if record.isActive {
-                    if let progress = record.progress {
+                    if let progress = timeEstimate.displayProgress {
                         ProgressView(value: min(max(progress, 0), 1))
                             .progressViewStyle(.linear)
                     } else {
                         ProgressView()
                             .controlSize(.mini)
                             .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    HStack(spacing: 6) {
+                        Text(timeEstimate.progressLabel)
+                            .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                            .foregroundColor(TracerTheme.accentBright)
+                        Text(timeEstimate.summaryLabel)
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
                     }
                 }
             }
@@ -192,9 +216,9 @@ private struct JobRecordRow: View {
                     .foregroundColor(.secondary)
 
                 if record.isActive {
-                    Text("hb \(durationString(record.heartbeatAge()))")
+                    Text("hb \(TaskTimeEstimator.durationLabel(record.heartbeatAge(now: now)))")
                         .font(.system(size: 9, design: .monospaced))
-                        .foregroundColor(record.heartbeatAge() > 120 ? .orange : .secondary.opacity(0.8))
+                        .foregroundColor(record.heartbeatAge(now: now) > 120 ? .orange : .secondary.opacity(0.8))
                 }
             }
             .frame(width: 112, alignment: .trailing)
@@ -235,17 +259,8 @@ private struct JobRecordRow: View {
 
     private var timeSummary: String {
         if record.isActive {
-            return "\(durationString(record.updatedAt.timeIntervalSince(record.startedAt))) elapsed"
+            return "\(TaskTimeEstimator.durationLabel(now.timeIntervalSince(record.startedAt))) elapsed"
         }
-        return durationString(record.duration)
-    }
-
-    private func durationString(_ duration: TimeInterval) -> String {
-        let seconds = max(0, Int(duration.rounded()))
-        if seconds < 60 { return "\(seconds)s" }
-        let minutes = seconds / 60
-        if minutes < 60 { return "\(minutes)m \(seconds % 60)s" }
-        let hours = minutes / 60
-        return "\(hours)h \(minutes % 60)m"
+        return TaskTimeEstimator.durationLabel(record.duration)
     }
 }

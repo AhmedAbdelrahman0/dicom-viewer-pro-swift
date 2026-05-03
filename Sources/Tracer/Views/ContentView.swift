@@ -52,6 +52,7 @@ public struct ContentView: View {
     @State private var showJobCenter = false
     @State private var showActivityLog = false
     @State private var showWindowingPanel = false
+    @State private var activityClock = Date()
     /// First-launch onboarding gate — once dismissed the welcome card
     /// sheet stays closed across relaunches. Users can re-open it from
     /// Help → Show Welcome Walkthrough.
@@ -964,6 +965,11 @@ public struct ContentView: View {
         .onAppear {
             syncJobCenter()
         }
+        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { now in
+            if !activeOperations.isEmpty || showJobCenter {
+                activityClock = now
+            }
+        }
         .onChange(of: activeOperationsDigest) { _, _ in
             syncJobCenter()
         }
@@ -1037,7 +1043,7 @@ public struct ContentView: View {
                 ScrollView(.horizontal, showsIndicators: true) {
                     HStack(spacing: 8) {
                         ForEach(operations) { operation in
-                            ActivityOperationChip(operation: operation) {
+                            ActivityOperationChip(operation: operation, now: activityClock) {
                                 cancel(operation)
                             }
                         }
@@ -1100,7 +1106,8 @@ public struct ContentView: View {
                 detail: "Running since \(operation.startedAt.formatted(date: .omitted, time: .shortened))",
                 progress: nil,
                 systemImage: "point.3.connected.trianglepath.dotted",
-                cancelTarget: .volumeOperation
+                cancelTarget: .volumeOperation,
+                startedAt: operation.startedAt
             ))
         }
 
@@ -1201,7 +1208,9 @@ public struct ContentView: View {
             }
         }
 
-        return operations
+        return operations.map { operation in
+            operation.withStartedAt(operation.startedAt ?? operationStartedAt(operation.id))
+        }
     }
 
     private var activeOperationsDigest: String {
@@ -1222,6 +1231,10 @@ public struct ContentView: View {
     private func syncJobCenter() {
         completeTerminalDownloadJobs()
         jobs.sync(active: activeOperations.map(\.jobUpdate))
+    }
+
+    private func operationStartedAt(_ operationID: String) -> Date? {
+        jobs.activeRecords.first { $0.operationID == operationID }?.startedAt
     }
 
     private func completeTerminalDownloadJobs() {
@@ -2806,6 +2819,36 @@ private struct ActivityOperationSnapshot: Identifiable, Equatable {
     let progress: Double?
     let systemImage: String
     let cancelTarget: ActivityCancelTarget?
+    let startedAt: Date?
+
+    init(id: String,
+         title: String,
+         stage: String,
+         detail: String,
+         progress: Double?,
+         systemImage: String,
+         cancelTarget: ActivityCancelTarget?,
+         startedAt: Date? = nil) {
+        self.id = id
+        self.title = title
+        self.stage = stage
+        self.detail = detail
+        self.progress = progress
+        self.systemImage = systemImage
+        self.cancelTarget = cancelTarget
+        self.startedAt = startedAt
+    }
+
+    func withStartedAt(_ date: Date?) -> ActivityOperationSnapshot {
+        ActivityOperationSnapshot(id: id,
+                                  title: title,
+                                  stage: stage,
+                                  detail: detail,
+                                  progress: progress,
+                                  systemImage: systemImage,
+                                  cancelTarget: cancelTarget,
+                                  startedAt: date)
+    }
 }
 
 private extension ActivityOperationSnapshot {
@@ -2841,7 +2884,15 @@ private extension ActivityOperationSnapshot {
 
 private struct ActivityOperationChip: View {
     let operation: ActivityOperationSnapshot
+    let now: Date
     let cancel: () -> Void
+
+    private var timeEstimate: TaskTimeEstimate {
+        TaskTimeEstimator.estimate(kind: operation.inferredJobKind,
+                                   progress: operation.progress,
+                                   startedAt: operation.startedAt,
+                                   now: now)
+    }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -2865,7 +2916,7 @@ private struct ActivityOperationChip: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
 
-                if let progress = operation.progress {
+                if let progress = timeEstimate.displayProgress {
                     ProgressView(value: min(max(progress, 0), 1))
                         .progressViewStyle(.linear)
                         .frame(width: 180)
@@ -2873,6 +2924,17 @@ private struct ActivityOperationChip: View {
                     ProgressView()
                         .controlSize(.mini)
                         .frame(width: 180, alignment: .leading)
+                }
+
+                HStack(spacing: 6) {
+                    Text(timeEstimate.progressLabel)
+                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .foregroundColor(TracerTheme.accentBright)
+                    Text(timeEstimate.summaryLabel)
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                 }
             }
 
