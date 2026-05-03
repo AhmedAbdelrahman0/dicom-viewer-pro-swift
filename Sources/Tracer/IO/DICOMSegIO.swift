@@ -4,6 +4,106 @@ import SwiftUI
 public enum DICOMSegIO {
     private static let segmentationStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.66.4"
 
+    public static func loadDICOMSEG(from url: URL,
+                                    referenceVolume: ImageVolume) throws -> LabelMap {
+        let header = try DICOMLoader.parseHeader(at: url)
+        guard header.modality.uppercased() == "SEG" else {
+            throw DICOMError.invalidFile("Expected DICOM SEG, got modality \(header.modality.isEmpty ? "unknown" : header.modality)")
+        }
+        guard header.rows == referenceVolume.height,
+              header.columns == referenceVolume.width else {
+            throw LabelIO.LabelIOError.geometryMismatch(
+                "SEG frames \(header.columns)x\(header.rows), current volume \(referenceVolume.width)x\(referenceVolume.height)"
+            )
+        }
+        guard !header.pixelDataUndefinedLength,
+              header.pixelDataOffset > 0,
+              header.pixelDataLength > 0 else {
+            throw DICOMError.invalidFile("DICOM SEG pixel data is missing or encapsulated")
+        }
+
+        let data = try Data(contentsOf: url)
+        let reader = DICOMSequenceReader(data: data)
+        reader.parse()
+
+        let segmentationType = reader
+            .stringValue(group: 0x0062, element: 0x0001)?
+            .uppercased() ?? (header.bitsAllocated == 1 ? "BINARY" : "LABELMAP")
+        switch segmentationType {
+        case "BINARY":
+            guard header.bitsAllocated == 1 else {
+                throw DICOMError.invalidFile("Binary DICOM SEG must use BitsAllocated=1; got \(header.bitsAllocated)")
+            }
+        case "LABELMAP":
+            guard header.bitsAllocated == 8 || header.bitsAllocated == 16 else {
+                throw DICOMError.invalidFile("Labelmap DICOM SEG supports 8- or 16-bit pixels; got \(header.bitsAllocated)")
+            }
+        case "FRACTIONAL":
+            throw DICOMError.invalidFile("Fractional/probability DICOM SEG import is not supported as a discrete label mask")
+        default:
+            throw DICOMError.invalidFile("Unsupported DICOM SEG type \(segmentationType)")
+        }
+
+        let segments = segmentDescriptions(from: reader)
+        guard !segments.isEmpty else {
+            throw DICOMError.invalidFile("DICOM SEG has no Segment Sequence")
+        }
+
+        let bitsPerFrame = header.rows * header.columns * max(1, header.bitsAllocated)
+        let numberOfFrames = reader.intValue(group: 0x0028, element: 0x0008)
+            ?? (header.pixelDataLength * 8) / max(1, bitsPerFrame)
+        let frames = frameDescriptions(from: reader,
+                                       numberOfFrames: numberOfFrames,
+                                       referenceVolume: referenceVolume)
+
+        guard data.count >= header.pixelDataOffset + header.pixelDataLength else {
+            throw DICOMError.invalidFile("DICOM SEG pixel data is out of bounds")
+        }
+        let pixelData = data.subdata(in: header.pixelDataOffset..<(header.pixelDataOffset + header.pixelDataLength))
+
+        let labelMap = LabelMap(
+            parentSeriesUID: referenceVolume.seriesUID,
+            depth: referenceVolume.depth,
+            height: referenceVolume.height,
+            width: referenceVolume.width,
+            name: header.seriesDescription.isEmpty ? "DICOM SEG" : header.seriesDescription,
+            classes: segments.map(\.labelClass)
+        )
+
+        let pixelsPerFrame = header.rows * header.columns
+        switch segmentationType {
+        case "BINARY":
+            for (frameIndex, frame) in frames.enumerated() where frameIndex < numberOfFrames {
+                guard frame.z >= 0, frame.z < labelMap.depth else { continue }
+                for pixelIndex in 0..<pixelsPerFrame where bitIsSet(pixelData, bitIndex: frameIndex * pixelsPerFrame + pixelIndex) {
+                    let y = pixelIndex / header.columns
+                    let x = pixelIndex % header.columns
+                    let dst = labelMap.index(z: frame.z, y: y, x: x)
+                    labelMap.voxels[dst] = frame.segmentNumber
+                }
+            }
+        case "LABELMAP":
+            let bytesPerVoxel = max(1, header.bitsAllocated / 8)
+            for (frameIndex, frame) in frames.enumerated() where frameIndex < numberOfFrames {
+                guard frame.z >= 0, frame.z < labelMap.depth else { continue }
+                for pixelIndex in 0..<pixelsPerFrame {
+                    let src = (frameIndex * pixelsPerFrame + pixelIndex) * bytesPerVoxel
+                    guard src + bytesPerVoxel <= pixelData.count else { continue }
+                    let value = labelmapValue(pixelData, offset: src, bytesPerVoxel: bytesPerVoxel)
+                    guard value != 0 else { continue }
+                    let y = pixelIndex / header.columns
+                    let x = pixelIndex % header.columns
+                    let dst = labelMap.index(z: frame.z, y: y, x: x)
+                    labelMap.voxels[dst] = value
+                }
+            }
+        default:
+            break
+        }
+
+        return labelMap
+    }
+
     public static func saveDICOMSEG(_ labelMap: LabelMap,
                                     parentVolume: ImageVolume,
                                     to url: URL) throws {
@@ -81,9 +181,131 @@ public enum DICOMSegIO {
         try file.write(to: url, options: [.atomic])
     }
 
+    private struct SegmentDescription {
+        let number: UInt16
+        let labelClass: LabelClass
+    }
+
     private struct Frame {
         let labelID: UInt16
         let z: Int
+    }
+
+    private struct ImportFrame {
+        let segmentNumber: UInt16
+        let z: Int
+    }
+
+    private static func segmentDescriptions(from reader: DICOMSequenceReader) -> [SegmentDescription] {
+        let items = reader.items(group: 0x0062, element: 0x0002)
+        let colors: [Color] = [.red, .green, .blue, .yellow, .orange, .purple, .pink,
+                               .cyan, .mint, .indigo, .teal, .brown]
+        return items.enumerated().compactMap { index, item in
+            let number = UInt16(item.intValue(group: 0x0062, element: 0x0004) ?? index + 1)
+            guard number != 0 else { return nil }
+            let typeMeaning = item
+                .subItems(group: 0x0062, element: 0x000F)
+                .first?
+                .stringValue(group: 0x0008, element: 0x0104)
+            let label = item.stringValue(group: 0x0062, element: 0x0005)
+                ?? typeMeaning
+                ?? "Segment \(number)"
+            return SegmentDescription(
+                number: number,
+                labelClass: LabelClass(
+                    labelID: number,
+                    name: label,
+                    category: categoryForSegment(label),
+                    color: colors[index % colors.count]
+                )
+            )
+        }
+    }
+
+    private static func frameDescriptions(from reader: DICOMSequenceReader,
+                                          numberOfFrames: Int,
+                                          referenceVolume: ImageVolume) -> [ImportFrame] {
+        let perFrameItems = reader.items(group: 0x5200, element: 0x9230)
+        guard !perFrameItems.isEmpty else {
+            let segmentNumbers = segmentDescriptions(from: reader).map(\.number)
+            if segmentNumbers.isEmpty {
+                return (0..<numberOfFrames).map {
+                    ImportFrame(segmentNumber: 1, z: min(referenceVolume.depth - 1, $0))
+                }
+            }
+            return segmentNumbers.flatMap { segmentNumber in
+                (0..<referenceVolume.depth).map {
+                    ImportFrame(segmentNumber: segmentNumber, z: $0)
+                }
+            }
+        }
+
+        return perFrameItems.enumerated().map { frameIndex, item in
+            let segmentNumber = item
+                .subItems(group: 0x0062, element: 0x000A)
+                .first?
+                .intValue(group: 0x0062, element: 0x000B)
+            let frameContent = item.subItems(group: 0x0020, element: 0x9111).first
+            let dimensionValues = frameContent?.uint32Values(group: 0x0020, element: 0x9157) ?? []
+            let inStackPosition = frameContent?.intValue(group: 0x0020, element: 0x9057)
+            let planePosition = item
+                .subItems(group: 0x0020, element: 0x9113)
+                .first?
+                .doubleArray(group: 0x0020, element: 0x0032)
+
+            let zFromPosition: Int? = {
+                guard let planePosition, planePosition.count >= 3 else { return nil }
+                let voxel = referenceVolume.voxelCoordinates(from: SIMD3<Double>(
+                    planePosition[0],
+                    planePosition[1],
+                    planePosition[2]
+                ))
+                return Int(round(voxel.z))
+            }()
+
+            let segment = UInt16(segmentNumber ?? Int(dimensionValues.first ?? 1))
+            let z = zFromPosition
+                ?? (inStackPosition.map { $0 - 1 })
+                ?? (dimensionValues.count >= 2 ? Int(dimensionValues[1]) - 1 : frameIndex)
+            return ImportFrame(segmentNumber: max(1, segment), z: z)
+        }
+    }
+
+    private static func bitIsSet(_ data: Data, bitIndex: Int) -> Bool {
+        guard bitIndex >= 0 else { return false }
+        let byteIndex = bitIndex / 8
+        guard byteIndex < data.count else { return false }
+        return (data[byteIndex] & UInt8(1 << (bitIndex % 8))) != 0
+    }
+
+    private static func labelmapValue(_ data: Data,
+                                      offset: Int,
+                                      bytesPerVoxel: Int) -> UInt16 {
+        if bytesPerVoxel == 1 {
+            return UInt16(data[offset])
+        }
+        return UInt16(data[offset]) | (UInt16(data[offset + 1]) << 8)
+    }
+
+    private static func categoryForSegment(_ name: String) -> LabelCategory {
+        let n = name.lowercased()
+        if n.contains("gtv") || n.contains("ctv") || n.contains("ptv") || n.contains("itv") {
+            return .rtTarget
+        }
+        if n.contains("oar") || n.contains("organ") || n.contains("liver") || n.contains("kidney")
+            || n.contains("heart") || n.contains("lung") {
+            return .rtOAR
+        }
+        if n.contains("tumor") || n.contains("mass") {
+            return .tumor
+        }
+        if n.contains("lesion") || n.contains("met") || n.contains("node") {
+            return .lesion
+        }
+        if n.contains("suv") || n.contains("fdg") || n.contains("uptake") {
+            return .petHotspot
+        }
+        return .custom
     }
 
     private static func makeFrames(classes: [LabelClass], depth: Int) -> [Frame] {

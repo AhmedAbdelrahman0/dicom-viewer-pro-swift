@@ -3109,6 +3109,80 @@ final class GeometryAndIOTests: XCTestCase {
         }
     }
 
+    func testAnnotationFormatCatalogCoversSupportedFormatsWithDescriptions() {
+        let supportedIDs = Set(AnnotationFormatCatalog.supportedEntries.map(\.id))
+        XCTAssertEqual(supportedIDs, Set(LabelIO.Format.allCases.map(\.id)))
+        XCTAssertGreaterThan(AnnotationFormatCatalog.guideOnlyEntries.count, 8)
+
+        for format in LabelIO.Format.allCases {
+            XCTAssertFalse(format.usageDescription.isEmpty, "\(format.rawValue) needs a usage description")
+            XCTAssertFalse(format.storedFeatures.isEmpty, "\(format.rawValue) needs stored feature metadata")
+            XCTAssertFalse(format.conversionNote.isEmpty, "\(format.rawValue) needs a conversion note")
+        }
+    }
+
+    func testConversionWarningsNameLostFeatureTypes() {
+        let jsonWarnings = LabelIO.Format.json.conversionWarnings(
+            hasVoxels: true,
+            hasAnnotations: true,
+            hasLandmarks: true
+        )
+        XCTAssertTrue(jsonWarnings.contains { $0.affectedFeatures.contains(.voxelMask) })
+        XCTAssertTrue(jsonWarnings.contains { $0.affectedFeatures.contains(.landmarks) })
+
+        let rtWarnings = LabelIO.Format.dicomRTStruct.conversionWarnings(
+            hasVoxels: true,
+            hasAnnotations: false,
+            hasLandmarks: false
+        )
+        XCTAssertTrue(rtWarnings.contains { $0.affectedFeatures.contains(.contourGeometry) })
+    }
+
+    @MainActor
+    func testLabelingImportsTracerJSONAndCSVLandmarks() throws {
+        let volume = makeTestVolume(modality: "CT", description: "CT", width: 4, height: 4, depth: 2)
+        let map = LabelMap(
+            parentSeriesUID: volume.seriesUID,
+            depth: volume.depth,
+            height: volume.height,
+            width: volume.width,
+            name: "Annotations",
+            classes: [LabelClass(labelID: 3, name: "Node", category: .lesion, color: .orange)]
+        )
+        var annotation = Annotation(
+            type: .distance,
+            points: [CGPoint(x: 0, y: 0), CGPoint(x: 3, y: 0)],
+            axis: 2,
+            sliceIndex: 1
+        )
+        annotation.value = 3
+        annotation.label = "short axis"
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracer-json-csv-import-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let jsonURL = root.appendingPathComponent("annotations.json")
+        try LabelIO.saveJSON(labelMap: map, annotations: [annotation], to: jsonURL)
+        let labeling = LabelingViewModel()
+        let jsonImport = try labeling.loadLabel(from: jsonURL, parentVolume: volume)
+        XCTAssertEqual(jsonImport.labelMap.classes.first?.name, "Node")
+        XCTAssertEqual(jsonImport.annotations.first?.label, "short axis")
+
+        let csvURL = root.appendingPathComponent("landmarks.csv")
+        try LabelIO.saveLandmarks([
+            LandmarkPair(
+                fixed: SIMD3<Double>(1, 2, 3),
+                moving: SIMD3<Double>(4, 5, 6),
+                label: "LM"
+            )
+        ], to: csvURL)
+        let csvImport = try labeling.loadLabel(from: csvURL, parentVolume: volume)
+        XCTAssertEqual(csvImport.landmarks.first?.label, "LM")
+        XCTAssertEqual(labeling.landmarks.count, 1)
+    }
+
     func testDICOMSEGExportWritesSegmentationObject() throws {
         let volume = makeTestVolume(modality: "CT", description: "CT", width: 3, height: 2, depth: 2)
         let map = LabelMap(
@@ -3134,6 +3208,107 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertEqual(header.bitsAllocated, 1)
         XCTAssertGreaterThan(header.pixelDataLength, 0)
         XCTAssertEqual(header.seriesDescription, "Lesions DICOM SEG")
+    }
+
+    func testDICOMSEGExportRoundTripsLabelMap() throws {
+        let volume = makeTestVolume(modality: "CT", description: "CT", width: 3, height: 2, depth: 2)
+        let map = LabelMap(
+            parentSeriesUID: volume.seriesUID,
+            depth: volume.depth,
+            height: volume.height,
+            width: volume.width,
+            name: "Lesions",
+            classes: [LabelClass(labelID: 7, name: "Tumor", category: .lesion, color: .orange)]
+        )
+        map.setValue(7, z: 0, y: 0, x: 1)
+        map.setValue(7, z: 1, y: 1, x: 2)
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracer-seg-roundtrip-\(UUID().uuidString).dcm")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try DICOMSegIO.saveDICOMSEG(map, parentVolume: volume, to: url)
+        let loaded = try DICOMSegIO.loadDICOMSEG(from: url, referenceVolume: volume)
+
+        XCTAssertEqual(loaded.classes.first?.name, "Tumor")
+        XCTAssertEqual(loaded.value(z: 0, y: 0, x: 1), 1)
+        XCTAssertEqual(loaded.value(z: 1, y: 1, x: 2), 1)
+        XCTAssertEqual(loaded.value(z: 0, y: 0, x: 0), 0)
+    }
+
+    func testDICOMSEGLabelmapImportReadsVoxelValues() throws {
+        let volume = makeTestVolume(modality: "CT", description: "CT", width: 2, height: 2, depth: 2)
+        let sopUID = DICOMExportWriter.makeUID()
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracer-labelmap-seg-\(UUID().uuidString).dcm")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        func segmentItem(number: UInt16, label: String) -> Data {
+            var item = Data()
+            item.appendDICOMElement(group: 0x0062, element: 0x0004, vr: "US", uint16: number)
+            item.appendDICOMElement(group: 0x0062, element: 0x0005, vr: "LO", string: label)
+            item.appendDICOMElement(group: 0x0062, element: 0x0008, vr: "CS", string: "MANUAL")
+            return item
+        }
+
+        var dataset = Data()
+        dataset.appendDICOMElement(group: 0x0008, element: 0x0016, vr: "UI", string: "1.2.840.10008.5.1.4.1.1.66.7")
+        dataset.appendDICOMElement(group: 0x0008, element: 0x0018, vr: "UI", string: sopUID)
+        dataset.appendDICOMElement(group: 0x0008, element: 0x0060, vr: "CS", string: "SEG")
+        dataset.appendDICOMElement(group: 0x0008, element: 0x103E, vr: "LO", string: "Labelmap SEG")
+        dataset.appendDICOMElement(group: 0x0028, element: 0x0008, vr: "IS", string: "2")
+        dataset.appendDICOMElement(group: 0x0028, element: 0x0010, vr: "US", uint16: 2)
+        dataset.appendDICOMElement(group: 0x0028, element: 0x0011, vr: "US", uint16: 2)
+        dataset.appendDICOMElement(group: 0x0028, element: 0x0100, vr: "US", uint16: 8)
+        dataset.appendDICOMElement(group: 0x0028, element: 0x0101, vr: "US", uint16: 8)
+        dataset.appendDICOMElement(group: 0x0028, element: 0x0102, vr: "US", uint16: 7)
+        dataset.appendDICOMElement(group: 0x0028, element: 0x0103, vr: "US", uint16: 0)
+        dataset.appendDICOMElement(group: 0x0062, element: 0x0001, vr: "CS", string: "LABELMAP")
+        dataset.appendDICOMSequence(group: 0x0062, element: 0x0002, items: [
+            segmentItem(number: 1, label: "Lesion"),
+            segmentItem(number: 2, label: "Liver")
+        ])
+        dataset.appendDICOMElement(group: 0x7FE0, element: 0x0010, vr: "OB", bytes: Data([
+            1, 0, 0, 2,
+            0, 2, 1, 0
+        ]))
+        let file = DICOMExportWriter.part10File(
+            sopClassUID: "1.2.840.10008.5.1.4.1.1.66.7",
+            sopInstanceUID: sopUID,
+            dataset: dataset
+        )
+        try file.write(to: url, options: [.atomic])
+
+        let loaded = try DICOMSegIO.loadDICOMSEG(from: url, referenceVolume: volume)
+
+        XCTAssertEqual(loaded.classes.map(\.name), ["Lesion", "Liver"])
+        XCTAssertEqual(loaded.value(z: 0, y: 0, x: 0), 1)
+        XCTAssertEqual(loaded.value(z: 0, y: 1, x: 1), 2)
+        XCTAssertEqual(loaded.value(z: 1, y: 0, x: 1), 2)
+        XCTAssertEqual(loaded.value(z: 1, y: 1, x: 0), 1)
+    }
+
+    @MainActor
+    func testLabelingImportsDICOMSEGByModality() throws {
+        let volume = makeTestVolume(modality: "CT", description: "CT", width: 3, height: 2, depth: 2)
+        let map = LabelMap(
+            parentSeriesUID: volume.seriesUID,
+            depth: volume.depth,
+            height: volume.height,
+            width: volume.width,
+            name: "Lesions",
+            classes: [LabelClass(labelID: 1, name: "Tumor", category: .lesion, color: .orange)]
+        )
+        map.setValue(1, z: 0, y: 0, x: 1)
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tracer-seg-import-\(UUID().uuidString).dcm")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try DICOMSegIO.saveDICOMSEG(map, parentVolume: volume, to: url)
+        let labeling = LabelingViewModel()
+        let imported = try labeling.loadLabel(from: url, parentVolume: volume)
+
+        XCTAssertEqual(imported.labelMap.value(z: 0, y: 0, x: 1), 1)
+        XCTAssertEqual(labeling.activeLabelMap?.name, "Lesions DICOM SEG")
     }
 
     func testRTSTRUCTExportRoundTripsContours() throws {

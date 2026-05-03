@@ -457,7 +457,7 @@ private final class RTStructParser {
 
 // Minimal DICOM sequence reader — walks the dataset structure
 // and exposes items() and subItems() for nested sequences.
-private final class DICOMSequenceReader {
+final class DICOMSequenceReader {
     let data: Data
 
     // Top-level flat list of (group, element, value-range, children)
@@ -482,13 +482,33 @@ private final class DICOMSequenceReader {
         func stringValue(group: UInt16, element: UInt16) -> String? {
             let targetTag = (UInt32(group) << 16) | UInt32(element)
             for child in children where child.tag == targetTag {
-                guard let d = reader?.data else { return nil }
-                let bytes = d.subdata(in: child.valueStart..<min(child.valueEnd, d.count))
+                guard let bytes = child.valueData() else { return nil }
                 return String(data: bytes, encoding: .ascii)?
                     .trimmingCharacters(in: .whitespaces)
                     .trimmingCharacters(in: CharacterSet(charactersIn: "\0"))
             }
             return nil
+        }
+
+        func intValue(group: UInt16, element: UInt16) -> Int? {
+            let targetTag = (UInt32(group) << 16) | UInt32(element)
+            guard let child = children.first(where: { $0.tag == targetTag }) else { return nil }
+            return child.intValue()
+        }
+
+        func uint32Values(group: UInt16, element: UInt16) -> [UInt32] {
+            let targetTag = (UInt32(group) << 16) | UInt32(element)
+            guard let child = children.first(where: { $0.tag == targetTag }) else { return [] }
+            return child.uint32Values()
+        }
+
+        func doubleArray(group: UInt16, element: UInt16) -> [Double] {
+            let targetTag = (UInt32(group) << 16) | UInt32(element)
+            guard let child = children.first(where: { $0.tag == targetTag }),
+                  let text = child.stringValue() else { return [] }
+            return text.split(separator: "\\").compactMap {
+                Double($0.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
         }
 
         func subItems(group: UInt16, element: UInt16) -> [ParsedItem] {
@@ -497,6 +517,59 @@ private final class DICOMSequenceReader {
                 return child.children
             }
             return []
+        }
+
+        func stringValue() -> String? {
+            guard let bytes = valueData() else { return nil }
+            return String(data: bytes, encoding: .ascii)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\0"))
+        }
+
+        func intValue() -> Int? {
+            guard let bytes = valueData() else { return nil }
+            switch vr {
+            case "US":
+                guard bytes.count >= 2 else { return nil }
+                return Int(bytes.readUInt16LE_private(at: 0))
+            case "SS":
+                guard bytes.count >= 2 else { return nil }
+                return Int(Int16(bitPattern: bytes.readUInt16LE_private(at: 0)))
+            case "UL":
+                guard bytes.count >= 4 else { return nil }
+                return Int(bytes.readUInt32LE_private(at: 0))
+            case "SL":
+                guard bytes.count >= 4 else { return nil }
+                return Int(Int32(bitPattern: bytes.readUInt32LE_private(at: 0)))
+            default:
+                guard let text = stringValue() else { return nil }
+                return Int(text.components(separatedBy: "\\").first ?? "")
+            }
+        }
+
+        func uint32Values() -> [UInt32] {
+            guard let bytes = valueData(), !bytes.isEmpty else { return [] }
+            if vr == "UL" {
+                return stride(from: 0, to: bytes.count - (bytes.count % 4), by: 4).map {
+                    bytes.readUInt32LE_private(at: $0)
+                }
+            }
+            if vr == "US" {
+                return stride(from: 0, to: bytes.count - (bytes.count % 2), by: 2).map {
+                    UInt32(bytes.readUInt16LE_private(at: $0))
+                }
+            }
+            return stringValue()?
+                .split(separator: "\\")
+                .compactMap { UInt32($0.trimmingCharacters(in: .whitespacesAndNewlines)) } ?? []
+        }
+
+        private func valueData() -> Data? {
+            guard let d = reader?.data,
+                  valueStart >= 0,
+                  valueStart <= valueEnd,
+                  valueStart < d.count else { return nil }
+            return d.subdata(in: valueStart..<min(valueEnd, d.count))
         }
     }
 
@@ -519,6 +592,16 @@ private final class DICOMSequenceReader {
             return it.children
         }
         return []
+    }
+
+    func stringValue(group: UInt16, element: UInt16) -> String? {
+        let target = (UInt32(group) << 16) | UInt32(element)
+        return rootItems.first { $0.tag == target }?.stringValue()
+    }
+
+    func intValue(group: UInt16, element: UInt16) -> Int? {
+        let target = (UInt32(group) << 16) | UInt32(element)
+        return rootItems.first { $0.tag == target }?.intValue()
     }
 
     private func parseDataset(offset: inout Int, maxOffset: Int) -> (Int, [ParsedItem]) {

@@ -11,8 +11,10 @@ struct LabelingPanel: View {
     @State private var newClassName: String = ""
     @State private var newClassColor: Color = .red
     @State private var newClassCategory: LabelCategory = .lesion
+    @State private var showingFormatGuide = false
     @State private var showingExporter = false
     @State private var showingImporter = false
+    @State private var pendingConversion: PendingLabelConversion?
     @State private var exportFormat: LabelIO.Format = .niftiLabelmap
     @State private var marginIterations: Int = 1
     @State private var islandMinimumVoxels: Int = 10
@@ -540,7 +542,7 @@ struct LabelingPanel: View {
                         .controlSize(.small)
 
                         Button {
-                            showingExporter = true
+                            requestActiveConversion(exportFormat)
                         } label: {
                             Label("Export", systemImage: "square.and.arrow.up")
                                 .frame(maxWidth: .infinity)
@@ -549,6 +551,27 @@ struct LabelingPanel: View {
                         .controlSize(.small)
                         .disabled(vm.labeling.activeLabelMap == nil)
                     }
+
+                    Menu {
+                        ForEach(LabelIO.Format.allCases) { format in
+                            Button(format.rawValue) { requestActiveConversion(format) }
+                        }
+                    } label: {
+                        Label("Convert Active Label", systemImage: "arrow.triangle.2.circlepath")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(vm.labeling.activeLabelMap == nil || vm.currentVolume == nil)
+
+                    Button {
+                        showingFormatGuide = true
+                    } label: {
+                        Label("Format Guide", systemImage: "info.circle")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
 
                     Menu {
                         Button("Summary CSV…") { exportLabelData(.csv) }
@@ -589,6 +612,20 @@ struct LabelingPanel: View {
                                                     category: newClassCategory)
                               newClassName = ""
                           })
+        }
+        .sheet(isPresented: $showingFormatGuide) {
+            AnnotationFormatGuideSheet()
+        }
+        .sheet(item: $pendingConversion) { request in
+            ConversionWarningSheet(
+                format: request.format,
+                warnings: conversionWarnings(for: request.format),
+                onCancel: { pendingConversion = nil },
+                onContinue: {
+                    pendingConversion = nil
+                    performActiveConversion(request.format)
+                }
+            )
         }
         .fileExporter(
             isPresented: $showingExporter,
@@ -838,8 +875,72 @@ struct LabelingPanel: View {
     }
 
     private var defaultExportFilename: String {
-        let ext = exportFormat.fileExtensions.first ?? "dat"
-        return "labels.\(ext)"
+        defaultExportFilename(for: exportFormat)
+    }
+
+    private func defaultExportFilename(for format: LabelIO.Format) -> String {
+        switch format {
+        case .dicomSeg:
+            return "labels.seg.dcm"
+        case .dicomRTStruct:
+            return "labels.rtstruct.dcm"
+        case .slicerSeg:
+            return "labels.seg.nrrd"
+        case .niftiGz:
+            return "labels.nii.gz"
+        default:
+            let ext = format.fileExtensions.first ?? "dat"
+            return "labels.\(ext)"
+        }
+    }
+
+    private func requestActiveConversion(_ format: LabelIO.Format) {
+        exportFormat = format
+        if conversionWarnings(for: format).isEmpty {
+            performActiveConversion(format)
+        } else {
+            pendingConversion = PendingLabelConversion(format: format)
+        }
+    }
+
+    private func conversionWarnings(for format: LabelIO.Format) -> [AnnotationConversionWarning] {
+        let map = vm.labeling.activeLabelMap
+        let hasVoxels = map?.voxels.contains { $0 != 0 } ?? false
+        return format.conversionWarnings(
+            hasVoxels: hasVoxels,
+            hasAnnotations: !vm.annotations.isEmpty,
+            hasLandmarks: !vm.labeling.landmarks.isEmpty
+        )
+    }
+
+    private func performActiveConversion(_ format: LabelIO.Format) {
+        exportFormat = format
+        #if canImport(AppKit)
+        guard let volume = vm.currentVolume else {
+            vm.statusMessage = "Load a reference volume before exporting labels."
+            return
+        }
+        guard vm.labeling.activeLabelMap != nil else {
+            vm.statusMessage = "No active label map to export."
+            return
+        }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = defaultExportFilename(for: format)
+        panel.allowedContentTypes = [.data]
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try vm.labeling.saveActiveLabel(to: url,
+                                           format: format,
+                                           parentVolume: volume,
+                                           annotations: vm.annotations)
+            vm.statusMessage = "Converted labels to \(url.lastPathComponent)"
+        } catch {
+            vm.statusMessage = "Label conversion failed: \(error.localizedDescription)"
+        }
+        #else
+        showingExporter = true
+        #endif
     }
 
     private func logicalSourceBinding(for map: LabelMap) -> Binding<UInt16> {
@@ -863,6 +964,204 @@ struct LabelingPanel: View {
         let changed = vm.labeling.applyLogicalOperation(sourceClassID: sourceID, operation: operation)
         vm.recordLabelEditIfChanged(named: operation.displayName, beforeUndoDepth: before)
         vm.statusMessage = "\(operation.displayName) changed \(changed) voxels"
+    }
+}
+
+private struct PendingLabelConversion: Identifiable {
+    let format: LabelIO.Format
+    var id: String { format.id }
+}
+
+private struct ConversionWarningSheet: View {
+    let format: LabelIO.Format
+    let warnings: [AnnotationConversionWarning]
+    let onCancel: () -> Void
+    let onContinue: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(format.rawValue)
+                        .font(.title3.weight(.semibold))
+                    Text(format.usageDescription)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(warnings) { warning in
+                        ConversionWarningRow(warning: warning)
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Stored in this format")
+                            .font(.system(size: 12, weight: .semibold))
+                        FeatureWrap(features: format.storedFeatures)
+                    }
+                    .padding(.top, 4)
+
+                    Text(format.conversionNote)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            HStack {
+                Button("Cancel") { onCancel() }
+                Spacer()
+                Button {
+                    onContinue()
+                } label: {
+                    Label("Continue Export", systemImage: "square.and.arrow.up")
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(18)
+        .frame(minWidth: 440, idealWidth: 520, maxWidth: 620, minHeight: 360)
+    }
+}
+
+private struct ConversionWarningRow: View {
+    let warning: AnnotationConversionWarning
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 8) {
+                Text(warning.severity.rawValue)
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(severityColor)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(severityColor.opacity(0.12))
+                    .cornerRadius(4)
+                Text(warning.title)
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            Text(warning.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            FeatureWrap(features: warning.affectedFeatures)
+        }
+        .padding(10)
+        .background(Color.secondary.opacity(0.07))
+        .cornerRadius(6)
+    }
+
+    private var severityColor: Color {
+        switch warning.severity {
+        case .info:
+            return .blue
+        case .caution:
+            return .orange
+        case .dataLoss, .unsupported:
+            return .red
+        }
+    }
+}
+
+private struct FeatureWrap: View {
+    let features: [AnnotationPayloadFeature]
+
+    private let columns = [
+        GridItem(.adaptive(minimum: 108), spacing: 4, alignment: .leading)
+    ]
+
+    var body: some View {
+        LazyVGrid(columns: columns, alignment: .leading, spacing: 4) {
+            ForEach(features) { feature in
+                Text(feature.rawValue)
+                    .font(.system(size: 10, weight: .medium))
+                    .lineLimit(1)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color.secondary.opacity(0.10))
+                    .cornerRadius(4)
+            }
+        }
+    }
+}
+
+private struct AnnotationFormatGuideSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var showingGuideOnly = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Label / Annotation Formats")
+                    .font(.title3.weight(.semibold))
+                Spacer()
+                Toggle("Include guide-only", isOn: $showingGuideOnly)
+                Button("Done") { dismiss() }
+            }
+
+            List {
+                Section("Tracer supported") {
+                    ForEach(AnnotationFormatCatalog.supportedEntries) { entry in
+                        AnnotationFormatGuideRow(entry: entry)
+                    }
+                }
+                if showingGuideOnly {
+                    Section("Common external formats") {
+                        ForEach(AnnotationFormatCatalog.guideOnlyEntries) { entry in
+                            AnnotationFormatGuideRow(entry: entry)
+                        }
+                    }
+                }
+            }
+            .listStyle(.inset)
+        }
+        .padding(16)
+        .frame(minWidth: 680, idealWidth: 760, maxWidth: 900, minHeight: 520)
+    }
+}
+
+private struct AnnotationFormatGuideRow: View {
+    let entry: AnnotationFormatGuideEntry
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 8) {
+                Text(entry.name)
+                    .font(.system(size: 13, weight: .semibold))
+                Text(entry.support.rawValue)
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(supportColor)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(supportColor.opacity(0.12))
+                    .cornerRadius(4)
+                Spacer()
+                Text(entry.extensions.map { ".\($0)" }.joined(separator: ", "))
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+
+            Text(entry.usage)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            FeatureWrap(features: entry.storedFeatures)
+            Text(entry.conversionNote)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 5)
+    }
+
+    private var supportColor: Color {
+        switch entry.support {
+        case .nativeReadWrite:
+            return .green
+        case .exportOnly, .sidecar:
+            return .orange
+        case .guideOnly:
+            return .secondary
+        }
     }
 }
 

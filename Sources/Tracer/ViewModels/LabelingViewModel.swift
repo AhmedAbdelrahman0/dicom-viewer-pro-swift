@@ -858,13 +858,55 @@ public final class LabelingViewModel: ObservableObject {
                 annotations: [],
                 landmarks: []
             )
-        } else if name.hasSuffix(".dcm") {
-            // Try RTSTRUCT
-            result = LabelImportResult(
-                labelMap: try RTStructIO.loadRTStruct(from: url, referenceVolume: parentVolume),
-                annotations: [],
-                landmarks: []
+        } else if name.hasSuffix(".label.txt") {
+            let labelMap = LabelMap(
+                parentSeriesUID: parentVolume.seriesUID,
+                depth: parentVolume.depth,
+                height: parentVolume.height,
+                width: parentVolume.width,
+                name: url.deletingPathExtension().deletingPathExtension().lastPathComponent,
+                classes: try LabelIO.loadITKSnapDescriptor(from: url)
             )
+            result = LabelImportResult(labelMap: labelMap,
+                                       annotations: [],
+                                       landmarks: [])
+        } else if name.hasSuffix(".json") {
+            let package = try LabelIO.loadJSONAnnotations(from: url, parentVolume: parentVolume)
+            result = LabelImportResult(
+                labelMap: package.labelMap,
+                annotations: package.annotations,
+                landmarks: package.landmarks
+            )
+        } else if name.hasSuffix(".csv") {
+            let labelMap = LabelMap(
+                parentSeriesUID: parentVolume.seriesUID,
+                depth: parentVolume.depth,
+                height: parentVolume.height,
+                width: parentVolume.width,
+                name: url.deletingPathExtension().lastPathComponent
+            )
+            result = LabelImportResult(labelMap: labelMap,
+                                       annotations: [],
+                                       landmarks: try LabelIO.loadLandmarks(from: url))
+        } else if name.hasSuffix(".dcm") {
+            let header = try DICOMLoader.parseHeader(at: url)
+            switch header.modality.uppercased() {
+            case "SEG":
+                result = LabelImportResult(
+                    labelMap: try DICOMSegIO.loadDICOMSEG(from: url, referenceVolume: parentVolume),
+                    annotations: [],
+                    landmarks: []
+                )
+            case "RTSTRUCT":
+                result = LabelImportResult(
+                    labelMap: try RTStructIO.loadRTStruct(from: url, referenceVolume: parentVolume),
+                    annotations: [],
+                    landmarks: []
+                )
+            default:
+                throw NSError(domain: "LabelIO", code: 4,
+                              userInfo: [NSLocalizedDescriptionKey: "Unsupported DICOM label modality: \(header.modality.isEmpty ? "unknown" : header.modality)"])
+            }
         } else {
             throw NSError(domain: "LabelIO", code: 3,
                           userInfo: [NSLocalizedDescriptionKey: "Unsupported label file: \(name)"])
