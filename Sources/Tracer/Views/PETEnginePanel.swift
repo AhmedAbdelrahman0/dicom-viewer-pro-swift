@@ -1,7 +1,8 @@
 import SwiftUI
 
 /// Unified entry point for the app's PET-specific AI capabilities. Users
-/// pick an engine (AutoPET II, LesionTracer, LesionLocator, MedSAM2, TMTV,
+/// pick an engine (AutoPET II, AutoPET III-compatible PET lesion model,
+/// LesionLocator, MedSAM2, TMTV,
 /// or physiological-uptake filter) and the panel reveals only the options
 /// relevant to that engine.
 public struct PETEnginePanel: View {
@@ -160,7 +161,7 @@ public struct PETEnginePanel: View {
                         .lineLimit(1)
                 }
                 if pet.selectedEngine == .lesionTracer, nnunet.mode == .dgxRemote {
-                    Label("DGX Segmentator Docker backend active",
+                    Label("Remote PET lesion Docker backend active",
                           systemImage: "shippingbox.fill")
                         .font(.system(size: 10, weight: .medium))
                         .foregroundColor(.secondary)

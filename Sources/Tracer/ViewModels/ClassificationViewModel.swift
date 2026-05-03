@@ -28,8 +28,8 @@ public final class ClassificationViewModel: ObservableObject {
     @Published public var candidateLabels: String = "benign\nmalignant"
 
     /// When `true`, subprocess / radiomics classifiers run on the user's
-    /// DGX Spark over SSH instead of locally. Settings → DGX Spark must be
-    /// configured + enabled for this to take effect.
+    /// remote workstation over SSH instead of locally. Settings -> Remote
+    /// Workstation must be configured + enabled for this to take effect.
     @Published public var runOnDGX: Bool = false
 
     /// Latest results keyed by lesion id (= connected-component number).
@@ -221,13 +221,13 @@ public final class ClassificationViewModel: ObservableObject {
             guard !customBinaryPath.isEmpty else {
                 throw ClassificationError.modelUnavailable("Point at a Python script first.")
             }
-            // Remote path — run the classifier on the DGX if the user has
-            // flipped "Run on DGX Spark" in the panel + configured the host.
+            // Remote path: run the classifier on the configured workstation if
+            // the user enabled remote execution and configured the host.
             if runOnDGX {
                 let cfg = DGXSparkConfig.load()
                 guard cfg.isConfigured else {
                     throw ClassificationError.modelUnavailable(
-                        "DGX Spark not configured. Settings → DGX Spark."
+                        "Remote workstation not configured. Settings -> Remote Workstation."
                     )
                 }
                 let remoteSpec = RemoteLesionClassifier.Spec(
@@ -240,7 +240,7 @@ public final class ClassificationViewModel: ObservableObject {
                 )
                 return RemoteLesionClassifier(
                     id: entry.id,
-                    displayName: "\(entry.displayName) · DGX",
+                    displayName: "\(entry.displayName) · remote",
                     spec: remoteSpec,
                     supportedModalities: entry.modality.map { [$0] } ?? [],
                     supportedBodyRegions: [entry.bodyRegion]

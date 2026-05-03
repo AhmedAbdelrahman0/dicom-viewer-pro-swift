@@ -961,14 +961,14 @@ struct BrainPETPanel: View {
                     Button {
                         scanGAAINReferenceData()
                     } label: {
-                        Label("Scan GAAIN", systemImage: "externaldrive.badge.magnifyingglass")
+                        Label("Scan Data Folder", systemImage: "externaldrive.badge.magnifyingglass")
                             .frame(maxWidth: .infinity)
                     }
 
                     Button {
                         exportGAAINBuildPackage()
                     } label: {
-                        Label("Export Spark Job", systemImage: "shippingbox.and.arrow.backward")
+                        Label("Export Remote Job", systemImage: "shippingbox.and.arrow.backward")
                             .frame(maxWidth: .infinity)
                     }
                     .disabled(gaainSummary == nil)
@@ -979,7 +979,7 @@ struct BrainPETPanel: View {
                 Button {
                     Task { await launchGAAINOnSpark() }
                 } label: {
-                    Label(isGAAINRemoteRunning ? "Running on Spark" : "Run on Spark",
+                    Label(isGAAINRemoteRunning ? "Running Remotely" : "Run Remotely",
                           systemImage: isGAAINRemoteRunning ? "hourglass" : "bolt.horizontal.circle")
                         .frame(maxWidth: .infinity)
                 }
@@ -987,13 +987,18 @@ struct BrainPETPanel: View {
                 .controlSize(.small)
                 .disabled(isGAAINRemoteRunning)
 
+                Text("Tracer does not bundle GAAIN data. Confirm applicable data-use, citation, and sharing terms before building derived artifacts.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
                 if DGXSparkConfig.load().readinessMessage != nil,
                    let detected = DGXSparkConfig.detectedNVIDIASparkProfile(enabled: true) {
                     Button {
                         detected.save()
-                        gaainStatus = "Applied detected Spark profile: \(detected.sshDestination)"
+                        gaainStatus = "Applied detected remote workstation profile: \(detected.sshDestination)"
                     } label: {
-                        Label("Use Detected Spark Profile", systemImage: "bolt.horizontal.circle")
+                        Label("Use Detected Remote Profile", systemImage: "bolt.horizontal.circle")
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.bordered)
@@ -1025,7 +1030,7 @@ struct BrainPETPanel: View {
 
                 if let package = gaainPackage {
                     VStack(alignment: .leading, spacing: 4) {
-                        Label("Spark package ready", systemImage: "checkmark.seal")
+                        Label("Remote package ready", systemImage: "checkmark.seal")
                             .font(.caption)
                             .foregroundStyle(.green)
                         Text(package.rootURL.path)
@@ -1044,7 +1049,7 @@ struct BrainPETPanel: View {
             }
             .padding(.top, 6)
         } label: {
-            Label("GAAIN reference builder", systemImage: "cpu")
+            Label("GAAIN data import", systemImage: "cpu")
                 .font(.system(size: 12, weight: .semibold))
         }
     }
@@ -1079,9 +1084,9 @@ struct BrainPETPanel: View {
         JobManager.shared.start(JobUpdate(
             operationID: operationID,
             kind: .brainPETReference,
-            title: "GAAIN reference package",
+            title: "GAAIN data import package",
             stage: "Exporting",
-            detail: "Writing Spark/DGX build plan",
+            detail: "Writing remote build plan",
             progress: 0.2,
             systemImage: "brain.head.profile",
             canCancel: false
@@ -1090,9 +1095,9 @@ struct BrainPETPanel: View {
             let package = try GAAINReferencePipeline.writeBuildPackage()
             gaainSummary = package.summary
             gaainPackage = package
-            gaainStatus = "Spark package ready at \(package.rootURL.path)"
+            gaainStatus = "Remote package ready at \(package.rootURL.path)"
             JobManager.shared.succeed(operationID: operationID,
-                                      detail: "GAAIN package exported with \(package.plan.jobs.count) tracer job(s)")
+                                      detail: "GAAIN data import package exported with \(package.plan.jobs.count) tracer job(s)")
         } catch {
             gaainPackage = nil
             gaainStatus = "GAAIN package export failed: \(error.localizedDescription)"
@@ -1112,14 +1117,14 @@ struct BrainPETPanel: View {
            let detected = DGXSparkConfig.detectedNVIDIASparkProfile(enabled: true) {
             detected.save()
             cfg = detected
-            gaainStatus = "Applied detected Spark profile: \(detected.sshDestination). Preparing remote build..."
+            gaainStatus = "Applied detected remote workstation profile: \(detected.sshDestination). Preparing remote import..."
         }
         guard cfg.enabled, cfg.isConfigured else {
-            gaainStatus = cfg.readinessMessage ?? "Enable and configure DGX Spark in Settings before launching the GAAIN build."
+            gaainStatus = cfg.readinessMessage ?? "Enable and configure Remote Workstation in Settings before launching the GAAIN data import."
             JobManager.shared.start(JobUpdate(
                 operationID: operationID,
                 kind: .brainPETReference,
-                title: "GAAIN Spark build",
+                title: "GAAIN remote data import",
                 stage: "Configuration",
                 detail: gaainStatus,
                 progress: nil,
@@ -1129,17 +1134,17 @@ struct BrainPETPanel: View {
             JobManager.shared.fail(operationID: operationID,
                                    error: JobErrorInfo(code: "dgx_not_configured",
                                                        message: gaainStatus,
-                                                       recoverySuggestion: "Open Settings -> DGX Spark, set the host/user/workdir, and enable DGX Spark.",
+                                                       recoverySuggestion: "Open Settings -> Remote Workstation, set the host/user/workdir, and enable remote execution.",
                                                        isRetryable: true))
             return
         }
 
         isGAAINRemoteRunning = true
-        gaainStatus = "Preparing GAAIN Spark build..."
+        gaainStatus = "Preparing GAAIN remote data import..."
         JobManager.shared.start(JobUpdate(
             operationID: operationID,
             kind: .brainPETReference,
-            title: "GAAIN Spark build",
+            title: "GAAIN remote data import",
             stage: "Preparing",
             detail: "Exporting local build package",
             progress: nil,
@@ -1153,7 +1158,7 @@ struct BrainPETPanel: View {
             gaainSummary = package.summary
             gaainPackage = package
             JobManager.shared.update(operationID: operationID,
-                                     stage: "Spark",
+                                     stage: "Remote",
                                      detail: "Uploading package and launching worker")
 
             let sink: @Sendable (String) -> Void = { text in
@@ -1174,15 +1179,15 @@ struct BrainPETPanel: View {
                 return try runner.run(package: package, logSink: sink)
             }.value
 
-            gaainStatus = "Spark build complete: \(result.artifactPaths.count) artifact(s) pulled to \(result.localOutputRoot.path)"
+            gaainStatus = "Remote import complete: \(result.artifactPaths.count) artifact(s) pulled to \(result.localOutputRoot.path)"
             JobManager.shared.succeed(operationID: operationID,
                                       detail: gaainStatus)
         } catch {
-            gaainStatus = "GAAIN Spark build failed: \(error.localizedDescription)"
+            gaainStatus = "GAAIN remote data import failed: \(error.localizedDescription)"
             JobManager.shared.fail(operationID: operationID,
                                    error: JobErrorInfo(error,
                                                        code: "gaain_spark_build_failed",
-                                                       recoverySuggestion: "Check Settings -> DGX Spark, Python/nibabel/numpy availability on Spark, remote disk space, and the Job Center log.",
+                                                       recoverySuggestion: "Check Settings -> Remote Workstation, Python/nibabel/numpy availability on the remote workstation, disk space, and the Job Center log.",
                                                        isRetryable: true))
         }
     }

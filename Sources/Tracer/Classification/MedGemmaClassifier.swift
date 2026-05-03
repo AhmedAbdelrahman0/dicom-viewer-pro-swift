@@ -3,8 +3,8 @@ import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers
 
-/// Multimodal classification via **MedGemma** (Google 2024+ — 4B / 27B
-/// variants) running locally through `llama.cpp` with GGUF-quantised
+/// Multimodal classification via a **MedGemma-compatible** model running
+/// locally through `llama.cpp` with GGUF-quantised
 /// weights. Accepts a lesion image + an open-ended text prompt and
 /// returns a structured list of class probabilities plus the model's
 /// free-text rationale.
@@ -16,8 +16,7 @@ import UniformTypeIdentifiers
 /// ### Runtime requirements
 /// The user must have `llama.cpp` installed (`llama-cli` binary or
 /// `llama-mtmd-cli` for the multimodal variant) and the MedGemma weights
-/// downloaded (see e.g. `bartowski/google_medgemma-27b-it-GGUF` on
-/// HuggingFace). Tracer itself doesn't bundle weights or the binary.
+/// downloaded. Tracer itself doesn't bundle weights or the binary.
 ///
 /// ### Prompt contract
 /// We send a prompt like:
@@ -36,9 +35,8 @@ import UniformTypeIdentifiers
 /// tolerates leading/trailing text, and refuses to return a result if
 /// the JSON is malformed.
 ///
-/// Licensing: MedGemma is under Google's Health AI Developer Foundations
-/// license — research + commercial-with-terms. Review before shipping
-/// in a regulated setting.
+/// Licensing: model/provider terms apply. Review before shipping in a
+/// regulated setting.
 public final class MedGemmaClassifier: LesionClassifier, @unchecked Sendable {
     public let id: String
     public let displayName: String
@@ -90,7 +88,7 @@ public final class MedGemmaClassifier: LesionClassifier, @unchecked Sendable {
                 spec: Spec,
                 supportedModalities: [Modality] = [],
                 supportedBodyRegions: [String] = [],
-                provenance: String = "MedGemma via llama.cpp — Google HAI-DEF license") {
+                provenance: String = "MedGemma-compatible local runner via llama.cpp") {
         self.id = id
         self.displayName = displayName
         self.spec = spec
@@ -184,7 +182,7 @@ public final class MedGemmaClassifier: LesionClassifier, @unchecked Sendable {
     private static func buildPrompt(modality: String, labels: [String]) -> String {
         let list = labels.map { "- \($0)" }.joined(separator: "\n")
         return """
-        You are MedGemma, a radiology AI assistant. The attached image is a \(modality) slice showing a lesion. Classify the most likely diagnosis from:
+        You are a radiology AI assistant. The attached image is a \(modality) slice showing a lesion. Classify the most likely diagnosis from:
         \(list)
 
         Respond with a single JSON object, no extra prose:

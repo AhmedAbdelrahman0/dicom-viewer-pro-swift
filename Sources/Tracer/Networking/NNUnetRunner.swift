@@ -256,7 +256,7 @@ public final class NNUnetRunner: @unchecked Sendable {
     /// Multi-channel variant: writes each `channels[i]` to disk as
     /// `<caseID>_000i.nii`, matching nnU-Net's channel-file convention.
     ///
-    /// Use this for models like `Dataset221_AutoPETII_2023` and LesionTracer
+    /// Use this for models like `Dataset221_AutoPETII_2023` and AutoPET III-compatible PET models
     /// where channel 0 is CT (HU) and channel 1 is PET (SUV-scaled). All
     /// channels must share the same voxel grid; the returned `LabelMap` is
     /// bound to `referenceVolume`'s geometry.

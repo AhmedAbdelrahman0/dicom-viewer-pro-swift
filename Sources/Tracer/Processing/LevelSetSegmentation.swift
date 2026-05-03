@@ -7,15 +7,13 @@ import Foundation
 ///   *User-Guided 3D Active Contour Segmentation of Anatomical Structures*.
 ///   NeuroImage 31(3): 1116–1128.
 ///
-/// This is the public-domain algorithm that underpins ITK-SNAP's snake mode.
-/// This implementation is an independent Swift port of the math — it does
-/// **not** link to or copy any ITK-SNAP source (which is GPL-3.0). License
-/// here is the same as the rest of Tracer.
+/// This implementation is an independent Swift port of the math. License here
+/// is the same as the rest of Tracer.
 ///
 /// ### Pipeline
 ///
 /// 1. **Speed image** `F(x) ∈ [-1, 1]` derived from the intensity volume.
-///    Two modes, matching ITK-SNAP's classic workflow:
+///    Two modes:
 ///      - `regionCompetition` — smooth thresholding around a foreground
 ///        intensity range; positive inside the region of interest, negative
 ///        outside. Good for bright-object-on-dark-background (tumors,

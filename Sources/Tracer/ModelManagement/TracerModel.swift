@@ -12,14 +12,14 @@ public struct TracerModel: Codable, Identifiable, Hashable, Sendable {
     public var kind: Kind
     /// Where the artifact was fetched from — the HuggingFace URL, the
     /// Zenodo record, a file:// URL when the user imported from disk, or
-    /// `ssh://dgx:~/nnUNet_results/...` for a DGX-hosted artifact.
+    /// `ssh://remote:~/nnUNet_results/...` for a remote-hosted artifact.
     public var sourceURL: URL?
     /// Absolute path on disk. For `.kind == .remoteArtifact` this points at
-    /// the path *on* the DGX; otherwise it's a path under Tracer's
+    /// the path *on* the remote host; otherwise it's a path under Tracer's
     /// Application Support models directory.
     public var localPath: String
     /// Raw SHA-256 of the artifact (hex). Optional — user-imported or
-    /// DGX-hosted artifacts may not have one. Download verification uses
+    /// Remote-hosted artifacts may not have one. Download verification uses
     /// this when present.
     public var sha256: String?
     /// Size on disk in bytes (local) or declared size (remote).  Shown as
@@ -49,8 +49,7 @@ public struct TracerModel: Codable, Identifiable, Hashable, Sendable {
         /// — the artifact isn't a weight file per se, but bundling the
         /// path with the rest of the registry keeps one pane of glass.
         case pythonScript
-        /// Artifact lives on a remote host (typically the user's DGX
-        /// Spark) and is referenced by remote path only. The runner must
+        /// Artifact lives on a remote host and is referenced by remote path only. The runner must
         /// execute via SSH; nothing local is stored.
         case remoteArtifact
 
@@ -62,7 +61,7 @@ public struct TracerModel: Codable, Identifiable, Hashable, Sendable {
             case .treeModelJSON:  return "Tree JSON"
             case .monaiBundle:    return "MONAI bundle"
             case .pythonScript:   return "Python script"
-            case .remoteArtifact: return "Remote (DGX)"
+            case .remoteArtifact: return "Remote"
             }
         }
     }

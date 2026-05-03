@@ -6,7 +6,7 @@ import simd
 ///
 /// The AutoPET V Grand Challenge interface uses MHA for CT, PET, and output
 /// lesion masks. This implementation supports the common uncompressed
-/// `ElementDataFile = LOCAL` form written by SimpleITK, plus single external
+/// `ElementDataFile = LOCAL` inline form, plus single external
 /// raw data files referenced from an `.mhd` header.
 public enum MetaImageIO {
     public enum Error: Swift.Error, LocalizedError {

@@ -23,7 +23,7 @@ public enum PETMRRegistrationMode: String, CaseIterable, Identifiable, Codable, 
     public var helpText: String {
         switch self {
         case .automaticBestFit:
-            return "For brain PET/MR, use the MRI-driven path. For other PET/MR, use scanner geometry first, test rigid/body-fit candidates, run available external engines such as SimpleITK, then only accept a more complex fit when PET/MR QA improves materially."
+            return "For brain PET/MR, use the MRI-driven path. For other PET/MR, use scanner geometry first, test rigid/body-fit candidates, run available external engines, then only accept a more complex fit when PET/MR QA improves materially."
         case .geometry:
             return "Use scanner/world geometry only. Best for simultaneous PET/MR or already registered images."
         case .brainMRIDriven:

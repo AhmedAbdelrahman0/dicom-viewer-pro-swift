@@ -35,7 +35,7 @@ public enum LabelPresets {
             pelvic_OARs,
             spineVertebrae,
         ]
-        ITKSNAPPresets.register(into: &presets)
+        AnatomicalLabelPresets.register(into: &presets)
         return presets
     }()
 

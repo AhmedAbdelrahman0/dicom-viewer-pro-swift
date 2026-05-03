@@ -3,9 +3,9 @@ import simd
 
 public enum PETMRDeformableBackend: String, CaseIterable, Identifiable, Codable, Sendable {
     case internalBodyEnvelope
-    case simpleITKMI
+    case pythonMI
     case brainsFit
-    case itkSnapGreedy
+    case greedy
     case antsSyN
     case synthMorph
     case voxelMorph
@@ -16,9 +16,9 @@ public enum PETMRDeformableBackend: String, CaseIterable, Identifiable, Codable,
     public var displayName: String {
         switch self {
         case .internalBodyEnvelope: return "Internal body warp"
-        case .simpleITKMI: return "SimpleITK MI"
-        case .brainsFit: return "3D Slicer BRAINSFit"
-        case .itkSnapGreedy: return "ITK-SNAP Greedy"
+        case .pythonMI: return "Python MI refinement"
+        case .brainsFit: return "BRAINSFit"
+        case .greedy: return "Greedy"
         case .antsSyN: return "ANTs SyN"
         case .synthMorph: return "SynthMorph"
         case .voxelMorph: return "VoxelMorph"
@@ -33,13 +33,9 @@ public enum PETMRDeformableBackend: String, CaseIterable, Identifiable, Codable,
     public var defaultExecutableName: String {
         switch self {
         case .internalBodyEnvelope: return ""
-        case .simpleITKMI: return "python3"
-        case .brainsFit:
-            let slicerPath = "/Applications/Slicer.app/Contents/lib/Slicer-5.10/cli-modules/BRAINSFit"
-            return FileManager.default.isExecutableFile(atPath: slicerPath) ? slicerPath : "BRAINSFit"
-        case .itkSnapGreedy:
-            let itkSnapPath = "/Applications/ITK-SNAP.app/Contents/bin/greedy"
-            return FileManager.default.isExecutableFile(atPath: itkSnapPath) ? itkSnapPath : "greedy"
+        case .pythonMI: return "python3"
+        case .brainsFit: return "BRAINSFit"
+        case .greedy: return "greedy"
         case .antsSyN: return "antsRegistration"
         case .synthMorph: return "mri_synthmorph"
         case .voxelMorph: return "python3"
@@ -51,12 +47,12 @@ public enum PETMRDeformableBackend: String, CaseIterable, Identifiable, Codable,
         switch self {
         case .internalBodyEnvelope:
             return "Uses Tracer's built-in body-envelope alignment. No external tools required."
-        case .simpleITKMI:
-            return "Runs a local Python SimpleITK Mattes mutual-information rigid precision-polish after PET has been prealigned to the MR grid. Add --allow-scale in extra args only when scale is intentional."
+        case .pythonMI:
+            return "Runs a local Python Mattes mutual-information rigid precision-polish after PET has been prealigned to the MR grid. Add --allow-scale in extra args only when scale is intentional."
         case .brainsFit:
-            return "Runs 3D Slicer's BRAINSFit on Tracer's staged orthonormal PET/MR grid. Best used as a rigid, brain-cropped multimodal refinement candidate."
-        case .itkSnapGreedy:
-            return "Runs ITK-SNAP's Greedy affine plus stationary-velocity deformable refinement on Tracer's staged PET/MR grid, then QA-selects the result against the other candidates."
+            return "Runs BRAINSFit on Tracer's staged orthonormal PET/MR grid. Best used as a rigid, brain-cropped multimodal refinement candidate."
+        case .greedy:
+            return "Runs Greedy affine plus stationary-velocity deformable refinement on Tracer's staged PET/MR grid, then QA-selects the result against the other candidates."
         case .antsSyN:
             return "Runs antsRegistration with rigid/affine/SyN stages and reads the warped PET NIfTI output."
         case .synthMorph:
@@ -104,7 +100,7 @@ public struct PETMRDeformableRegistrationConfiguration: Equatable, Sendable {
     public var timeoutSeconds: Double
     public var metricPreset: PETMRRegistrationMetricPreset
 
-    public init(backend: PETMRDeformableBackend = .simpleITKMI,
+    public init(backend: PETMRDeformableBackend = .pythonMI,
                 executablePath: String = "",
                 modelPath: String = "",
                 extraArguments: String = "",
@@ -139,14 +135,14 @@ public struct PETMRDeformableRegistrationConfiguration: Equatable, Sendable {
         if exe.contains("/") && !FileManager.default.isExecutableFile(atPath: exe) {
             return "\(backend.displayName) executable is not runnable: \(exe)"
         }
-        if backend == .simpleITKMI {
-            return "SimpleITK MI will run via \(exe). Requires the Python SimpleITK package."
+        if backend == .pythonMI {
+            return "Python MI refinement will run via \(exe). Requires the Python registration dependency for this backend."
         }
         if backend == .brainsFit {
-            return "BRAINSFit will run via \(exe). Requires 3D Slicer or BRAINSFit on PATH."
+            return "BRAINSFit will run via \(exe). Requires BRAINSFit on PATH or a configured executable path."
         }
-        if backend == .itkSnapGreedy {
-            return "ITK-SNAP Greedy will run via \(exe). Requires ITK-SNAP's greedy executable or greedy on PATH."
+        if backend == .greedy {
+            return "Greedy will run via \(exe). Requires greedy on PATH or a configured executable path."
         }
         return "\(backend.displayName) will run via \(exe)."
     }
@@ -419,9 +415,9 @@ public enum PETMRDeformableRegistrationRunner {
         let extra = shellLikeSplit(configuration.extraArguments)
 
         switch configuration.backend {
-        case .simpleITKMI:
-            let scriptURL = workDir.appendingPathComponent("simpleitk_petmr_registration.py")
-            try simpleITKRegistrationScript.write(to: scriptURL, atomically: true, encoding: .utf8)
+        case .pythonMI:
+            let scriptURL = workDir.appendingPathComponent("python_mi_petmr_registration.py")
+            try pythonMIRegistrationScript.write(to: scriptURL, atomically: true, encoding: .utf8)
             var environment = ResourcePolicy.load().applyingSubprocessDefaults(to: ProcessInfo.processInfo.environment)
             environment["ITK_NIFTI_SFORM_PERMISSIVE"] = "1"
             environment["PYTHONUNBUFFERED"] = "1"
@@ -465,7 +461,7 @@ public enum PETMRDeformableRegistrationRunner {
                 environment: ResourcePolicy.load().applyingSubprocessDefaults(to: ProcessInfo.processInfo.environment)
             )
 
-        case .itkSnapGreedy:
+        case .greedy:
             let affineURL = workDir.appendingPathComponent("greedy_affine.mat")
             let warpURL = workDir.appendingPathComponent("greedy_warp.nii")
             let scriptURL = workDir.appendingPathComponent("greedy_petmr_registration.sh")
@@ -492,13 +488,13 @@ public enum PETMRDeformableRegistrationRunner {
             import json
             with open(r"$QA", "w", encoding="utf-8") as handle:
                 json.dump({"notes": [
-                    "ITK-SNAP Greedy affine+SV deformable refinement",
+                    "Greedy affine+SV deformable refinement",
                     "metric=\(metric)",
                     "transform=GreedyDOF7+SV",
                     "durationSeconds=" + str($DURATION)
                 ]}, handle, indent=2)
             PY
-            echo "ITK-SNAP Greedy PET/MR registration complete"
+            echo "Greedy PET/MR registration complete"
             """
             try script.write(to: scriptURL, atomically: true, encoding: .utf8)
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
@@ -595,7 +591,7 @@ public enum PETMRDeformableRegistrationRunner {
         }
     }
 
-    private static let simpleITKRegistrationScript = #"""
+    private static let pythonMIRegistrationScript = #"""
 import argparse
 import json
 import os
@@ -662,7 +658,7 @@ def configured_registration(args, initial, fixed_mask, moving_mask, sampling, se
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Tracer PET/MR SimpleITK registration worker")
+    parser = argparse.ArgumentParser(description="Tracer PET/MR Python MI registration worker")
     parser.add_argument("--fixed", required=True)
     parser.add_argument("--moving", required=True)
     parser.add_argument("--output", required=True)
@@ -724,9 +720,9 @@ def main():
         except Exception as exc:
             message = name + " failed: " + str(exc)
             warnings.append(message)
-            print("SimpleITK retry:", message, file=sys.stderr)
+            print("Python MI retry:", message, file=sys.stderr)
     if final_transform is None or registration is None:
-        raise RuntimeError("all SimpleITK PET/MR registration attempts failed: " + " | ".join(warnings))
+        raise RuntimeError("all Python MI PET/MR registration attempts failed: " + " | ".join(warnings))
     warped = sitk.Resample(moving, fixed, final_transform, sitk.sitkLinear, 0.0, sitk.sitkFloat32)
     sitk.WriteImage(warped, args.output)
     try:
@@ -739,7 +735,7 @@ def main():
 
     report = {
         "notes": [
-            "SimpleITK rigid precision-polish",
+            "Python MI rigid precision-polish",
             "metric=" + args.metric,
             "transform=" + ("Similarity3D" if args.allow_scale else "Euler3D"),
             "maskAttempt=" + str(winning_attempt),
@@ -750,7 +746,7 @@ def main():
     }
     with open(args.qa, "w", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2)
-    print("SimpleITK PET/MR registration complete")
+    print("Python MI PET/MR registration complete")
     print("metric", registration.GetMetricValue(), "iterations", registration.GetOptimizerIteration())
 
 
@@ -758,7 +754,7 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
-        print("SimpleITK PET/MR registration failed:", exc, file=sys.stderr)
+        print("Python MI PET/MR registration failed:", exc, file=sys.stderr)
         raise
 """#
 

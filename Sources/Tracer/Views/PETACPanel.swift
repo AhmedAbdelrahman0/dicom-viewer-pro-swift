@@ -1,12 +1,12 @@
 import SwiftUI
 
 /// Panel for producing an attenuation-corrected PET from a non-attenuation-
-/// corrected PET via a deep model (subprocess or DGX). Sits in the AI
+/// corrected PET via a deep model (subprocess or remote workstation). Sits in the AI
 /// Engines menu as ⌘⇧K.
 ///
 /// Workflow:
 ///   1. Pick an entry from `PETACCatalog`
-///   2. Point at the model's Python script (and DGX activation, if remote)
+///   2. Point at the model's Python script (and remote activation, if remote)
 ///   3. Optional: pick a co-registered CT/MR for MR-AC entries
 ///   4. Run — the AC volume opens as a new entry in the volume browser
 ///      and (if there was a CT/PET fusion) becomes the new overlay.
@@ -94,7 +94,7 @@ public struct PETACPanel: View {
         if let entry = ac.selectedEntry {
             VStack(alignment: .leading, spacing: 8) {
                 Text(entry.backend == .dgxRemote
-                     ? "Remote script path on DGX"
+                     ? "Remote workstation script path"
                      : "Local Python script")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(.secondary)
@@ -167,7 +167,7 @@ public struct PETACPanel: View {
                             .frame(width: 8, height: 8)
                         Text(cfg.isConfigured && cfg.enabled
                              ? "Connected to \(cfg.sshDestination):\(cfg.port)"
-                             : "Configure Settings → DGX Spark first")
+                             : "Configure Settings -> Remote Workstation first")
                             .font(.system(size: 10))
                             .foregroundColor(.secondary)
                     }

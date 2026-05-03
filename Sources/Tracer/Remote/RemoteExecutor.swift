@@ -35,7 +35,7 @@ public final class RemoteExecutor: @unchecked Sendable {
         public var errorDescription: String? {
             switch self {
             case .notConfigured:
-                return "DGX Spark config is missing a host. Configure it in Settings → DGX Spark."
+                return "Remote workstation config is missing a host. Configure it in Settings -> Remote Workstation."
             case .commandFailed(let code, let stderr):
                 let clipped = stderr.count > 600 ? String(stderr.suffix(600)) : stderr
                 return "SSH command exited \(code): \(clipped)"
@@ -94,7 +94,7 @@ public final class RemoteExecutor: @unchecked Sendable {
                                   logSink: logSink)
     }
 
-    /// Upload a single file to `remotePath` on the DGX. Creates the
+    /// Upload a single file to `remotePath` on the remote host. Creates the
     /// remote parent directory first.
     public func uploadFile(_ localURL: URL, toRemote remotePath: String) throws {
         try ensureRemoteDirectory((remotePath as NSString).deletingLastPathComponent)

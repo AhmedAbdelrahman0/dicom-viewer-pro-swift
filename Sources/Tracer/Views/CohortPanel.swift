@@ -449,7 +449,7 @@ public struct CohortPanel: View {
 
                 HStack {
                     TextField(isRemote
-                              ? "~/scripts/deep_ac.py (on the DGX)"
+                              ? "~/scripts/deep_ac.py (remote)"
                               : "path/to/deep_ac.py",
                               text: $form.petACScriptPath)
                         .textFieldStyle(.roundedBorder)

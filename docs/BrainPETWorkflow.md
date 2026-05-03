@@ -51,16 +51,25 @@ Clinical use requires local validation of the atlas, reference region,
 resolution smoothing, tracer timing, scanner harmonization, and threshold
 selection.
 
-## GAAIN Spark reference build
+Trademark note: DICOM® is the registered trademark of the National Electrical
+Manufacturers Association for its standards publications relating to digital
+communications of medical information.
 
-The Brain PET panel includes a **GAAIN reference builder** disclosure group.
-Use **Scan GAAIN** after downloading the public GAAIN Centiloid archives into:
+## GAAIN Data Import
+
+The Brain PET panel includes a **GAAIN data import** disclosure group.
+Use **Scan Data Folder** after downloading GAAIN Centiloid archives into:
 
 ```text
 ~/Library/Application Support/Tracer/NormalDatabases/InternetDownloads/GAAIN-Centiloid
 ```
 
-Use **Export Spark Job** to create:
+Tracer does not bundle GAAIN data. Use this workflow only with materials you
+downloaded under the applicable GAAIN terms; the user is responsible for
+confirming permitted research/non-clinical use, citation, and sharing
+restrictions before building or distributing derived artifacts.
+
+Use **Export Remote Job** to create:
 
 ```text
 ~/Library/Application Support/Tracer/ReferenceBuilds/GAAIN-Centiloid
@@ -71,27 +80,27 @@ The package contains:
 - `gaain_reference_build_plan.json`: a reproducible tracer-by-tracer compute
   plan for PiB, florbetapir/Amyvid, florbetaben, flutemetamol, NAV4694, and FDG
   assets when present.
-- `gaain_reference_build.py`: a self-contained Python worker for local or DGX
-  Spark execution.
+- `gaain_reference_build.py`: a self-contained Python worker for local or
+  remote workstation execution.
 - `run_gaain_reference_build.sh`: a direct launch script.
 
 The first compute stage extracts archives, inventories NIfTI imaging, applies
 standard VOIs when PET and VOI grids already match, and writes Tracer-compatible
 normal CSVs plus per-tracer QC files. If a PET scan needs registration,
-deformable alignment, DICOM conversion, or missing dependencies, the worker
+deformable alignment, DICOM® conversion, or missing dependencies, the worker
 records that as QC rather than silently producing a bad normal database.
 
-If DGX Spark is enabled in Settings, **Run on Spark** performs the remote
+If Remote Workstation is enabled in Settings, **Run Remotely** performs the remote
 workflow directly from Tracer:
 
 1. Exports the local package.
-2. Uploads package files to the configured Spark workdir.
+2. Uploads package files to the configured remote workdir.
 3. Syncs any missing GAAIN archives into
    `~/tracer-remote/gaain-centiloid-data` by default.
-4. Runs the Python worker on Spark and streams logs to the Job Center.
+4. Runs the Python worker on the remote workstation and streams logs to the Job Center.
 5. Pulls `results.tgz` back into
    `~/Library/Application Support/Tracer/ReferenceBuilds/GAAIN-Centiloid/remote-results`.
 
-The first run can upload roughly 20 GB if Spark does not already have the
+The first run can upload roughly 20 GB if the remote workstation does not already have the
 archives. Later runs skip files whose remote byte counts match the local
 manifest.

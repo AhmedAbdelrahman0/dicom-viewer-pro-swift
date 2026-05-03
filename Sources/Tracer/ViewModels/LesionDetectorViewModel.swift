@@ -58,10 +58,10 @@ public final class LesionDetectorViewModel: ObservableObject {
             return nil
         case .dgxRemote:
             let cfg = DGXSparkConfig.load()
-            if !cfg.enabled { return "Enable DGX Spark in Settings → DGX Spark." }
-            if !cfg.isConfigured { return "Set a host in Settings → DGX Spark." }
+            if !cfg.enabled { return "Enable Remote Workstation in Settings." }
+            if !cfg.isConfigured { return "Set a host in Settings -> Remote Workstation." }
             if scriptPath.trimmingCharacters(in: .whitespaces).isEmpty {
-                return "Point at the detector script's path on the DGX."
+                return "Point at the detector script's path on the remote workstation."
             }
             return nil
         }
@@ -191,7 +191,7 @@ public final class LesionDetectorViewModel: ObservableObject {
         case .dgxRemote:
             let cfg = DGXSparkConfig.load()
             guard cfg.isConfigured, cfg.enabled else {
-                throw DetectionError.modelUnavailable("DGX Spark not configured / enabled.")
+                throw DetectionError.modelUnavailable("Remote workstation not configured / enabled.")
             }
             let script = scriptPath.trimmingCharacters(in: .whitespaces)
             guard !script.isEmpty else {
@@ -211,7 +211,7 @@ public final class LesionDetectorViewModel: ObservableObject {
             )
             return RemoteLesionDetector(
                 id: entry.id,
-                displayName: "\(entry.displayName) · DGX",
+                displayName: "\(entry.displayName) · remote",
                 spec: spec,
                 supportedModalities: entry.modality.map { [$0] } ?? [],
                 provenance: entry.provenance,

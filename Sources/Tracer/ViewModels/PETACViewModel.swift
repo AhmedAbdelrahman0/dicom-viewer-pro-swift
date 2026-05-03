@@ -58,10 +58,10 @@ public final class PETACViewModel: ObservableObject {
             return nil
         case .dgxRemote:
             let cfg = DGXSparkConfig.load()
-            if !cfg.enabled { return "Enable DGX Spark in Settings → DGX Spark." }
-            if !cfg.isConfigured { return "Set a host in Settings → DGX Spark." }
+            if !cfg.enabled { return "Enable Remote Workstation in Settings." }
+            if !cfg.isConfigured { return "Set a host in Settings -> Remote Workstation." }
             if scriptPath.trimmingCharacters(in: .whitespaces).isEmpty {
-                return "Point at the AC script's path on the DGX."
+                return "Point at the AC script's path on the remote workstation."
             }
             return nil
         }
@@ -170,7 +170,7 @@ public final class PETACViewModel: ObservableObject {
         case .dgxRemote:
             let cfg = DGXSparkConfig.load()
             guard cfg.isConfigured, cfg.enabled else {
-                throw PETACError.modelUnavailable("DGX Spark not configured / enabled.")
+                throw PETACError.modelUnavailable("Remote workstation not configured / enabled.")
             }
             let script = scriptPath.trimmingCharacters(in: .whitespaces)
             guard !script.isEmpty else {
@@ -193,7 +193,7 @@ public final class PETACViewModel: ObservableObject {
             )
             return RemotePETACCorrector(
                 id: entry.id,
-                displayName: "\(entry.displayName) · DGX",
+                displayName: "\(entry.displayName) · remote",
                 spec: spec,
                 provenance: entry.provenance,
                 license: entry.license

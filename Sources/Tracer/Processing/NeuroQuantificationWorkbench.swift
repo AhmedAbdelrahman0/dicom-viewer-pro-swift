@@ -268,7 +268,7 @@ public enum NeuroQuantAtlasRegistry {
             templateSpace: .centiloid,
             supportedProtocols: [.amyloidCentiloid],
             requiredRegionKeywords: ["frontal", "temporal", "anterior cingulate", "posterior cingulate", "parietal", "precuneus", "cerebellum"],
-            sourceDescription: "MIMneuro-style Centiloid cortical and cerebellar VOI contract"
+            sourceDescription: "Centiloid cortical and cerebellar VOI contract"
         ),
         NeuroQuantAtlasPack(
             id: "fdg-3d-ssp",

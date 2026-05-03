@@ -166,10 +166,10 @@ public enum LesionClassifierCatalog {
         modality: nil,
         bodyRegion: "Any",
         classes: [],    // user-defined
-        description: "Google MedSigLIP — convert image/text encoders to CoreML and supply prompt text plus tokenizer-produced token IDs.",
-        provenance: "Google HAI-DEF MedSigLIP.",
+        description: "MedSigLIP-compatible model family — convert image/text encoders to CoreML and supply prompt text plus tokenizer-produced token IDs.",
+        provenance: "User-supplied MedSigLIP-compatible weights.",
         notes: "Training/research workflow only. Requires the real tokenizer output from the model conversion pipeline.",
-        license: "Google HAI-DEF (research + commercial with terms)",
+        license: "Model/provider terms apply",
         requiresConfiguration: true
     )
 
@@ -199,9 +199,9 @@ public enum LesionClassifierCatalog {
         bodyRegion: "Any",
         classes: [],
         description: "MedGemma 4B instruction-tuned (2024–2025) running through llama.cpp with a GGUF-quantised weights file. Produces a JSON diagnosis + free-text rationale per lesion.",
-        provenance: "Google MedGemma — distributed via HuggingFace GGUFs (bartowski, unsloth, etc.).",
+        provenance: "User-supplied MedGemma-compatible GGUF weights.",
         notes: "~3 GB on disk for the 4B Q4_K_M. Expect 1–3 s per lesion on an M-series Mac.",
-        license: "Google Health AI Developer Foundations (research + commercial with terms)",
+        license: "Model/provider terms apply",
         requiresConfiguration: true
     )
 }

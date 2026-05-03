@@ -40,7 +40,7 @@ enum CohortPETACFactory {
             let cfg = DGXSparkConfig.load()
             guard cfg.isConfigured, cfg.enabled else {
                 throw PETACError.modelUnavailable(
-                    "DGX Spark not configured / enabled for cohort AC."
+                    "Remote workstation not configured / enabled for cohort AC."
                 )
             }
             let script = job.petACScriptPath.trimmingCharacters(in: .whitespaces)
@@ -63,7 +63,7 @@ enum CohortPETACFactory {
             )
             return RemotePETACCorrector(
                 id: entry.id,
-                displayName: "\(entry.displayName) · DGX",
+                displayName: "\(entry.displayName) · remote",
                 spec: spec,
                 provenance: entry.provenance,
                 license: entry.license

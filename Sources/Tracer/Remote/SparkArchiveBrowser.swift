@@ -40,9 +40,9 @@ public enum SparkArchiveBrowser {
         public var errorDescription: String? {
             switch self {
             case .remoteListingFailed(let message):
-                return "Spark archive listing failed: \(message)"
+                return "Remote archive listing failed: \(message)"
             case .invalidListingPayload:
-                return "Spark archive listing returned an unreadable response."
+                return "Remote archive listing returned an unreadable response."
             }
         }
     }

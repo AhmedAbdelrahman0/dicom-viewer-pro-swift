@@ -94,7 +94,7 @@ public struct LesionDetectorPanel: View {
         if let entry = detector.selectedEntry {
             VStack(alignment: .leading, spacing: 8) {
                 Text(entry.backend == .dgxRemote
-                     ? "Remote script path on DGX"
+                     ? "Remote workstation script path"
                      : "Local Python script")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(.secondary)
@@ -175,7 +175,7 @@ public struct LesionDetectorPanel: View {
                             .frame(width: 8, height: 8)
                         Text(cfg.isConfigured && cfg.enabled
                              ? "Connected to \(cfg.sshDestination):\(cfg.port)"
-                             : "Configure Settings → DGX Spark first")
+                             : "Configure Settings -> Remote Workstation first")
                             .font(.system(size: 10))
                             .foregroundColor(.secondary)
                     }

@@ -4,12 +4,18 @@ Tracer is a native SwiftUI imaging workstation for macOS and iPadOS. It is
 being built as a serious single-user PACS, PET/CT review station, AI
 segmentation lab, labeling platform, and nuclear medicine research tool.
 
-The goal is direct: make a local workstation that feels closer to commercial
-systems such as MIM, Visage, and Sectra than to a demo app, while preserving
-the openness and hackability of research platforms such as 3D Slicer.
+The goal is direct: make a local workstation that feels closer to a polished
+commercial imaging workstation than to a demo app, while preserving the
+openness and hackability of research tooling.
 
 Tracer is research software. It is not FDA-cleared, CE-marked, or intended for
 diagnostic clinical use without independent validation.
+
+Third-party names in this repository are used only for factual compatibility,
+model-identification, or attribution. Tracer is not affiliated with or endorsed
+by the owners of those names. DICOM® is the registered trademark of the
+National Electrical Manufacturers Association for its standards publications
+relating to digital communications of medical information.
 
 ---
 
@@ -17,7 +23,7 @@ diagnostic clinical use without independent validation.
 
 The default branch contains the core workstation:
 
-- DICOM and NIfTI loading with orientation-aware geometry
+- DICOM® and NIfTI loading with orientation-aware geometry
 - PACS-style worklist and study browser
 - multi-viewport MPR review with customizable hanging protocols
 - PET/CT and PET/MR fusion, PET MIP, CT/MR windows, PET colormaps, SUV controls
@@ -26,9 +32,9 @@ The default branch contains the core workstation:
 - PET and CT volumetry foundations
 - SUV ROI and PET lesion metrics
 - nnU-Net, MONAI Label, MedSAM2, and assistant-driven segmentation routing
-- cohort processing, classification infrastructure, and remote/DGX execution
+- cohort processing, classification infrastructure, and remote workstation execution
 - push-to-talk reporting and assistant voice commands through Apple Speech
-  or Google MedASR
+  or a MedASR-compatible model worker
 - native exports for label maps, annotations, landmarks, meshes, and reports
 
 Several large research modules live on feature branches so they can evolve
@@ -36,7 +42,7 @@ without destabilizing the main viewer:
 
 | Branch | Focus |
 |---|---|
-| `feature/segmentation-fusion` | Migration path from the legacy PET Segmentator app into Tracer, including external LesionTracer model adoption |
+| `feature/segmentation-fusion` | PET lesion segmentation integration, including user-provided compatible model adoption |
 | `feature/pet-attenuation-correction` | PET attenuation-correction workflow experiments |
 | `feature/recon-pet-spect` | PET/SPECT reconstruction foundation from raw sinogram-style inputs |
 | `feature/synthetic-ct-from-pet` | Synthetic CT generation from PET-derived features |
@@ -51,8 +57,9 @@ Tracer supports swappable speech recognition engines for structured report
 dictation and assistant voice commands:
 
 - Apple Speech for native on-device macOS dictation.
-- Google MedASR through `workers/medasr/transcribe_medasr.py` for
-  medical/radiology-focused recognition. Tracer records the utterance,
+- A MedASR-compatible model worker through `workers/medasr/transcribe_medasr.py`
+  (`google/medasr` by default) for medical/radiology-focused recognition.
+  Tracer records the utterance,
   writes a temporary 16 kHz mono WAV, and the worker returns report or
   command text as JSON.
 
@@ -63,9 +70,49 @@ python3 -m venv .venv-medasr
 .venv-medasr/bin/python -m pip install -r workers/medasr/requirements.txt
 ```
 
-Then choose **Google MedASR** in the Dictation panel. If the model requires
+Then choose **MedASR model** in the Dictation panel. If the model requires
 protected Hugging Face access, set `HF_TOKEN=...` in the panel environment
 field.
+
+---
+
+## Smoke Tests
+
+Use the normal Swift test suite first:
+
+```bash
+swift test
+swift build -c release
+./build_app.sh
+```
+
+`./build_app.sh` writes the app bundle to
+`~/Builds/Tracer/dist/Tracer.app` by default so release artifacts stay outside
+Desktop/iCloud/FileProvider-managed folders. Use `TRACER_DIST_DIR=dist
+./build_app.sh` only when you intentionally want a repo-local development
+bundle.
+
+External integrations are checked by opt-in smoke scripts so missing hospital
+systems or local container tools fail clearly instead of breaking unrelated
+tests:
+
+```bash
+scripts/container_runtime_smoke.py
+scripts/dicomweb_smoke.py
+scripts/dicomweb_local_smoke.py
+```
+
+`scripts/dicomweb_smoke.py` requires `TRACER_DICOMWEB_URL`; set
+`TRACER_DICOMWEB_TOKEN` or `TRACER_DICOMWEB_BASIC_USER` /
+`TRACER_DICOMWEB_BASIC_PASSWORD` when the endpoint needs authentication.
+Set `TRACER_DICOMWEB_STOW_FILE` to a non-PHI test object to include a STOW-RS
+store check. For a no-credentials local loopback check,
+`scripts/dicomweb_local_smoke.py` generates a synthetic non-PHI DICOM file,
+serves QIDO-RS/WADO-RS/STOW-RS locally, and runs the same smoke client.
+`scripts/container_runtime_smoke.py` runs a tiny container image through the
+available local runtime. On macOS it automatically uses a user-owned Tracer
+Docker config folder and a Colima socket when the default Docker config path is
+not writable.
 
 ---
 
@@ -75,7 +122,7 @@ Modern imaging work often spans multiple tools:
 
 - a PACS viewer for review
 - a research viewer for labeling
-- 3D Slicer for segmentation utilities
+- dedicated segmentation utilities
 - command-line nnU-Net or MONAI for inference
 - spreadsheets or scripts for SUV/TMTV/TLG
 - separate code for cohort processing and model training
@@ -179,16 +226,16 @@ large local datasets.
 - filters and search
 - recently opened studies
 
-### Spark Dataset Registry
+### Remote Dataset Registry
 
-Large remote datasets on DGX Spark are organized under the Tracer registry:
+Large remote datasets on a remote workstation are organized under the Tracer registry:
 
 `/home/ahmed/tracer-registry`
 
-Raw datasets remain in their original Spark storage location, while the
+Raw datasets remain in their original remote storage location, while the
 registry exposes stable symlinks and keeps generated outputs separate:
 
-| Dataset ID | Registry Path | Raw Spark Target |
+| Dataset ID | Registry Path | Raw Remote Target |
 |---|---|---|
 | `fdg-pet-ct-lesions` | `/home/ahmed/tracer-registry/datasets/fdg-pet-ct-lesions` | `/home/ahmed/desktop/FDG-PET-CT-Lesions` |
 | `ncia-pet-all-10-16` | `/home/ahmed/tracer-registry/datasets/ncia-pet-all-10-16` | `/home/ahmed/desktop/PET all 10 16 ncia` |
@@ -311,7 +358,7 @@ CT volumetry foundations include:
 
 ## Segmentation and Labeling
 
-Tracer is intended to replace a separate PET Segmentator workflow and become a
+Tracer is intended to replace separate PET segmentation handoffs and become a
 large-scale labeling workstation for thousands of PET/CT studies.
 
 ### Manual Labeling
@@ -343,7 +390,7 @@ Tracer includes built-in taxonomies for:
 - thoracic organs at risk
 - abdominal organs at risk
 - pelvic organs at risk
-- ITK-SNAP-inspired brain, cardiac, knee, liver, spine, and breast presets
+- curated brain, cardiac, knee, liver, spine, and breast label presets
 
 ### AI Segmentation
 
@@ -356,22 +403,22 @@ Tracer can route segmentation tasks to multiple backends:
 | nnU-Net v2 | Local Python subprocess inference or CoreML inference |
 | MONAI Label | Server-backed interactive and active-learning segmentation |
 | MedSAM2 | Box-prompt refinement |
-| PET Engine | AutoPET, LesionTracer, LesionLocator, TMTV, and PET-specific cleanup |
-| DGX Remote | SSH execution for heavy models on a remote workstation |
+| PET Engine | AutoPET-compatible PET lesion models, LesionLocator, TMTV, and PET-specific cleanup |
+| Remote Workstation | SSH execution for heavy models on a configured workstation |
 
-### PET Segmentator Migration
+### PET Lesion Model Integration
 
-The old standalone PET Segmentator project has been absorbed into Tracer.
-Tracer now treats Spark as the source of truth for the remote LesionTracer
-runtime:
+Tracer can use a user-provided PET lesion segmentation workflow from the remote
+registry. The registry is user-controlled storage for compatible model folders,
+scripts, and worker images:
 
 - registry root: `/home/ahmed/tracer-registry`
-- LesionTracer weights: `models/lesiontracer-autopetiii`
+- compatible model weights: `models/lesiontracer-autopetiii`
 - required nnU-Net source tree: `sources/autopet-3-nnunet`
 - reusable Docker worker: `tracer-lesiontracer:latest`
 - validation script: `bin/validate-lesiontracer.sh`
 
-The PET Engine uses this registry through DGX Spark remote execution:
+The PET Engine uses this registry through remote-workstation execution:
 
 - stages CT as channel 0 and SUV-scaled PET as channel 1
 - uses nnU-Net model-folder inference with the legacy AutoPET III trainer
@@ -379,8 +426,8 @@ The PET Engine uses this registry through DGX Spark remote execution:
 - streams logs into Tracer's job/activity infrastructure
 - adds SUV-attention connected-component cleanup
 
-The standalone Segmentator app is no longer required for normal Tracer
-operation; keep the Spark registry, not the old app shell.
+No separate legacy app shell is required for normal Tracer operation when the
+registry already contains compatible weights, scripts, and worker images.
 
 ---
 
@@ -392,7 +439,7 @@ addressable by natural language.
 Examples of intended commands:
 
 - "segment FDG-avid lymphoma"
-- "use LesionTracer for whole-body PET disease"
+- "use the PET lesion model for whole-body PET disease"
 - "make a liver lesion label"
 - "change PET SUV range to 0 to 12"
 - "turn fusion off"
@@ -440,7 +487,7 @@ Supported artifact types include:
 - GGUF language model weights
 - tree-model JSON files
 - Python classifier scripts
-- remote DGX artifacts
+- remote workstation artifacts
 
 The classification layer is positioned as research/training infrastructure,
 not a clinical diagnosis engine. It supports real model artifacts and avoids
@@ -523,14 +570,14 @@ Directory overview:
 Sources/
 ├── Tracer/
 │   ├── App/                # App scene and commands
-│   ├── Classification/     # Radiomics, CoreML, MedGemma, subprocess classifiers
+│   ├── Classification/     # Radiomics, CoreML, compatible multimodal classifiers
 │   ├── Cohort/             # Batch jobs, checkpoints, exports, study results
 │   ├── IO/                 # DICOM, NIfTI, RTSTRUCT, label IO, PACS indexing
 │   ├── ModelManagement/    # Local model registry, downloads, bindings
 │   ├── Models/             # ImageVolume, LabelMap, hanging protocols, SUV, RAG
 │   ├── Networking/         # MONAI Label, MONAI Deploy, nnU-Net, MedSAM2
 │   ├── Processing/         # PET/CT segmentation, quantification, morphology, meshes
-│   ├── Remote/             # DGX Spark SSH execution
+│   ├── Remote/             # Remote workstation SSH execution
 │   ├── Rendering/          # Pixel rendering, labels, colormaps, Metal volume renderer
 │   ├── ViewModels/         # Viewer, labeling, assistant, engines, classification
 │   └── Views/              # Workstation panels and SwiftUI views
@@ -609,16 +656,17 @@ Notable model families and tools:
 
 - nnU-Net v2
 - AutoPET II / III / IV
-- LesionTracer
+- AutoPET-compatible PET lesion models
 - MedSAM2
 - MONAI Label
 - MONAI Deploy
 - TotalSegmentator
-- 3D Slicer / ITK-SNAP-style label workflows
+- research label-map and sidecar workflows
 
-Model licenses vary. In particular, LesionTracer weights are CC-BY-4.0, the
-nnU-Net core code is Apache-2.0, MedSAM2 is Apache-2.0, TotalSegmentator core
-is Apache-2.0, and some imaging datasets are non-commercial or research-only.
+Model licenses vary. In particular, some user-provided PET lesion weights are
+CC-BY-4.0, the nnU-Net core code is Apache-2.0, MedSAM2 is Apache-2.0,
+TotalSegmentator core is Apache-2.0, and some imaging datasets are
+non-commercial or research-only.
 
 ---
 
@@ -631,7 +679,7 @@ Tracer is moving toward becoming a complete local imaging research platform:
 3. complete segmentation and labeling pipeline
 4. SUV and volume measurement tools that are reliable enough for large cohorts
 5. AI-assisted model and label selection
-6. replacement of the legacy PET Segmentator app
+6. migration away from a legacy standalone PET segmentation app
 7. dynamic nuclear medicine and dosimetry workflows
 8. reconstruction and synthetic CT research modules
 

@@ -14,8 +14,8 @@ public final class NNUnetViewModel: ObservableObject {
         case subprocess
         /// Run a pre-converted CoreML `.mlpackage` on-device.
         case coreML
-        /// Run the full Python pipeline on the user's DGX Spark over SSH.
-        /// Requires Settings → DGX Spark to be configured + enabled.
+        /// Run the full Python pipeline on the user's remote workstation over SSH.
+        /// Requires Settings -> Remote Workstation to be configured + enabled.
         case dgxRemote
 
         public var id: String { rawValue }
@@ -24,7 +24,7 @@ public final class NNUnetViewModel: ObservableObject {
             switch self {
             case .subprocess: return "Python (nnUNetv2)"
             case .coreML:     return "CoreML on-device"
-            case .dgxRemote:  return "DGX Spark (remote)"
+            case .dgxRemote:  return "Remote Workstation"
             }
         }
     }
@@ -68,7 +68,7 @@ public final class NNUnetViewModel: ObservableObject {
            !results.isEmpty {
             self.resultsDirPath = results
         }
-        // If the user has DGX Spark enabled from the Settings tab, pre-select
+        // If the user has remote workstation execution enabled from Settings, pre-select
         // the remote runner so they don't have to flip the mode manually.
         if DGXSparkConfig.load().enabled {
             self.mode = .dgxRemote
@@ -84,8 +84,8 @@ public final class NNUnetViewModel: ObservableObject {
 
     public var dgxReadinessMessage: String? {
         let cfg = dgxConfig
-        if !cfg.enabled { return "Enable DGX Spark in Settings → DGX Spark first." }
-        if !cfg.isConfigured { return "Set a host in Settings → DGX Spark." }
+        if !cfg.enabled { return "Enable Remote Workstation in Settings first." }
+        if !cfg.isConfigured { return "Set a host in Settings -> Remote Workstation." }
         return nil
     }
 
@@ -240,9 +240,9 @@ public final class NNUnetViewModel: ObservableObject {
         }
     }
 
-    // MARK: - DGX remote run
+    // MARK: - Remote workstation run
 
-    /// Stage channels as NIfTI locally → scp to DGX → run `nnUNetv2_predict`
+    /// Stage channels as NIfTI locally -> scp to the remote workstation -> run `nnUNetv2_predict`
     /// over SSH → pull the predicted mask back → load it as a `LabelMap`.
     private func runDGXRemote(entry: NNUnetCatalog.Entry,
                               volume: ImageVolume,
@@ -291,13 +291,13 @@ public final class NNUnetViewModel: ObservableObject {
                 labeling.activeClassID = first.labelID
             }
             let elapsed = String(format: "%.1f", result.durationSeconds)
-            statusMessage = "✓ \(entry.displayName) · DGX · \(elapsed)s · \(result.labelMap.classes.count) classes"
+            statusMessage = "✓ \(entry.displayName) · remote workstation · \(elapsed)s · \(result.labelMap.classes.count) classes"
             return result.labelMap
         } catch let err as RemoteNNUnetRunner.Error {
-            statusMessage = err.errorDescription ?? "DGX run failed"
+            statusMessage = err.errorDescription ?? "Remote workstation run failed"
             return nil
         } catch {
-            statusMessage = "DGX run failed: \(error.localizedDescription)"
+            statusMessage = "Remote workstation run failed: \(error.localizedDescription)"
             return nil
         }
     }

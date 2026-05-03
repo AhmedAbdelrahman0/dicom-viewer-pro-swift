@@ -118,9 +118,9 @@ final class LocalBrainPETDatasetSmokeTests: XCTestCase {
         XCTAssertTrue(vm.level.isFinite)
     }
 
-    func testSimpleITKPETMRPrecisionPathRunsOnLocalBrainCase() async throws {
-        guard simpleITKAvailable() else {
-            throw XCTSkip("Python SimpleITK is not installed.")
+    func testPythonMIPETMRPrecisionPathRunsOnLocalBrainCase() async throws {
+        guard pythonRegistrationPackageAvailable() else {
+            throw XCTSkip("Python registration package is not installed.")
         }
         let root = try smokeDirectory()
         let subjectID = ProcessInfo.processInfo.environment["TRACER_BRAIN_PET_SUBJECT"] ?? "sub-control01"
@@ -149,7 +149,7 @@ final class LocalBrainPETDatasetSmokeTests: XCTestCase {
             mode: .linear
         )
         let config = PETMRDeformableRegistrationConfiguration(
-            backend: .simpleITKMI,
+            backend: .pythonMI,
             executablePath: "python3",
             extraArguments: "--sampling 0.03 --iterations 20 --bins 32",
             timeoutSeconds: 120,
@@ -163,18 +163,18 @@ final class LocalBrainPETDatasetSmokeTests: XCTestCase {
         )
 
         XCTAssertTrue(ImageVolumeGeometry.gridsMatch(mri, result.warpedMoving))
-        XCTAssertTrue(result.note.contains("SimpleITK MI"))
+        XCTAssertTrue(result.note.contains("Python MI refinement"))
         let iterationCount = optimizerIterations(from: result.deformationQuality?.notes ?? [])
-        XCTAssertGreaterThan(iterationCount, 0, "SimpleITK should report non-zero optimizer iterations: \(result.deformationQuality?.notes ?? [])")
+        XCTAssertGreaterThan(iterationCount, 0, "Python MI should report non-zero optimizer iterations: \(result.deformationQuality?.notes ?? [])")
         XCTAssertFalse(result.stderr.localizedCaseInsensitiveContains("registration failed"), result.stderr)
         XCTAssertFalse(result.warpedMoving.pixels.allSatisfy { !$0.isFinite || abs($0) < 1e-8 })
-        XCTAssertGreaterThan(meanAbsoluteDifference(prealigned, result.warpedMoving), 1e-6, "SimpleITK should change the prealigned PET voxels.")
+        XCTAssertGreaterThan(meanAbsoluteDifference(prealigned, result.warpedMoving), 1e-6, "Python MI should change the prealigned PET voxels.")
     }
 
     @MainActor
     func testAutomaticPETMRSelectsMateriallyBetterLocalBrainCandidate() async throws {
-        guard simpleITKAvailable() else {
-            throw XCTSkip("Python SimpleITK is not installed.")
+        guard pythonRegistrationPackageAvailable() else {
+            throw XCTSkip("Python registration package is not installed.")
         }
         let root = try smokeDirectory()
         let subjectID = ProcessInfo.processInfo.environment["TRACER_BRAIN_PET_SUBJECT"] ?? "sub-control01"
@@ -194,7 +194,7 @@ final class LocalBrainPETDatasetSmokeTests: XCTestCase {
         vm.displayVolume(mri)
         vm.petMRRegistrationMode = .automaticBestFit
         vm.petMRDeformableRegistration = PETMRDeformableRegistrationConfiguration(
-            backend: .simpleITKMI,
+            backend: .pythonMI,
             executablePath: "python3",
             extraArguments: "--sampling 0.03 --iterations 20 --bins 32",
             timeoutSeconds: 120,
@@ -217,8 +217,8 @@ final class LocalBrainPETDatasetSmokeTests: XCTestCase {
         XCTAssertTrue(pair.registrationDiagnostics.contains {
             $0.localizedCaseInsensitiveContains("SELECTED:")
         }, "Diagnostics should identify the selected PET/MR fit: \(pair.registrationDiagnostics)")
-        XCTAssertTrue(pair.registrationDiagnostics.contains { $0.localizedCaseInsensitiveContains("SimpleITK") },
-                      "Diagnostics should prove the SimpleITK candidate actually ran: \(pair.registrationDiagnostics)")
+        XCTAssertTrue(pair.registrationDiagnostics.contains { $0.localizedCaseInsensitiveContains("Python MI") },
+                      "Diagnostics should prove the Python MI candidate actually ran: \(pair.registrationDiagnostics)")
         if subjectID == "sub-control02" {
             XCTAssertTrue(pair.registrationDiagnostics.contains {
                 $0.localizedCaseInsensitiveContains("90° anti-clockwise") &&
@@ -428,7 +428,7 @@ final class LocalBrainPETDatasetSmokeTests: XCTestCase {
         return clampedLower..<clampedUpper
     }
 
-    private func simpleITKAvailable() -> Bool {
+    private func pythonRegistrationPackageAvailable() -> Bool {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = ["python3", "-c", "import SimpleITK"]

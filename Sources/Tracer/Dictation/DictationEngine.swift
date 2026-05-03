@@ -3,9 +3,9 @@ import Foundation
 /// Abstract interface for a speech-to-text engine. Tracer's dictation
 /// pipeline lets the user swap engines without the panel knowing the
 /// difference — Apple's first-party speech framework today, WhisperKit
-/// (Argmax CoreML conversion), Google's MedASR medical ASR model through
-/// a local worker, optionally a remote Whisper / Parakeet endpoint on the
-/// user's DGX Spark.
+/// (Argmax CoreML conversion), a MedASR-compatible medical ASR model through
+/// a local worker, optionally a remote Whisper / Parakeet endpoint on a
+/// configured workstation.
 ///
 /// The engine receives **already-decoded 16 kHz mono Float32 PCM** from
 /// `AudioCapture`. It does not own the microphone. Decoupling capture
@@ -113,12 +113,12 @@ public enum DictationEngineKind: String, Codable, CaseIterable, Sendable, Identi
     /// vocab when seeded with an initial prompt. Adds ~50 MB model
     /// download on first launch.
     case whisperKit
-    /// Google Health AI Developer Foundations MedASR through a local
+    /// MedASR-compatible model through a local
     /// Python worker. Medical/radiology-focused, model-backed, and not a
     /// real-time native macOS recogniser, so Tracer buffers the utterance
     /// and finalises on Stop.
     case googleMedASR
-    /// Whisper running on the user's DGX Spark over SSH. Highest accuracy
+    /// Whisper running on a configured workstation over SSH. Highest accuracy
     /// (large-v3) at the cost of network latency.
     case remoteDGXWhisper
 
@@ -128,8 +128,8 @@ public enum DictationEngineKind: String, Codable, CaseIterable, Sendable, Identi
         switch self {
         case .appleSpeech:        return "Apple Speech (on-device)"
         case .whisperKit:         return "WhisperKit (Apple Silicon ANE)"
-        case .googleMedASR:       return "Google MedASR (medical ASR)"
-        case .remoteDGXWhisper:   return "Whisper · DGX Spark (remote)"
+        case .googleMedASR:       return "MedASR model (google/medasr)"
+        case .remoteDGXWhisper:   return "Whisper · Remote Workstation"
         }
     }
 

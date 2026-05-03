@@ -1,8 +1,8 @@
 import Foundation
 
-/// DGX-Spark-backed lesion detector. Mirrors `RemoteLesionClassifier` and
+/// Remote-workstation-backed lesion detector. Mirrors `RemoteLesionClassifier` and
 /// `RemotePETACCorrector` — same NIfTI in, JSON out contract, but the
-/// script lives on the DGX and runs over SSH.
+/// script lives on the configured remote workstation and runs over SSH.
 ///
 /// Useful for detection models too heavy for local inference (CT-FM,
 /// large 3D transformers) and for cohort runs that scale across hundreds
@@ -51,7 +51,7 @@ public final class RemoteLesionDetector: LesionDetector, @unchecked Sendable {
                 displayName: String,
                 spec: Spec,
                 supportedModalities: [Modality] = [],
-                provenance: String = "User-supplied script on the DGX Spark.",
+                provenance: String = "User-supplied script on the configured remote workstation.",
                 license: String = "Depends on the user's model.") {
         self.id = id
         self.displayName = displayName
@@ -68,7 +68,7 @@ public final class RemoteLesionDetector: LesionDetector, @unchecked Sendable {
         async throws -> [LesionDetection] {
 
         guard spec.dgx.isConfigured else {
-            throw DetectionError.modelUnavailable("DGX Spark not configured. Settings → DGX Spark.")
+            throw DetectionError.modelUnavailable("Remote workstation not configured. Settings -> Remote Workstation.")
         }
         try DetectionUtilities.validateInputs(volume: volume,
                                               anatomical: anatomical,

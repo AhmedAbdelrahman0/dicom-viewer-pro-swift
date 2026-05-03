@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tracer Google MedASR dictation worker.
+"""Tracer MedASR-compatible dictation worker.
 
 Reads a 16 kHz mono WAV and writes JSON:
 
@@ -116,7 +116,7 @@ def _transcribe_direct(args: argparse.Namespace, audio: Any, sample_rate: int, t
     inputs = processor(audio, sampling_rate=sample_rate, return_tensors="pt", padding=True)
     inputs = inputs.to(torch_device)
     with torch.inference_mode():
-        # MedASR's HF example uses generate(); fall back to greedy logits for
+        # The MedASR reference example uses generate(); fall back to greedy logits for
         # CTC-style checkpoints that do not expose a generation helper.
         if hasattr(model, "generate"):
             outputs = model.generate(**inputs)
@@ -127,7 +127,7 @@ def _transcribe_direct(args: argparse.Namespace, audio: Any, sample_rate: int, t
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Transcribe Tracer dictation WAV with Google MedASR.")
+    parser = argparse.ArgumentParser(description="Transcribe Tracer dictation WAV with a MedASR-compatible model.")
     parser.add_argument("--input", required=True, help="Input 16 kHz mono WAV")
     parser.add_argument("--output-json", required=True, help="Output JSON path")
     parser.add_argument("--model", default="google/medasr", help="Hugging Face model id or local model path")

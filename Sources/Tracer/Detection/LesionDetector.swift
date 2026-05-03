@@ -27,7 +27,7 @@ import Foundation
 ///   • `SubprocessLesionDetector` — local Python wrapper that reads a
 ///     NIfTI on argv and writes detections as JSON on stdout.
 ///   • `RemoteLesionDetector`     — same script + JSON contract over SSH
-///     on the user's DGX Spark.
+///     on the user's configured remote workstation.
 public protocol LesionDetector: Sendable {
     /// Stable id used for cohort job records, chat routing, and the UI.
     var id: String { get }

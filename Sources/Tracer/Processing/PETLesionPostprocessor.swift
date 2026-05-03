@@ -2,7 +2,7 @@ import Foundation
 
 /// Lightweight PET-specific cleanup for AI lesion masks.
 ///
-/// This ports the useful part of the old Segmentator "SUV attention" idea:
+/// This ports the useful part of a prior "SUV attention" workflow:
 /// keep connected lesion components only when they contain enough SUV signal
 /// and enough physical volume. Anatomy-based suppression remains separate
 /// because it requires a CT organ map.

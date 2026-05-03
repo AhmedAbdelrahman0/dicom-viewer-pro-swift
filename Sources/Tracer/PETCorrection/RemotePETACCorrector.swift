@@ -1,12 +1,12 @@
 import Foundation
 
-/// DGX-Spark-backed attenuation correction. Mirrors `RemoteNNUnetRunner` and
+/// Remote-workstation-backed attenuation correction. Mirrors `RemoteNNUnetRunner` and
 /// `SubprocessPETACCorrector` — same NIfTI in/out contract, same script
-/// argv shape, but the script lives on the DGX and runs over SSH.
+/// argv shape, but the script lives on the remote workstation and runs over SSH.
 ///
 /// Why this exists: a 192³ deep-AC inference on Apple Silicon takes 20-60s;
-/// on a 2000-case cohort that's a wall-clock day. On the user's DGX Spark
-/// (single H100) it's ~2s per case + transfer, and the cohort runner can
+/// on a 2000-case cohort that's a wall-clock day. On a configured GPU
+/// workstation it can be ~2s per case + transfer, and the cohort runner can
 /// keep multiple workers in flight.
 ///
 /// Flow:
@@ -25,7 +25,7 @@ public final class RemotePETACCorrector: PETAttenuationCorrector, @unchecked Sen
 
     public struct Spec: Sendable {
         public var dgx: DGXSparkConfig
-        /// Absolute path to the AC script on the DGX.
+        /// Absolute path to the AC script on the remote workstation.
         public var remoteScriptPath: String
         /// Optional shell command to activate a conda / venv before running
         /// the script — `"conda activate ac"` or
@@ -57,7 +57,7 @@ public final class RemotePETACCorrector: PETAttenuationCorrector, @unchecked Sen
     public init(id: String,
                 displayName: String,
                 spec: Spec,
-                provenance: String = "User-supplied script on the DGX Spark.",
+                provenance: String = "User-supplied script on the configured remote workstation.",
                 license: String = "Depends on the user's model.") {
         self.id = id
         self.displayName = displayName
@@ -71,7 +71,7 @@ public final class RemotePETACCorrector: PETAttenuationCorrector, @unchecked Sen
                                    anatomical: ImageVolume?,
                                    progress: @escaping @Sendable (String) -> Void) async throws -> PETACResult {
         guard spec.dgx.isConfigured else {
-            throw PETACError.modelUnavailable("DGX Spark not configured. Settings → DGX Spark.")
+            throw PETACError.modelUnavailable("Remote workstation not configured. Settings -> Remote Workstation.")
         }
         try PETACUtilities.validateInputs(nacPET: nacPET,
                                           anatomical: anatomical,

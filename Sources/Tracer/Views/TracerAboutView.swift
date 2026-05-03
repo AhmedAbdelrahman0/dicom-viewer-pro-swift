@@ -121,10 +121,10 @@ public struct TracerAboutView: View {
             acknowledgementRow("nnU-Net v2", "Isensee et al. — Apache-2.0")
             acknowledgementRow("MONAI Label", "Project MONAI — Apache-2.0")
             acknowledgementRow("MONAI Deploy Informatics Gateway", "Project MONAI — Apache-2.0")
-            acknowledgementRow("AutoPET II / III (LesionTracer)", "MIC-DKFZ — code Apache-2.0, weights CC-BY-4.0")
+            acknowledgementRow("AutoPET II / III PET lesion models", "MIC-DKFZ — code Apache-2.0, weights CC-BY-4.0")
             acknowledgementRow("MedSAM2", "Bo Wang Lab — Apache-2.0")
             acknowledgementRow("TotalSegmentator", "Wasserthal et al. — Apache-2.0 (core)")
-            acknowledgementRow("Level-set ideas", "Yushkevich 2006 (ITK-SNAP paper) — re-implemented")
+            acknowledgementRow("Level-set ideas", "Yushkevich et al. 2006 — re-implemented")
         }
     }
 

@@ -1,13 +1,13 @@
 import Foundation
 import SwiftUI
 
-/// DGX-backed runner for the legacy PET Segmentator / LesionTracer workflow.
+/// Remote runner for a user-provided PET lesion segmentation workflow.
 ///
-/// This is intentionally separate from `RemoteNNUnetRunner`: the absorbed
-/// Segmentator app used a model-folder entry point, a custom nnU-Net source
-/// tree, a PyTorch 2.6+ checkpoint compatibility patch, and CT + SUV channels.
-/// Keeping those assumptions in one runner makes the production path explicit
-/// while the generic runner remains suitable for stock `nnUNetv2_predict`.
+/// This is intentionally separate from `RemoteNNUnetRunner`: this path uses
+/// a model-folder entry point, a custom nnU-Net source tree, a PyTorch 2.6+
+/// checkpoint compatibility patch, and CT + SUV channels. Keeping those
+/// assumptions in one runner makes the production path explicit while the
+/// generic runner remains suitable for stock `nnUNetv2_predict`.
 public final class RemoteLesionTracerRunner: @unchecked Sendable {
 
     public struct Configuration: Sendable {
@@ -65,15 +65,15 @@ public final class RemoteLesionTracerRunner: @unchecked Sendable {
         public var errorDescription: String? {
             switch self {
             case .notConfigured:
-                return "DGX Spark is not configured. Settings -> DGX Spark."
+                return "Remote workstation is not configured. Settings -> Remote Workstation."
             case .cancelled:
-                return "LesionTracer inference was cancelled."
+                return "PET lesion inference was cancelled."
             case .geometryMismatch(let message):
-                return "LesionTracer input geometry mismatch: \(message)"
+                return "PET lesion input geometry mismatch: \(message)"
             case .missingRemoteOutput(let path):
-                return "LesionTracer produced no output at \(path)."
+                return "PET lesion model produced no output at \(path)."
             case .remoteFailed(let message):
-                return "LesionTracer DGX run failed: \(message)"
+                return "PET lesion remote run failed: \(message)"
             }
         }
     }
@@ -111,7 +111,7 @@ public final class RemoteLesionTracerRunner: @unchecked Sendable {
         return cancelled
     }
 
-    /// Runs the absorbed Segmentator LesionTracer model.
+    /// Runs the configured PET lesion segmentation model.
     ///
     /// `ctVolume` must be the reference grid and `petSUVVolume` must already
     /// be SUV-scaled. This preserves the single source of truth for SUV
@@ -132,7 +132,7 @@ public final class RemoteLesionTracerRunner: @unchecked Sendable {
             }
         }
 
-        let runID = "lesiontracer-\(UUID().uuidString.prefix(8))"
+        let runID = "pet-lesion-\(UUID().uuidString.prefix(8))"
         let caseID = "case001"
         let localRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(runID)-local", isDirectory: true)
@@ -145,7 +145,7 @@ public final class RemoteLesionTracerRunner: @unchecked Sendable {
         try NIfTIWriter.write(ctVolume, to: localIn.appendingPathComponent("\(caseID)_0000.nii"))
         try NIfTIWriter.write(petSUVVolume, to: localIn.appendingPathComponent("\(caseID)_0001.nii"))
 
-        let dockerfileURL = localRoot.appendingPathComponent("LesionTracer.Dockerfile")
+        let dockerfileURL = localRoot.appendingPathComponent("PETLesionWorker.Dockerfile")
         try dockerfile().data(using: .utf8)?.write(to: dockerfileURL, options: [.atomic])
         let predictURL = localRoot.appendingPathComponent("run_predict.py")
         try predictScript(caseID: caseID).data(using: .utf8)?.write(to: predictURL, options: [.atomic])
@@ -166,7 +166,7 @@ public final class RemoteLesionTracerRunner: @unchecked Sendable {
         logSink("Staging CT + PET SUV channels to \(configuration.dgx.sshDestination):\(remoteBase)\n")
         try executor.ensureRemoteDirectory(remoteBase)
         try executor.uploadDirectory(localIn, toRemote: remoteIn)
-        try executor.uploadFile(dockerfileURL, toRemote: "\(remoteBase)/LesionTracer.Dockerfile")
+        try executor.uploadFile(dockerfileURL, toRemote: "\(remoteBase)/PETLesionWorker.Dockerfile")
         try executor.uploadFile(predictURL, toRemote: "\(remoteBase)/run_predict.py")
         try executor.uploadFile(launchURL, toRemote: "\(remoteBase)/run_lesiontracer.sh")
         if isCancelled { throw Error.cancelled }
@@ -207,7 +207,7 @@ public final class RemoteLesionTracerRunner: @unchecked Sendable {
         }
 
         let labelMap = try LabelIO.loadNIfTILabelmap(from: labelURL, parentVolume: ctVolume)
-        labelMap.name = "LesionTracer DGX"
+        labelMap.name = "PET lesion remote"
         applyLesionClass(to: labelMap)
         let postprocess = try? PETLesionPostprocessor.filterComponentsBySUV(
             labelMap: labelMap,
@@ -333,7 +333,7 @@ public final class RemoteLesionTracerRunner: @unchecked Sendable {
         BOOTSTRAP_IMAGE=\(escapedBootstrap)
 
         mkdir -p "$OUTPUT_DIR"
-        echo "=== Tracer LesionTracer DGX run ==="
+        echo "=== Tracer PET lesion remote run ==="
         date
         echo "Input: $INPUT_DIR"
         echo "Output: $OUTPUT_DIR"
@@ -346,8 +346,8 @@ public final class RemoteLesionTracerRunner: @unchecked Sendable {
         test -d "$MODEL_FOLDER"
 
         if [ "$BOOTSTRAP_IMAGE" = "1" ] && ! docker image inspect "$WORKER_IMAGE" >/dev/null 2>&1; then
-          echo "Building reusable LesionTracer worker image from $BASE_IMAGE..."
-          docker build --pull=false -t "$WORKER_IMAGE" -f "$CASE_DIR/LesionTracer.Dockerfile" "$CASE_DIR"
+          echo "Building reusable PET lesion worker image from $BASE_IMAGE..."
+          docker build --pull=false -t "$WORKER_IMAGE" -f "$CASE_DIR/PETLesionWorker.Dockerfile" "$CASE_DIR"
         fi
 
         echo "CUDA check and inference..."

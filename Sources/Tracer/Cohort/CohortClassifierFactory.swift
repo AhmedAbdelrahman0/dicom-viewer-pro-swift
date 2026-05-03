@@ -97,7 +97,7 @@ enum CohortClassifierFactory {
                 let cfg = DGXSparkConfig.load()
                 guard cfg.isConfigured else {
                     throw ClassificationError.modelUnavailable(
-                        "DGX Spark not configured. Settings → DGX Spark."
+                        "Remote workstation not configured. Settings -> Remote Workstation."
                     )
                 }
                 let remoteSpec = RemoteLesionClassifier.Spec(
@@ -110,7 +110,7 @@ enum CohortClassifierFactory {
                 )
                 return RemoteLesionClassifier(
                     id: entry.id,
-                    displayName: "\(entry.displayName) · DGX",
+                    displayName: "\(entry.displayName) · remote",
                     spec: remoteSpec,
                     supportedModalities: entry.modality.map { [$0] } ?? [],
                     supportedBodyRegions: [entry.bodyRegion]

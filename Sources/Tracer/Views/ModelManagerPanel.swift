@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// One pane of glass for every model Tracer knows about.  Lists local
-/// downloads, DGX-hosted artifacts, and remembers what each is bound to.
+/// downloads, remote-hosted artifacts, and remembers what each is bound to.
 /// Opens as an inspector from the AI Engines menu (⌘⇧W).
 public struct ModelManagerPanel: View {
     @ObservedObject public var vm: ModelManagerViewModel
@@ -50,7 +50,7 @@ public struct ModelManagerPanel: View {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(.secondary)
 
-            TextField("Display name — e.g. LesionTracer fold 0",
+            TextField("Display name — e.g. AutoPET III fold 0",
                       text: $vm.newDisplayName)
                 .textFieldStyle(.roundedBorder)
 
@@ -70,7 +70,7 @@ public struct ModelManagerPanel: View {
             .pickerStyle(.menu)
 
             if vm.newKind == .remoteArtifact {
-                TextField("Remote path on DGX — e.g. ~/nnUNet_results/Dataset221",
+                TextField("Remote path — e.g. ~/nnUNet_results/Dataset221",
                           text: $vm.newRemotePath)
                     .textFieldStyle(.roundedBorder)
             } else {
@@ -102,7 +102,7 @@ public struct ModelManagerPanel: View {
                 Button {
                     vm.adoptSegmentatorLesionTracer()
                 } label: {
-                    Label("Adopt LesionTracer", systemImage: "link.badge.plus")
+                    Label("Adopt PET Lesion Model", systemImage: "link.badge.plus")
                 }
                 #endif
                 Spacer()

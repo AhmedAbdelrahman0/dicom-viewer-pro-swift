@@ -1,18 +1,13 @@
 import Foundation
 import SwiftUI
 
-/// A set of anatomical label presets matching the layout and intent of
-/// ITK-SNAP's default label descriptors (the `.label` files shipped
-/// alongside the application). Names and colors here are **re-authored**
-/// for this project so that nothing is copied from the ITK-SNAP repository
-/// (which is GPL-3.0). They're inspired by the same anatomical taxonomy
-/// that ITK-SNAP ships with.
+/// Re-authored anatomical label presets for common manual segmentation tasks.
 ///
 /// These presets round out `LabelPresets.all` — register them through
-/// `ITKSNAPPresets.register(into:)` or consume them à la carte.
-public enum ITKSNAPPresets {
+/// `AnatomicalLabelPresets.register(into:)` or consume them à la carte.
+public enum AnatomicalLabelPresets {
 
-    /// All re-authored "ITK-SNAP-style" anatomical presets.
+    /// All extended anatomical presets.
     public static var all: [LabelPresetSet] {
         [
             brainMRIClassic,
@@ -28,7 +23,7 @@ public enum ITKSNAPPresets {
         ]
     }
 
-    /// Append the ITK-SNAP-style presets to the existing preset list.
+    /// Append the extended anatomical presets to the existing preset list.
     /// Filters out any name that already exists in `existing` so apps that
     /// call this at startup can call it safely multiple times.
     public static func register(into existing: inout [LabelPresetSet]) {
@@ -41,7 +36,7 @@ public enum ITKSNAPPresets {
     // MARK: - Brain MRI (T1 / T1c / FLAIR segmentation)
 
     public static let brainMRIClassic = LabelPresetSet(
-        name: "Brain MRI (ITK-SNAP style)",
+        name: "Brain MRI Classic",
         description: "Cortical + deep-gray + CSF structures",
         classes: [
             LabelClass(labelID: 1,  name: "cortical_gm",       category: .brain, color: Color(r: 200,  80,  80)),

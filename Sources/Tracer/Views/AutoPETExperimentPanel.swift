@@ -95,13 +95,13 @@ public struct AutoPETExperimentPanel: View {
                     .textFieldStyle(.roundedBorder)
             }
 
-            Toggle("Use Spark dataset root instead of staging local viewer cases",
+            Toggle("Use remote dataset root instead of staging local viewer cases",
                    isOn: $autoPET.experiment.useSparkDatasetRoot)
                 .font(.system(size: 11, weight: .medium))
 
             if autoPET.experiment.useSparkDatasetRoot {
                 VStack(alignment: .leading, spacing: 6) {
-                    TextField("Spark dataset root", text: $autoPET.experiment.sparkDatasetRoot)
+                    TextField("Remote dataset root", text: $autoPET.experiment.sparkDatasetRoot)
                         .textFieldStyle(.roundedBorder)
                     TextField("Model env file", text: $autoPET.experiment.sparkModelEnvironmentFile)
                         .textFieldStyle(.roundedBorder)
@@ -150,7 +150,7 @@ public struct AutoPETExperimentPanel: View {
             }
 
             if autoPET.experiment.useSparkDatasetRoot {
-                ContentUnavailableView("Spark dataset mode", systemImage: "bolt.horizontal")
+                ContentUnavailableView("Remote dataset mode", systemImage: "bolt.horizontal")
                     .frame(minHeight: 160)
             } else if autoPET.drafts.isEmpty {
                 ContentUnavailableView("No PET/CT cases", systemImage: "tray")
@@ -247,14 +247,14 @@ public struct AutoPETExperimentPanel: View {
             Button {
                 Task { await autoPET.launchTraining(from: viewer) }
             } label: {
-                Label("Train on DGX", systemImage: "bolt.fill")
+                Label("Train Remotely", systemImage: "bolt.fill")
             }
             .disabled(autoPET.isRunning || !autoPET.canBuildOrRun)
 
             Button {
                 Task { await autoPET.launchValidation(from: viewer) }
             } label: {
-                Label("Validate on DGX", systemImage: "checkmark.seal")
+                Label("Validate Remotely", systemImage: "checkmark.seal")
             }
             .disabled(autoPET.isRunning || !autoPET.canBuildOrRun)
 
@@ -300,7 +300,7 @@ public struct AutoPETExperimentPanel: View {
             let limit = autoPET.experiment.sparkCaseLimit == 0
                 ? "all"
                 : "\(autoPET.experiment.sparkCaseLimit)"
-            return "Spark dataset  |  cases \(limit)  |  validation \(Int(autoPET.experiment.sparkValidationFraction * 100))%"
+            return "Remote dataset  |  cases \(limit)  |  validation \(Int(autoPET.experiment.sparkValidationFraction * 100))%"
         }
         return "\(autoPET.selectedCaseCount) selected  |  train \(autoPET.selectedTrainingCount)  |  validation \(autoPET.selectedValidationCount)"
     }

@@ -1,13 +1,13 @@
 import Foundation
 
-/// DGX-Spark-backed nnU-Net inference. Mirrors the shape of `NNUnetRunner`
+/// Remote-workstation-backed nnU-Net inference. Mirrors the shape of `NNUnetRunner`
 /// so `NNUnetViewModel` can swap between local and remote execution with
 /// no further plumbing.
 ///
 /// Flow:
 ///   1. Write each input channel as a NIfTI locally under a staging dir.
 ///   2. scp the staging dir to `remoteWorkdir/<case-id>/in/`.
-///   3. ssh `nnUNetv2_predict -i … -o …` on the DGX.
+///   3. ssh `nnUNetv2_predict -i ... -o ...` on the remote workstation.
 ///   4. scp the predicted mask back.
 ///   5. Load it into a `LabelMap` and return.
 ///   6. Clean up the remote directory.
@@ -51,7 +51,7 @@ public final class RemoteNNUnetRunner: @unchecked Sendable {
         public var errorDescription: String? {
             switch self {
             case .notConfigured:
-                return "DGX Spark is not configured. Settings → DGX Spark."
+                return "Remote workstation is not configured. Settings -> Remote Workstation."
             case .cancelled:
                 return "Remote inference was cancelled."
             case .missingRemoteOutput(let p):
@@ -203,7 +203,7 @@ public final class RemoteNNUnetRunner: @unchecked Sendable {
 
         let labelMap = try LabelIO.loadNIfTILabelmap(from: labelURL,
                                                      parentVolume: referenceVolume)
-        labelMap.name = "nnU-Net · \(configuration.datasetID) (DGX)"
+        labelMap.name = "nnU-Net · \(configuration.datasetID) (remote)"
         return InferenceResult(labelMap: labelMap,
                                durationSeconds: elapsed,
                                stderr: result.stderr)

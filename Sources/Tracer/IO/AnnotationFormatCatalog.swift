@@ -67,7 +67,7 @@ public extension LabelIO.Format {
             return "seg.dcm"
         case .dicomRTStruct:
             return "rtstruct.dcm"
-        case .slicerSeg:
+        case .segmentationNRRD:
             return "seg.nrrd"
         case .niftiGz:
             return "nii.gz"
@@ -85,17 +85,17 @@ public extension LabelIO.Format {
         case .niftiGz:
             return "Compressed research label map. Best for nnU-Net/MONAI pipelines and dataset archives."
         case .metaImageMHA:
-            return "SimpleITK/Grand Challenge label map. Best for challenge submissions and ITK pipelines."
+            return "MHA label map. Best for challenge submissions and image-processing pipelines."
         case .nrrdLabelmap:
-            return "Simple integer NRRD mask. Best for generic ITK/Slicer-compatible voxel labels."
-        case .slicerSeg:
-            return "3D Slicer segmentation NRRD. Best for preserving segment names and colors with a voxel mask."
+            return "Simple integer NRRD mask. Best for generic voxel-label readers."
+        case .segmentationNRRD:
+            return "Segmentation NRRD. Best for preserving segment names and colors with a voxel mask."
         case .dicomSeg:
             return "DICOM segmentation object. Best clinical/PACS format for PET/CT lesion masks."
         case .dicomRTStruct:
             return "Radiotherapy contour object. Best for RT planning systems that expect ROI contours."
-        case .itkSnap:
-            return "NIfTI mask plus ITK-SNAP label descriptor. Best for ITK-SNAP editing with label names/colors."
+        case .labelDescriptor:
+            return "NIfTI mask plus label descriptor. Best for editing workflows that use label names/colors."
         case .json:
             return "Tracer annotation/class JSON. Best for 2D measurements, text annotations, and class metadata."
         case .csv:
@@ -107,7 +107,7 @@ public extension LabelIO.Format {
         switch self {
         case .json, .csv:
             return .nativeReadWrite
-        case .itkSnap:
+        case .labelDescriptor:
             return .sidecar
         default:
             return .nativeReadWrite
@@ -120,13 +120,13 @@ public extension LabelIO.Format {
             return [.voxelMask, .segmentNames, .colors, .spatialGeometry, .annotations, .landmarks]
         case .niftiLabelmap, .niftiGz:
             return [.voxelMask, .spatialGeometry]
-        case .itkSnap:
+        case .labelDescriptor:
             return [.voxelMask, .segmentNames, .colors, .spatialGeometry]
         case .metaImageMHA:
             return [.voxelMask, .spatialGeometry]
         case .nrrdLabelmap:
             return [.voxelMask, .spatialGeometry]
-        case .slicerSeg:
+        case .segmentationNRRD:
             return [.voxelMask, .segmentNames, .colors, .spatialGeometry]
         case .dicomSeg:
             return [.voxelMask, .segmentNames, .spatialGeometry, .dicomReferences, .hierarchy]
@@ -149,7 +149,7 @@ public extension LabelIO.Format {
             return "Requires voxel-to-contour extraction; small boundary changes are expected."
         case .niftiLabelmap, .niftiGz, .metaImageMHA, .nrrdLabelmap:
             return "Good mask exchange, but clinical DICOM references and in-app annotations are not carried."
-        case .slicerSeg, .itkSnap:
+        case .segmentationNRRD, .labelDescriptor:
             return "Good editing exchange with labels/colors, but not a clinical DICOM object."
         case .json:
             return "Does not contain the voxel mask. Pair with a mask export when sharing a segmentation."
@@ -211,11 +211,11 @@ public extension LabelIO.Format {
                     affectedFeatures: [.annotations, .landmarks]
                 ))
             }
-        case .itkSnap:
+        case .labelDescriptor:
             warnings.append(.init(
                 severity: .caution,
                 title: "DICOM context is not preserved",
-                detail: "ITK-SNAP receives a NIfTI mask and label descriptor, not clinical DICOM references.",
+                detail: "The NIfTI mask and label descriptor do not preserve clinical DICOM references.",
                 affectedFeatures: [.dicomReferences, .hierarchy]
             ))
         case .metaImageMHA:
@@ -229,22 +229,22 @@ public extension LabelIO.Format {
             warnings.append(.init(
                 severity: .dataLoss,
                 title: "Simple NRRD loses segment metadata",
-                detail: "Use 3D Slicer .seg.nrrd if you need names/colors. This plain NRRD stores integer voxels and geometry.",
+                detail: "Use segmentation NRRD if you need names/colors. This plain NRRD stores integer voxels and geometry.",
                 affectedFeatures: [.segmentNames, .colors, .annotations, .landmarks]
             ))
-        case .slicerSeg:
+        case .segmentationNRRD:
             if hasAnnotations || hasLandmarks {
                 warnings.append(.init(
                     severity: .dataLoss,
                     title: "Only segments are exported",
-                    detail: "3D Slicer .seg.nrrd keeps segment names/colors with the mask, but not Tracer annotations or landmarks.",
+                    detail: "Segmentation NRRD keeps segment names/colors with the mask, but not Tracer annotations or landmarks.",
                     affectedFeatures: [.annotations, .landmarks]
                 ))
             }
             warnings.append(.init(
                 severity: .caution,
                 title: "Not a clinical DICOM object",
-                detail: "This is excellent for Slicer editing, but PACS/DICOM workflows should use DICOM SEG.",
+                detail: "This is useful for research editing, but PACS/DICOM workflows should use DICOM SEG.",
                 affectedFeatures: [.dicomReferences]
             ))
         case .json:

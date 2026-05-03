@@ -4,14 +4,14 @@ import Foundation
 /// `PACSWorklistStudy`, and processes each study end-to-end:
 ///
 ///   1. Load primary (and optional aux) volume from disk
-///   2. Run nnU-Net segmentation (local, CoreML, or DGX remote)
+///   2. Run nnU-Net segmentation (local, CoreML, or remote workstation)
 ///   3. Enumerate connected components via `PETQuantification.compute`
 ///   4. Optionally run the per-lesion classifier
 ///   5. Write `<outputRoot>/<studyID>/{labels.nii.gz, stats.json, classification.json}`
 ///   6. Update the checkpoint file atomically
 ///
 /// Concurrency model: an `actor` owns the mutable checkpoint + progress
-/// state. Studies run as child `Task`s with a bounded semaphore so the DGX
+/// state. Studies run as child `Task`s with a bounded semaphore so remote
 /// or CPU doesn't thrash. Cancellation propagates via `Task.isCancelled`;
 /// in-flight studies are allowed to finish so we don't leave half-uploaded
 /// NIfTIs on the remote host.
@@ -664,9 +664,9 @@ public enum CohortError: Swift.Error, LocalizedError, Sendable {
         case .noSegmenter:
             return "Cohort job has no nnU-Net entry selected."
         case .coreMLNotYetSupported:
-            return "CoreML mode is not yet supported in cohort jobs — use the subprocess or DGX runner."
+            return "CoreML mode is not yet supported in cohort jobs — use the subprocess or remote runner."
         case .dgxUnavailable:
-            return "DGX Spark is not enabled / configured. Settings → DGX Spark."
+            return "Remote workstation is not enabled / configured. Settings -> Remote Workstation."
         case .worklistEntryMissing(let id):
             return "Study \(id) isn't in the cohort's worklist cache. Call `CohortBatchProcessor.register(studies:)` before running."
         case .classificationVolumeMissing(let expected):

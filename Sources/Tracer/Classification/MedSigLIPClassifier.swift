@@ -5,8 +5,8 @@ import CoreML
 #endif
 
 /// Zero-shot lesion classifier built on a CLIP-style medical vision-language
-/// model. Designed for **MedSigLIP** (Google 2024) — the lighter companion
-/// to MedGemma — but works with any `.mlpackage` that exposes a
+/// model. Designed for **MedSigLIP-compatible** image/text encoders, and
+/// works with any `.mlpackage` that exposes a
 /// vision-encoder and a text-encoder outputting unit-normalised embeddings.
 ///
 /// How it works:
@@ -24,8 +24,8 @@ import CoreML
 /// …so "classes" are effectively arbitrary — the flexibility is the
 /// whole point of a zero-shot classifier.
 ///
-/// Licensing note: BiomedCLIP (MIT code) and MedSigLIP (Google HAI-DEF) are
-/// both research-intended. Use only for decision-support, not diagnosis.
+/// Licensing note: model/provider terms apply. Use only for decision-support,
+/// not diagnosis.
 public final class MedSigLIPClassifier: LesionClassifier, @unchecked Sendable {
     public let id: String
     public let displayName: String
@@ -104,7 +104,7 @@ public final class MedSigLIPClassifier: LesionClassifier, @unchecked Sendable {
                 spec: Spec,
                 supportedModalities: [Modality] = [],
                 supportedBodyRegions: [String] = [],
-                provenance: String = "MedSigLIP (Google HAI-DEF), research intent") {
+                provenance: String = "MedSigLIP-compatible local runner, research intent") {
         self.id = id
         self.displayName = displayName
         self.spec = spec

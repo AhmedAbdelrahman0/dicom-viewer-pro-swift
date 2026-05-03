@@ -681,7 +681,7 @@ public struct ContentView: View {
             Button {
                 showInspector(.modelManager)
             } label: {
-                Label("Model Manager — weights + DGX Spark",
+                Label("Model Manager — weights + Remote Workstation",
                       systemImage: "externaldrive.fill.badge.icloud")
             }
             .keyboardShortcut("w", modifiers: [.command, .shift])

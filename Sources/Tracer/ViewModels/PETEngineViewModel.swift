@@ -5,7 +5,7 @@ import AppKit
 #endif
 
 /// Centralises every PET-related inference and quantification path the app
-/// ships: nnU-Net baselines (AutoPET II), AutoPET III winner (LesionTracer),
+/// ships: nnU-Net baselines (AutoPET II), AutoPET III-compatible PET lesion models,
 /// AutoPET IV interactive (LesionLocator), MedSAM2 prompt refinement, TMTV
 /// quantification, and TotalSegmentator-based physiological-uptake
 /// subtraction. Each "engine" picks a different path through the same
@@ -27,7 +27,7 @@ public final class PETEngineViewModel: ObservableObject {
         public var displayName: String {
             switch self {
             case .autoPETII:         return "AutoPET II (FDG baseline)"
-            case .lesionTracer:      return "LesionTracer (AutoPET III winner)"
+            case .lesionTracer:      return "AutoPET III-compatible PET lesion model"
             case .lesionLocator:     return "LesionLocator (interactive, experimental)"
             case .autoPETV:          return "AutoPET V (challenge adapter)"
             case .medSAM2:           return "MedSAM2 (box-prompt refinement)"
@@ -53,7 +53,7 @@ public final class PETEngineViewModel: ObservableObject {
             case .autoPETII:
                 return "Whole-body FDG-PET/CT lesion segmentation via nnU-Net v2 Dataset221_AutoPETII_2023. Apache-2.0. 2-channel (CT + PET)."
             case .lesionTracer:
-                return "AutoPET III 2024 winner (MIC-DKFZ). Handles both FDG and PSMA tracers. nnU-Net ResEncL + MultiTalent pretraining. Weights CC-BY-4.0."
+                return "AutoPET III-compatible PET/CT lesion segmentation. Handles both FDG and PSMA tracers with nnU-Net ResEncL + MultiTalent pretraining. Weights are user-provided under their applicable terms."
             case .lesionLocator:
                 return "AutoPET IV 2025 interactive track: refine lesion masks with foreground/background click prompts. Experimental — weights still rolling out."
             case .autoPETV:
@@ -308,7 +308,7 @@ public final class PETEngineViewModel: ObservableObject {
         guard let petSUVVolume,
               Modality.normalize(ctVolume.modality) == .CT,
               Modality.normalize(petSUVVolume.modality) == .PT else {
-            statusMessage = "LesionTracer DGX needs CT as channel 0 and SUV-scaled PET as channel 1. Load/fuse the paired PET/CT volumes first."
+            statusMessage = "Remote PET lesion model needs CT as channel 0 and SUV-scaled PET as channel 1. Load/fuse the paired PET/CT volumes first."
             return statusMessage
         }
 
@@ -316,7 +316,7 @@ public final class PETEngineViewModel: ObservableObject {
         JobManager.shared.start(JobUpdate(
             operationID: operationID,
             kind: .petEngine,
-            title: "LesionTracer DGX",
+            title: "PET lesion remote",
             stage: "Staging",
             detail: "Preparing CT + PET SUV channels",
             progress: 0.05,
@@ -330,7 +330,7 @@ public final class PETEngineViewModel: ObservableObject {
             folds: segmentationProfile.useFullEnsemble ? ["0", "1", "2", "3", "4"] : ["0"],
             disableTestTimeAugmentation: segmentationProfile.disableTTA
         ))
-        statusMessage = "Running LesionTracer on \(nnunet.dgxConfig.sshDestination) via reusable Docker worker..."
+            statusMessage = "Running PET lesion model on \(nnunet.dgxConfig.sshDestination) via reusable Docker worker..."
         nnunet.statusMessage = statusMessage
         let minimumSUV = suvAttentionThreshold
         let minimumVolumeML = minimumLesionVolumeML
@@ -366,9 +366,9 @@ public final class PETEngineViewModel: ObservableObject {
                 labeling.activeClassID = first.labelID
             }
             viewer.recordSegmentationRun(labelMap: result.labelMap,
-                                         name: "\(entry.displayName) DGX \(segmentationProfile.displayName)",
+                                         name: "\(entry.displayName) remote \(segmentationProfile.displayName)",
                                          engine: selectedEngine.displayName,
-                                         backend: "DGX Docker",
+                                         backend: "Remote Docker",
                                          modelID: entry.datasetID,
                                          metadata: [
                                             "segmentationProfile": segmentationProfile.rawValue,
@@ -377,33 +377,33 @@ public final class PETEngineViewModel: ObservableObject {
                                             "minimumSUV": String(format: "%.3f", minimumSUV),
                                             "minimumLesionVolumeML": String(format: "%.3f", minimumVolumeML)
                                          ])
-            viewer.saveCurrentStudySession(named: "LesionTracer DGX")
+            viewer.saveCurrentStudySession(named: "PET lesion remote")
 
             let elapsed = String(format: "%.1f", result.durationSeconds)
             let postprocess = result.postprocess.map {
                 " · kept \($0.keptComponents), removed \($0.removedComponents)"
             } ?? ""
-            statusMessage = "✓ \(entry.displayName) · DGX Docker · \(elapsed)s · \(result.labelMap.classes.count) classes\(postprocess)"
+            statusMessage = "✓ \(entry.displayName) · remote Docker · \(elapsed)s · \(result.labelMap.classes.count) classes\(postprocess)"
             nnunet.statusMessage = statusMessage
             JobManager.shared.succeed(operationID: operationID, detail: statusMessage)
             return statusMessage
         } catch let err as RemoteLesionTracerRunner.Error {
-            statusMessage = err.errorDescription ?? "LesionTracer DGX failed"
+            statusMessage = err.errorDescription ?? "PET lesion remote run failed"
             nnunet.statusMessage = statusMessage
             JobManager.shared.fail(operationID: operationID,
                                    error: JobErrorInfo(err,
                                                        code: "lesiontracer_dgx_failed",
-                                                       recoverySuggestion: "Check Settings -> DGX Spark, remote Segmentator paths, and Docker image availability.",
+                                                       recoverySuggestion: "Check Settings -> Remote Workstation, remote PET lesion paths, and Docker image availability.",
                                                        isRetryable: true),
                                    detail: statusMessage)
             return statusMessage
         } catch {
-            statusMessage = "LesionTracer DGX failed: \(error.localizedDescription)"
+            statusMessage = "PET lesion remote run failed: \(error.localizedDescription)"
             nnunet.statusMessage = statusMessage
             JobManager.shared.fail(operationID: operationID,
                                    error: JobErrorInfo(error,
                                                        code: "lesiontracer_dgx_failed",
-                                                       recoverySuggestion: "Check Settings -> DGX Spark and the Job Center log.",
+                                                       recoverySuggestion: "Check Settings -> Remote Workstation and the Job Center log.",
                                                        isRetryable: true),
                                    detail: statusMessage)
             return statusMessage
@@ -578,7 +578,7 @@ public final class PETEngineViewModel: ObservableObject {
 
     /// Ensure the CT volume is channel 0 and PET is channel 1, regardless
     /// of which one the user has currently loaded as the primary. nnU-Net
-    /// AutoPET and LesionTracer both follow this ordering.
+    /// AutoPET-style PET/CT models follow this ordering.
     private func orderChannelsForPETCT(primary: ImageVolume,
                                        auxiliary: [ImageVolume]) -> (ImageVolume, [ImageVolume]) {
         guard let aux = auxiliary.first else {
@@ -594,7 +594,7 @@ public final class PETEngineViewModel: ObservableObject {
     }
 
     /// Produce the PET channel that should be handed to an nnU-Net model
-    /// trained on SUV-calibrated inputs (AutoPET II / LesionTracer / etc.).
+    /// trained on SUV-calibrated inputs (AutoPET II / AutoPET III-compatible models / etc.).
     ///
     /// Single source of truth: delegates to the viewer's volume-aware SUV
     /// lookup, which in turn routes through `SUVCalculationSettings.suv(

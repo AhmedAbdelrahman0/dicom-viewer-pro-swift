@@ -160,13 +160,13 @@ public final class AutoPETVExperimentViewModel: ObservableObject {
                 experiment = exp
                 reloadStore()
                 statusMessage = exp.useSparkDatasetRoot
-                    ? "Built Spark-native AutoPET V package for \(exp.sparkDatasetRoot)."
+                    ? "Built remote-native AutoPET V package for \(exp.sparkDatasetRoot)."
                     : "Built AutoPET V package with \(sources.count) case\(sources.count == 1 ? "" : "s")."
 
             case .prepare:
                 let cfg = try requireDGXConfig()
                 let store = self.store
-                statusMessage = "Uploading AutoPET V package and running DGX prepare-only..."
+                statusMessage = "Uploading AutoPET V package and running remote prepare-only..."
                 let run = try await Task.detached(priority: ResourcePolicy.load().backgroundTaskPriority) {
                     if exp.useSparkDatasetRoot {
                         return try AutoPETVDGXPipeline.launchPrepareOnDGX(
@@ -191,13 +191,13 @@ public final class AutoPETVExperimentViewModel: ObservableObject {
                 experiment = exp
                 reloadStore()
                 statusMessage = run.status == .succeeded
-                    ? "DGX prepare-only finished."
-                    : "DGX prepare-only ended with \(run.status.rawValue)."
+                    ? "Remote prepare-only finished."
+                    : "Remote prepare-only ended with \(run.status.rawValue)."
 
             case .training:
                 let cfg = try requireDGXConfig()
                 let store = self.store
-                statusMessage = "Uploading AutoPET V package and launching DGX training..."
+                statusMessage = "Uploading AutoPET V package and launching remote training..."
                 let run = try await Task.detached(priority: ResourcePolicy.load().backgroundTaskPriority) {
                     if exp.useSparkDatasetRoot {
                         return try AutoPETVDGXPipeline.launchTrainingOnDGX(
@@ -222,13 +222,13 @@ public final class AutoPETVExperimentViewModel: ObservableObject {
                 experiment = exp
                 reloadStore()
                 statusMessage = run.status == .succeeded
-                    ? "DGX training finished."
-                    : "DGX training ended with \(run.status.rawValue)."
+                    ? "Remote training finished."
+                    : "Remote training ended with \(run.status.rawValue)."
 
             case .validation:
                 let cfg = try requireDGXConfig()
                 let store = self.store
-                statusMessage = "Uploading AutoPET V package and launching DGX validation..."
+                statusMessage = "Uploading AutoPET V package and launching remote validation..."
                 let run = try await Task.detached(priority: ResourcePolicy.load().backgroundTaskPriority) {
                     if exp.useSparkDatasetRoot {
                         return try AutoPETVDGXPipeline.launchValidationOnDGX(
@@ -252,7 +252,7 @@ public final class AutoPETVExperimentViewModel: ObservableObject {
                 lastRun = run
                 experiment = exp
                 reloadStore()
-                statusMessage = "DGX validation finished with \(run.validation.count) case report\(run.validation.count == 1 ? "" : "s")."
+                statusMessage = "Remote validation finished with \(run.validation.count) case report\(run.validation.count == 1 ? "" : "s")."
             }
         } catch {
             statusMessage = "AutoPET V: \(error.localizedDescription)"

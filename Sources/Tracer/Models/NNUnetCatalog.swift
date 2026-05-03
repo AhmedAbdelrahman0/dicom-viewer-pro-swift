@@ -376,10 +376,10 @@ public enum NNUnetCatalog {
         channelDescriptions: ["CT (HU)", "PET (SUV)"]
     )
 
-    /// **LesionTracer — AutoPET III 2024 winner (MIC-DKFZ).**
-    /// Multi-tracer (FDG + PSMA) whole-body lesion segmentation. Dice 0.6840
-    /// on the AutoPET III leaderboard vs. 0.5761 baseline. Code Apache-2.0,
-    /// weights CC-BY-4.0 (commercial OK with attribution). 26.7 GB.
+    /// AutoPET III-compatible multi-tracer whole-body lesion segmentation.
+    /// Dice 0.6840 on the AutoPET III leaderboard vs. 0.5761 baseline.
+    /// Code Apache-2.0; weights are user-provided and require attribution
+    /// under their applicable terms. Large checkpoint (~26.7 GB).
     ///
     /// Paper: https://arxiv.org/abs/2409.09478
     /// Repo:  https://github.com/MIC-DKFZ/autopet-3-submission
@@ -387,10 +387,10 @@ public enum NNUnetCatalog {
     public static let lesionTracer = Entry(
         id: "LesionTracer-AutoPETIII",
         datasetID: "Dataset200_autoPET3_lesions",
-        displayName: "LesionTracer — AutoPET III Winner (FDG + PSMA)",
+        displayName: "AutoPET III-compatible PET lesion model (FDG + PSMA)",
         modality: .PT,
         bodyRegion: "Whole Body",
-        description: "Multi-tracer whole-body PET/CT lesion segmentation — AutoPET III 2024 winner; nnU-Net ResEncL with MultiTalent pretraining.",
+        description: "Multi-tracer whole-body PET/CT lesion segmentation compatible with AutoPET III-style models; nnU-Net ResEncL with MultiTalent pretraining.",
         configuration: "3d_fullres",
         folds: ["0"],
         classes: [1: "pet_lesion"],
@@ -403,7 +403,7 @@ public enum NNUnetCatalog {
     )
 
     /// **LesionLocator — AutoPET IV 2025 (interactive).** Apache-2.0.
-    /// Click-prompted refinement of LesionTracer: user provides foreground
+    /// Click-prompted refinement of PET lesion masks: user provides foreground
     /// and background clicks; the model updates the lesion mask. Wired as a
     /// catalog entry for discovery; Swift-side click prompting is stubbed
     /// via the panel's "interactive" mode and will route the subprocess

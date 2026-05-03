@@ -1,6 +1,6 @@
 import Foundation
 
-public enum SimpleITKBridgeOperation: String, CaseIterable, Identifiable, Sendable, Codable {
+public enum ImageOpsBridgeOperation: String, CaseIterable, Identifiable, Sendable, Codable {
     case n4BiasCorrection = "n4-bias-correction"
     case curvatureFlow = "curvature-flow"
     case histogramMatch = "histogram-match"
@@ -22,7 +22,7 @@ public enum SimpleITKBridgeOperation: String, CaseIterable, Identifiable, Sendab
     }
 }
 
-public enum SimpleITKInterpolator: String, CaseIterable, Identifiable, Sendable, Codable {
+public enum ImageOpsInterpolator: String, CaseIterable, Identifiable, Sendable, Codable {
     case linear
     case nearest
     case bspline
@@ -30,7 +30,7 @@ public enum SimpleITKInterpolator: String, CaseIterable, Identifiable, Sendable,
     public var id: String { rawValue }
 }
 
-public struct SimpleITKBridgeConfiguration: Equatable, Codable, Sendable {
+public struct ImageOpsBridgeConfiguration: Equatable, Codable, Sendable {
     public var pythonExecutablePath: String
     public var scriptPath: String?
     public var timeoutSeconds: TimeInterval
@@ -47,7 +47,7 @@ public struct SimpleITKBridgeConfiguration: Equatable, Codable, Sendable {
     }
 
     public func workerArguments(scriptPath: String,
-                                request: SimpleITKBridgeRequest,
+                                request: ImageOpsBridgeRequest,
                                 outputJSONPath: String? = nil) -> [String] {
         let executableName = URL(fileURLWithPath: pythonExecutablePath).lastPathComponent
         var args: [String]
@@ -82,25 +82,25 @@ public struct SimpleITKBridgeConfiguration: Equatable, Codable, Sendable {
 
     public static func defaultScriptCandidates() -> [String] {
         var candidates: [String] = []
-        if let env = ProcessInfo.processInfo.environment["TRACER_SIMPLEITK_SCRIPT"],
+        if let env = ProcessInfo.processInfo.environment["TRACER_IMAGEOPS_SCRIPT"],
            !env.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             candidates.append((env as NSString).expandingTildeInPath)
         }
         let cwd = FileManager.default.currentDirectoryPath
         candidates.append(URL(fileURLWithPath: cwd)
-            .appendingPathComponent("workers/simpleitk/bridge.py").path)
+            .appendingPathComponent("workers/imageops/bridge.py").path)
         if let resourceURL = Bundle.main.resourceURL {
             candidates.append(resourceURL
-                .appendingPathComponent("Workers/simpleitk/bridge.py").path)
+                .appendingPathComponent("Workers/imageops/bridge.py").path)
             candidates.append(resourceURL
-                .appendingPathComponent("simpleitk/bridge.py").path)
+                .appendingPathComponent("imageops/bridge.py").path)
         }
         return candidates
     }
 }
 
-public struct SimpleITKBridgeRequest: Sendable {
-    public var operation: SimpleITKBridgeOperation
+public struct ImageOpsBridgeRequest: Sendable {
+    public var operation: ImageOpsBridgeOperation
     public var inputURL: URL
     public var outputURL: URL
     public var referenceURL: URL?
@@ -108,9 +108,9 @@ public struct SimpleITKBridgeRequest: Sendable {
     public var iterations: Int
     public var timeStep: Double
     public var conductance: Double
-    public var interpolator: SimpleITKInterpolator
+    public var interpolator: ImageOpsInterpolator
 
-    public init(operation: SimpleITKBridgeOperation,
+    public init(operation: ImageOpsBridgeOperation,
                 inputURL: URL,
                 outputURL: URL,
                 referenceURL: URL? = nil,
@@ -118,7 +118,7 @@ public struct SimpleITKBridgeRequest: Sendable {
                 iterations: Int = 50,
                 timeStep: Double = 0.0625,
                 conductance: Double = 3.0,
-                interpolator: SimpleITKInterpolator = .linear) {
+                interpolator: ImageOpsInterpolator = .linear) {
         self.operation = operation
         self.inputURL = inputURL
         self.outputURL = outputURL
@@ -131,45 +131,45 @@ public struct SimpleITKBridgeRequest: Sendable {
     }
 }
 
-public struct SimpleITKBridgeResult: Codable, Equatable, Sendable {
+public struct ImageOpsBridgeResult: Codable, Equatable, Sendable {
     public var operation: String
     public var output: String
     public var size: [Int]
     public var spacing: [Double]
 }
 
-public enum SimpleITKBridgeError: Error, LocalizedError, Equatable {
+public enum ImageOpsBridgeError: Error, LocalizedError, Equatable {
     case scriptNotFound
     case noOutput
 
     public var errorDescription: String? {
         switch self {
         case .scriptNotFound:
-            return "SimpleITK worker script not found. Set TRACER_SIMPLEITK_SCRIPT or keep workers/simpleitk/bridge.py beside Tracer."
+            return "Image operations worker script not found. Set TRACER_IMAGEOPS_SCRIPT or keep workers/imageops/bridge.py beside Tracer."
         case .noOutput:
-            return "SimpleITK worker produced no result JSON."
+            return "Image operations worker produced no result JSON."
         }
     }
 }
 
-public final class SimpleITKBridge: @unchecked Sendable {
-    public var configuration: SimpleITKBridgeConfiguration
+public final class ImageOpsBridge: @unchecked Sendable {
+    public var configuration: ImageOpsBridgeConfiguration
     private let makeWorker: @Sendable () -> WorkerProcess
 
-    public init(configuration: SimpleITKBridgeConfiguration = SimpleITKBridgeConfiguration(),
+    public init(configuration: ImageOpsBridgeConfiguration = ImageOpsBridgeConfiguration(),
                 workerFactory: @escaping @Sendable () -> WorkerProcess = { LocalWorkerProcess() }) {
         self.configuration = configuration
         self.makeWorker = workerFactory
     }
 
-    public func run(_ request: SimpleITKBridgeRequest,
-                    logSink: @escaping @Sendable (String) -> Void = { _ in }) async throws -> SimpleITKBridgeResult {
+    public func run(_ request: ImageOpsBridgeRequest,
+                    logSink: @escaping @Sendable (String) -> Void = { _ in }) async throws -> ImageOpsBridgeResult {
         guard let scriptPath = resolvedScriptPath() else {
-            throw SimpleITKBridgeError.scriptNotFound
+            throw ImageOpsBridgeError.scriptNotFound
         }
 
         let outputJSON = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tracer-simpleitk-\(UUID().uuidString).json")
+            .appendingPathComponent("tracer-imageops-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: outputJSON) }
 
         var env = ResourcePolicy.load().applyingSubprocessDefaults(to: ProcessInfo.processInfo.environment)
@@ -192,9 +192,9 @@ public final class SimpleITKBridge: @unchecked Sendable {
         } else if !result.stdoutData.isEmpty {
             data = result.stdoutData
         } else {
-            throw SimpleITKBridgeError.noOutput
+            throw ImageOpsBridgeError.noOutput
         }
-        return try JSONDecoder().decode(SimpleITKBridgeResult.self, from: data)
+        return try JSONDecoder().decode(ImageOpsBridgeResult.self, from: data)
     }
 
     private func resolvedScriptPath() -> String? {
@@ -203,7 +203,7 @@ public final class SimpleITKBridge: @unchecked Sendable {
             let expanded = (configured as NSString).expandingTildeInPath
             return FileManager.default.fileExists(atPath: expanded) ? expanded : nil
         }
-        return SimpleITKBridgeConfiguration.defaultScriptCandidates()
+        return ImageOpsBridgeConfiguration.defaultScriptCandidates()
             .first { FileManager.default.fileExists(atPath: $0) }
     }
 }

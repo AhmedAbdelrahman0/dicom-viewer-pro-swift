@@ -51,7 +51,7 @@ public struct TracerSettingsView: View {
             performanceTab
                 .tabItem { Label("Performance", systemImage: "gauge.with.dots.needle.bottom.50percent") }
             DGXSparkSettingsTab()
-                .tabItem { Label("DGX Spark", systemImage: "bolt.horizontal.fill") }
+                .tabItem { Label("Remote Workstation", systemImage: "bolt.horizontal.fill") }
             appearanceTab
                 .tabItem { Label("Appearance", systemImage: "sparkles") }
         }
@@ -374,9 +374,9 @@ private extension TracerSettingsView {
     }
 }
 
-// MARK: - DGX Spark tab
+// MARK: - Remote Workstation tab
 
-/// Dedicated settings tab for the user's DGX Spark workstation. Reads and
+/// Dedicated settings tab for the user's configured remote workstation. Reads and
 /// writes `DGXSparkConfig` (persisted under `Tracer.Prefs.DGXSpark`),
 /// offers a one-button "Test connection" that runs `uname -a` + probes
 /// `nvidia-smi`, and surfaces the remote workdir + optional binary paths.
@@ -390,19 +390,19 @@ public struct DGXSparkSettingsTab: View {
     public var body: some View {
         Form {
             Section("Connection") {
-                Toggle("Enable DGX Spark remote execution", isOn: $config.enabled)
+                Toggle("Enable remote workstation execution", isOn: $config.enabled)
                 if let detected = DGXSparkConfig.detectedNVIDIASparkProfile(enabled: true),
                    config != detected {
                     Button {
                         config = detected
                         config.save()
-                        probeStatus = "Applied detected NVIDIA Spark profile: \(detected.sshDestination)"
+                        probeStatus = "Applied detected remote workstation profile: \(detected.sshDestination)"
                     } label: {
-                        Label("Use Detected NVIDIA Spark Profile", systemImage: "bolt.horizontal.circle")
+                        Label("Use Detected Remote Workstation Profile", systemImage: "bolt.horizontal.circle")
                     }
                 }
                 TextField("Host", text: $config.host,
-                          prompt: Text("dgx-spark.local or 192.168.1.42"))
+                          prompt: Text("remote-workstation.local or 192.168.1.42"))
                     .textFieldStyle(.roundedBorder)
                     .disableAutocorrection(true)
                 HStack {
@@ -448,7 +448,7 @@ public struct DGXSparkSettingsTab: View {
                     .foregroundColor(.secondary)
             }
 
-            Section("Legacy Segmentator / LesionTracer") {
+            Section("PET lesion model registry") {
                 TextField("nnU-Net source path",
                           text: optionalTextBinding(\.remoteSegmentatorSourcePath),
                           prompt: Text(RemoteLesionTracerRunner.Configuration.defaultSourcePath))
@@ -469,7 +469,7 @@ public struct DGXSparkSettingsTab: View {
                           prompt: Text(RemoteLesionTracerRunner.Configuration.defaultBaseImage))
                     .textFieldStyle(.roundedBorder)
                     .disableAutocorrection(true)
-                Text("Tracer builds the worker image on Spark only if it is missing, so LesionTracer dependencies are reused instead of installed every inference.")
+                Text("Tracer builds the worker image on the remote workstation only if it is missing, so user-provided PET lesion dependencies are reused instead of installed every inference.")
                     .font(.system(size: 10))
                     .foregroundColor(.secondary)
             }

@@ -1,7 +1,6 @@
 import Foundation
 
-/// Histogram-based automatic window/level selection, inspired by ITK-SNAP's
-/// *Intensity Curve* auto-adjust. Re-implemented here independently.
+/// Histogram-based automatic window/level selection using percentile clipping.
 ///
 /// Given an intensity volume, this picks a `(window, level)` pair that keeps
 /// the requested percentile range of the histogram inside the contrast

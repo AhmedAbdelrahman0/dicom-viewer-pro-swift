@@ -72,7 +72,7 @@ public struct CohortJob: Codable, Hashable, Sendable {
 
     // MARK: - Runtime
 
-    /// How many studies to process in parallel. DGX-heavy jobs want 1-2
+    /// How many studies to process in parallel. Remote GPU-heavy jobs want 1-2
     /// (the GPU is the bottleneck); CPU-only radiomics can push 4-8. Clamped
     /// to [1, 16] at runtime.
     public var maxConcurrent: Int
@@ -93,14 +93,14 @@ public struct CohortJob: Codable, Hashable, Sendable {
     /// segmentation/classification. `nil` = skip AC entirely (the
     /// majority case — most cohorts already have CT-AC PET).
     public var petACEntryID: String?
-    /// Local path (or remote-DGX path) to the AC script. Mirrors
+    /// Local path (or remote path) to the AC script. Mirrors
     /// `PETACViewModel.scriptPath`.
     public var petACScriptPath: String
     /// Python interpreter for subprocess AC. `/usr/bin/env` is the
     /// default — Tracer prepends `python3` automatically.
     public var petACPythonExecutable: String
     /// `KEY=VALUE` lines exported into the subprocess env (or, for the
-    /// DGX backend, the first `activate=…` line is run before the script).
+    /// remote backend, the first `activate=...` line is run before the script).
     public var petACEnvironment: String
     /// Extra script arguments appended after the script path, before
     /// `--input` / `--output`.
@@ -260,7 +260,7 @@ public enum SegmentationMode: String, Codable, CaseIterable, Sendable {
         switch self {
         case .subprocess: return "Python (local)"
         case .coreML:     return "CoreML on-device"
-        case .dgxRemote:  return "DGX Spark (remote)"
+        case .dgxRemote:  return "Remote Workstation"
         }
     }
 }

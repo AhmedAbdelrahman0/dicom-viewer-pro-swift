@@ -7,16 +7,16 @@ containerized workers behind `WorkerProcess`.
 
 - `workers/nnunet`: nnU-Net v2 worker image for `nnUNetv2_predict` and
   `nnUNetv2_predict_from_modelfolder`.
-- `workers/lesiontracer`: legacy PET Segmentator / LesionTracer dependency
-  image. Tracer mounts the DGX-side model folder and nnU-Net source tree at
-  runtime, so the large checkpoint stays on Spark and dependencies are not
+- `workers/lesiontracer`: PET lesion segmentation dependency image. Tracer
+  mounts the remote model folder and nnU-Net source tree at
+  runtime, so the large checkpoint stays on the remote workstation and dependencies are not
   reinstalled for every inference.
 - `workers/monai`: MONAI/MONAI Label worker base for local server or
   scripted inference workflows.
-- `workers/medasr`: Google MedASR medical dictation worker. Tracer writes
+- `workers/medasr`: MedASR-compatible medical dictation worker. Tracer writes
   one 16 kHz mono WAV per push-to-talk utterance and expects JSON with
   recognised text.
-- `workers/simpleitk`: optional SimpleITK bridge for classical image
+- `workers/imageops`: optional bridge for classical image
   processing operations such as N4 bias correction, resampling, denoising,
   and histogram matching.
 
@@ -53,18 +53,21 @@ python3 workers/medasr/transcribe_medasr.py \
 If the model requires protected Hugging Face access, pass `HF_TOKEN=...` in
 Tracer's MedASR environment field or the shell environment.
 
-## SimpleITK Bridge
+Model identifiers are compatibility references. Tracer does not bundle these
+weights and is not affiliated with the model providers.
+
+## Image Operations Bridge
 
 Local setup:
 
 ```bash
-python3 -m venv .venv-simpleitk
-.venv-simpleitk/bin/python -m pip install -r workers/simpleitk/requirements.txt
-python3 workers/simpleitk/bridge.py \
+python3 -m venv .venv-imageops
+.venv-imageops/bin/python -m pip install -r workers/imageops/requirements.txt
+python3 workers/imageops/bridge.py \
   --operation n4-bias-correction \
   --input image.nii \
   --output corrected.nii \
   --output-json result.json
 ```
 
-Set `TRACER_SIMPLEITK_SCRIPT` if the worker is outside the repo or app bundle.
+Set `TRACER_IMAGEOPS_SCRIPT` if the worker is outside the repo or app bundle.

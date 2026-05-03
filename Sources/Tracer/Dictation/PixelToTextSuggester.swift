@@ -12,7 +12,7 @@ import CoreGraphics
 ///     image dimensions. Lets the UI flow be tested without a model.
 ///   • `ClosurePixelToTextSuggester` — wraps an injected closure so a
 ///     future commit can plug in MedGemma vision (Apache-2.0, ~1.2-2 s
-///     on M3) or RadFM running on the user's DGX Spark over SSH.
+///     on M3) or RadFM running on the user's remote workstation over SSH.
 ///
 /// Why the stub ships in C3: we want users to see the AI button working
 /// end-to-end (click → see a sentence appear in italic gray with VLM

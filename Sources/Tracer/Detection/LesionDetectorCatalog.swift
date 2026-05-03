@@ -49,7 +49,7 @@ public enum LesionDetectorCatalog {
         public var displayName: String {
             switch self {
             case .subprocess: return "Python subprocess"
-            case .dgxRemote:  return "DGX Spark (remote)"
+            case .dgxRemote:  return "Remote Workstation"
             }
         }
     }
@@ -122,8 +122,8 @@ public enum LesionDetectorCatalog {
         bodyRegion: "Any",
         classes: [],
         description: "Sliding-window MedSigLIP scoring against a user-supplied prompt list. Heatmap → threshold → connected components → bounding boxes. Works on any modality; pair with prompt engineering for novel lesion classes.",
-        provenance: "Google MedSigLIP (HAI-DEF), wrapper script supplied by user.",
-        license: "Google HAI-DEF (research + commercial with terms)",
+        provenance: "MedSigLIP-compatible model; wrapper script supplied by user.",
+        license: "Model/provider terms apply",
         requiresAnatomicalChannel: false,
         requiresConfiguration: true
     )
@@ -140,23 +140,23 @@ public enum LesionDetectorCatalog {
         bodyRegion: "Any",
         classes: [],
         description: "MedGemma 4B prompted to enumerate findings as structured JSON (one entry per lesion with bounding box, label, and free-text rationale). Slowest backend (~10–30 s per study) but yields explanations the radiologist can audit.",
-        provenance: "Google MedGemma (HAI-DEF) via llama.cpp / GGUF weights.",
-        license: "Google HAI-DEF (research + commercial with terms)",
+        provenance: "MedGemma-compatible model via llama.cpp / GGUF weights.",
+        license: "Model/provider terms apply",
         requiresAnatomicalChannel: false,
         requiresConfiguration: true
     )
 
     /// CT-FM (foundation model) detection. Heavier infrastructure but
-    /// state-of-the-art per-organ accuracy when running on a DGX.
+    /// state-of-the-art per-organ accuracy when running on a remote workstation.
     public static let ctFMLesionDetector = Entry(
         id: "ct-fm-detection-dgx",
-        displayName: "CT-FM — foundation-model CT lesion detection (DGX)",
+        displayName: "CT-FM — foundation-model CT lesion detection (remote workstation)",
         backend: .dgxRemote,
         modality: .CT,
         bodyRegion: "Whole Body",
         classes: ["lesion"],
-        description: "CT foundation model fine-tuned for lesion detection. Designed for DGX execution because the model is too large for typical local hardware. Accepts CT volumes and returns boxes per organ system.",
-        provenance: "Bring your own trained checkpoint hosted on the DGX.",
+        description: "CT foundation model fine-tuned for lesion detection. Designed for remote workstation execution because the model is too large for typical local hardware. Accepts CT volumes and returns boxes per organ system.",
+        provenance: "Bring your own trained checkpoint hosted on the configured remote workstation.",
         license: "Depends on the user's model.",
         requiresAnatomicalChannel: false,
         requiresConfiguration: true

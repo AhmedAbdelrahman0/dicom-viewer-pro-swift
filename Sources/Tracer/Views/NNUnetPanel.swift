@@ -194,7 +194,7 @@ public struct NNUnetPanel: View {
 
     private var dgxOptions: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("DGX Spark backend")
+            Text("Remote Workstation backend")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(.secondary)
 
@@ -205,14 +205,14 @@ public struct NNUnetPanel: View {
                     .frame(width: 8, height: 8)
                 Text(nnunet.isDGXReady
                      ? "Remote execution on \(cfg.sshDestination):\(cfg.port)"
-                     : (nnunet.dgxReadinessMessage ?? "DGX Spark not ready"))
+                     : (nnunet.dgxReadinessMessage ?? "Remote workstation not ready"))
                     .font(.system(size: 10))
                     .foregroundColor(.secondary)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            Text("Uses the settings from **Settings → DGX Spark** — host, SSH key, remote workdir, and any extra env vars. Each run uploads the NIfTI channels, executes `nnUNetv2_predict`, pulls the predicted label map back, and cleans up the remote directory.")
+            Text("Uses the settings from **Settings -> Remote Workstation** — host, SSH key, remote workdir, and any extra env vars. Each run uploads the NIfTI channels, executes `nnUNetv2_predict`, pulls the predicted label map back, and cleans up the remote directory.")
                 .font(.system(size: 10))
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

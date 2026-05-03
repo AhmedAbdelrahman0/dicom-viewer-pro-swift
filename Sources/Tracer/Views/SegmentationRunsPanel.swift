@@ -89,7 +89,7 @@ struct SegmentationRunsPanel: View {
             Label("No saved segmentation runs for this study", systemImage: "tray")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.secondary)
-            Text("Run LesionTracer, nnU-Net, MONAI Label, or save the active label map to populate this registry.")
+            Text("Run a PET lesion model, nnU-Net, MONAI Label, or save the active label map to populate this registry.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

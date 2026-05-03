@@ -1050,7 +1050,7 @@ struct LabelingPanel: View {
             return "labels.seg.dcm"
         case .dicomRTStruct:
             return "labels.rtstruct.dcm"
-        case .slicerSeg:
+        case .segmentationNRRD:
             return "labels.seg.nrrd"
         case .niftiGz:
             return "labels.nii.gz"

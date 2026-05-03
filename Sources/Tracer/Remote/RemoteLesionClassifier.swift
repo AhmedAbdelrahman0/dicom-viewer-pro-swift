@@ -1,8 +1,8 @@
 import Foundation
 
-/// DGX-Spark-backed lesion classifier. Mirrors `SubprocessLesionClassifier`'s
+/// Remote-workstation-backed lesion classifier. Mirrors `SubprocessLesionClassifier`'s
 /// stdin/stdout contract but ships the JSON payload over SSH to a user-
-/// installed Python script on the DGX.
+/// installed Python script on the configured remote workstation.
 ///
 /// Expected remote script: reads JSON on stdin, writes JSON on stdout in the
 /// same shape as the local subprocess classifier:
@@ -18,7 +18,7 @@ public final class RemoteLesionClassifier: LesionClassifier, @unchecked Sendable
 
     public struct Spec: Sendable {
         public var dgx: DGXSparkConfig
-        /// Absolute path to the Python script on the DGX.
+        /// Absolute path to the Python script on the remote workstation.
         public var remoteScriptPath: String
         /// Optional command to activate a conda/venv before running the
         /// script — e.g. `"conda activate tracer"` or
@@ -50,7 +50,7 @@ public final class RemoteLesionClassifier: LesionClassifier, @unchecked Sendable
                 spec: Spec,
                 supportedModalities: [Modality] = [],
                 supportedBodyRegions: [String] = [],
-                provenance: String = "Runs on user's DGX Spark via SSH") {
+                provenance: String = "Runs on the configured remote workstation via SSH") {
         self.id = id
         self.displayName = displayName
         self.spec = spec
@@ -64,7 +64,7 @@ public final class RemoteLesionClassifier: LesionClassifier, @unchecked Sendable
                          classID: UInt16,
                          bounds: MONAITransforms.VoxelBounds) async throws -> ClassificationResult {
         guard spec.dgx.isConfigured else {
-            throw ClassificationError.modelUnavailable("DGX Spark not configured.")
+            throw ClassificationError.modelUnavailable("Remote workstation not configured.")
         }
 
         let start = Date()
@@ -104,7 +104,7 @@ public final class RemoteLesionClassifier: LesionClassifier, @unchecked Sendable
             .appendingPathComponent("tracer-classify-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: localPayload) }
         // Atomic so a SIGKILL mid-write never uploads a truncated payload
-        // to the DGX (the remote python would then fail JSON-parse).
+        // to the remote workstation (the remote python would then fail JSON-parse).
         try jsonData.write(to: localPayload, options: [.atomic])
         try executor.uploadFile(localPayload, toRemote: remotePayloadPath)
 

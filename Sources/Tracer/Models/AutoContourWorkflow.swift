@@ -680,7 +680,7 @@ public enum AutoContourWorkflow {
         modalities: [.PT, .CT],
         clinicalPerspective: .nuclearRadiology,
         presetName: "AutoContour PET Oncology",
-        preferredRoutePrompt: "whole body PET CT FDG PSMA lesion tumor burden LesionTracer AutoPET",
+        preferredRoutePrompt: "whole body PET CT FDG PSMA lesion tumor burden AutoPET",
         preferredNNUnetEntryID: "LesionTracer-AutoPETIII",
         structures: [
             AutoContourStructureTemplate(id: "fdg-avid-lesion",
@@ -733,7 +733,7 @@ public enum AutoContourWorkflow {
         modalities: [.PT, .CT],
         clinicalPerspective: .nuclearRadiology,
         presetName: "AutoContour FDG PET Tumor Burden",
-        preferredRoutePrompt: "whole body FDG PET CT tumor burden tmtv tlg lymphoma metastases LesionTracer AutoPET",
+        preferredRoutePrompt: "whole body FDG PET CT tumor burden tmtv tlg lymphoma metastases AutoPET",
         preferredNNUnetEntryID: "LesionTracer-AutoPETIII",
         structures: [
             lesionVOI("fdg-avid-lesion", "FDG-avid lesion",
@@ -774,7 +774,7 @@ public enum AutoContourWorkflow {
         modalities: [.PT, .CT],
         clinicalPerspective: .nuclearRadiology,
         presetName: "AutoContour PSMA PET Tumor Burden",
-        preferredRoutePrompt: "whole body PSMA PET CT prostate cancer metastases lesion tumor burden LesionTracer",
+        preferredRoutePrompt: "whole body PSMA PET CT prostate cancer metastases lesion tumor burden AutoPET",
         preferredNNUnetEntryID: "LesionTracer-AutoPETIII",
         structures: [
             lesionVOI("psma-avid-lesion", "PSMA-avid lesion",

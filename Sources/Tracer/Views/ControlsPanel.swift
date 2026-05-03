@@ -1029,7 +1029,7 @@ private struct FusionTab: View {
                 TextField("Executable / wrapper", text: deformableExecutableBinding)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 11, design: .monospaced))
-                    .help("Absolute path, or a command name available on PATH. SimpleITK defaults to python3; ANTs defaults to antsRegistration.")
+                    .help("Absolute path, or a command name available on PATH. Python MI defaults to python3; ANTs defaults to antsRegistration.")
 
                 if vm.petMRDeformableRegistration.backend == .synthMorph ||
                     vm.petMRDeformableRegistration.backend == .voxelMorph ||

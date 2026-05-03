@@ -33,7 +33,7 @@ public enum PETACCatalog {
         public let requiresAnatomicalChannel: Bool
         /// Whether the entry can be instantiated from built-in defaults
         /// alone. `false` here means the user must point at a Python
-        /// script + (for DGX) configure SSH first.
+        /// script + configure SSH first for remote execution.
         public let requiresConfiguration: Bool
     }
 
@@ -44,7 +44,7 @@ public enum PETACCatalog {
         public var displayName: String {
             switch self {
             case .subprocess: return "Python subprocess"
-            case .dgxRemote:  return "DGX Spark (remote)"
+            case .dgxRemote:  return "Remote Workstation"
             }
         }
     }
@@ -65,22 +65,22 @@ public enum PETACCatalog {
         requiresConfiguration: true
     )
 
-    /// Same script, executed on the user's DGX Spark over SSH. The script
-    /// is expected to live on the DGX. PET volumes are scp'd up + back.
+    /// Same script, executed on the user's configured remote workstation over SSH.
+    /// PET volumes are scp'd up + back.
     /// Useful for cohort runs where local CPU/GPU isn't enough.
     public static let deepACDGX = Entry(
         id: "deep-ac-dgx",
-        displayName: "Deep AC — DGX Spark (NAC → AC over SSH)",
+        displayName: "Deep AC — Remote Workstation (NAC -> AC over SSH)",
         backend: .dgxRemote,
-        description: "Runs the same NAC→AC script on your DGX Spark. Tracer scp's the NAC PET up, runs `python3 script --input … --output …`, and pulls the AC PET back.",
-        provenance: "Bring your own trained checkpoint hosted on the DGX. Tracer doesn't ship weights.",
+        description: "Runs the same NAC-to-AC script on your remote workstation. Tracer scp's the NAC PET up, runs `python3 script --input ... --output ...`, and pulls the AC PET back.",
+        provenance: "Bring your own trained checkpoint hosted on the configured remote workstation. Tracer doesn't ship weights.",
         license: "Depends on the user's model.",
         requiresAnatomicalChannel: false,
         requiresConfiguration: true
     )
 
     /// Two-stage approach: model generates a pseudo-CT from the NAC PET,
-    /// then a standard CT-AC reconstruction is applied on the DGX (or
+    /// then a standard CT-AC reconstruction is applied on the remote workstation (or
     /// locally if the user has the Siemens / Philips reconstruction
     /// toolchain installed). The user's script is responsible for both
     /// stages — Tracer just hands it the NAC PET and waits for the AC PET.

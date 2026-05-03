@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""SimpleITK worker for Tracer.
+"""Image operations worker for Tracer.
 
 The contract is intentionally file-based: Swift writes NIfTI/MetaImage inputs,
-this script transforms them with SimpleITK, then writes a new image and compact
-JSON metadata. Keeping the dependency behind a process boundary lets Tracer
-ship without bundling Python wheels.
+this script transforms them with a Python image-processing backend, then writes
+a new image and compact JSON metadata. Keeping the dependency behind a process
+boundary lets Tracer ship without bundling Python wheels.
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ def _run(args):
         import SimpleITK as sitk
     except Exception as exc:  # pragma: no cover - depends on local environment
         raise RuntimeError(
-            "Missing SimpleITK. Install with: python3 -m pip install SimpleITK"
+            "Missing required image-processing package. Install the worker requirements."
         ) from exc
 
     image = sitk.ReadImage(args.input)
@@ -118,7 +118,7 @@ def _run(args):
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run SimpleITK operation for Tracer")
+    parser = argparse.ArgumentParser(description="Run image operation for Tracer")
     parser.add_argument("--operation", required=True)
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)

@@ -1,12 +1,12 @@
 import Foundation
 
-/// Connection details for the user's DGX Spark workstation. One struct
+/// Connection details for the user's configured remote workstation. One struct
 /// instance is persisted under `@AppStorage("Tracer.Prefs.DGXSpark")` and
 /// shared across every remote runner.
 public struct DGXSparkConfig: Codable, Equatable, Sendable {
-    /// e.g. `"192.168.1.42"` or `"dgx-spark.local"`. Required.
+    /// e.g. `"192.168.1.42"` or a local network hostname. Required.
     public var host: String
-    /// SSH username on the DGX. Default `"ahmed"`.
+    /// SSH username on the remote workstation.
     public var user: String
     /// SSH port. Default 22.
     public var port: Int
@@ -16,18 +16,16 @@ public struct DGXSparkConfig: Codable, Equatable, Sendable {
     /// Remote working directory where Tracer stages NIfTI uploads and
     /// downloads results. Cleared between runs by the remote runner.
     public var remoteWorkdir: String
-    /// Path to `nnUNetv2_predict` on the DGX. Empty = assume it's on `PATH`.
+    /// Path to `nnUNetv2_predict` on the remote workstation. Empty = assume it's on `PATH`.
     public var remoteNNUnetBinary: String
-    /// Path to `llama-cli` / `llama-mtmd-cli` on the DGX. Empty = PATH.
+    /// Path to `llama-cli` / `llama-mtmd-cli` on the remote workstation. Empty = PATH.
     public var remoteLlamaBinary: String
-    /// Optional override for the absorbed PET Segmentator / LesionTracer
-    /// nnU-Net source tree on the DGX. Empty/nil uses Tracer's known default.
+    /// Optional override for a user-provided PET lesion segmentation
+    /// nnU-Net source tree on the remote workstation.
     public var remoteSegmentatorSourcePath: String?
-    /// Optional override for the legacy LesionTracer trained-model folder.
-    /// Empty/nil uses Tracer's known default.
+    /// Optional override for the user-provided PET lesion trained-model folder.
     public var remoteSegmentatorModelFolder: String?
-    /// Reusable Docker image tag on the DGX for the LesionTracer worker.
-    /// Empty/nil falls back to `tracer-lesiontracer:latest`.
+    /// Reusable Docker image tag on the remote workstation for the PET lesion worker.
     public var remoteSegmentatorWorkerImage: String?
     /// Base image used the first time Tracer bootstraps the worker image.
     /// Empty/nil falls back to NVIDIA's PyTorch 25.03 image.
@@ -36,7 +34,7 @@ public struct DGXSparkConfig: Codable, Equatable, Sendable {
     /// pairs separated by newlines. Typical use:
     /// `nnUNet_results=/home/ahmed/nnUNet_results`.
     public var remoteEnvironment: String
-    /// Enable the "Use DGX Spark" toggle globally. Panels honour it
+    /// Enable the remote workstation toggle globally. Panels honour it
     /// per-entry, but this is the master switch.
     public var enabled: Bool
 
@@ -113,12 +111,12 @@ public struct DGXSparkConfig: Codable, Equatable, Sendable {
     public var readinessMessage: String? {
         if !enabled {
             if let detected = Self.detectedNVIDIASparkProfile(enabled: true) {
-                return "DGX Spark is disabled. Detected \(detected.host); enable or apply the detected profile in Settings."
+                return "Remote workstation execution is disabled. Detected \(detected.host); enable or apply the detected profile in Settings."
             }
-            return "Enable DGX Spark in Settings."
+            return "Enable Remote Workstation in Settings."
         }
         if host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return "Set a DGX Spark host in Settings."
+            return "Set a remote workstation host in Settings."
         }
         return nil
     }

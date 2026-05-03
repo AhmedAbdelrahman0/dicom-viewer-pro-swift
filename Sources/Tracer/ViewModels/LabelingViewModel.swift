@@ -850,7 +850,7 @@ public final class LabelingViewModel: ObservableObject {
                                          landmarks: landmarks,
                                          parentVolume: parentVolume,
                                          to: url)
-        case .niftiLabelmap, .itkSnap:
+        case .niftiLabelmap, .labelDescriptor:
             try LabelIO.saveNIfTI(map, to: url, parentVolume: parentVolume,
                                    writeLabelDescriptor: true)
         case .niftiGz:
@@ -860,8 +860,8 @@ public final class LabelingViewModel: ObservableObject {
             try MetaImageIO.writeLabelMap(map, to: url, parentVolume: parentVolume)
         case .nrrdLabelmap:
             try LabelIO.saveNRRD(map, to: url, parentVolume: parentVolume)
-        case .slicerSeg:
-            try LabelIO.saveSlicerSeg(map, to: url, parentVolume: parentVolume)
+        case .segmentationNRRD:
+            try LabelIO.saveSegmentationNRRD(map, to: url, parentVolume: parentVolume)
         case .json:
             try LabelIO.saveJSON(labelMap: map, annotations: annotations, to: url)
         case .csv:
@@ -951,7 +951,7 @@ public final class LabelingViewModel: ObservableObject {
                 height: parentVolume.height,
                 width: parentVolume.width,
                 name: url.deletingPathExtension().deletingPathExtension().lastPathComponent,
-                classes: try LabelIO.loadITKSnapDescriptor(from: url)
+                classes: try LabelIO.loadLabelDescriptor(from: url)
             )
             result = LabelImportResult(labelMap: labelMap,
                                        annotations: [],

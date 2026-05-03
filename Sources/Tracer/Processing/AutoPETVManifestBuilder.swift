@@ -91,7 +91,7 @@ public enum AutoPETVManifestBuilder {
                 warnings.append("No matching label map")
             }
             if geometryMismatch(ct, pet) != nil {
-                warnings.append("PET/CT geometry differs; DGX script will require pre-registration or resampling")
+                warnings.append("PET/CT geometry differs; remote script will require pre-registration or resampling")
             }
             let caseID = uniqueCaseID(base: baseCaseID(for: pet, index: index), used: &usedCaseIDs)
             return DraftCase(

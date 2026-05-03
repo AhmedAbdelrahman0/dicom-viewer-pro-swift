@@ -446,7 +446,7 @@ struct AssistantPanel: View {
     }
 
     /// PET/CT lesion models need channel pairing, SUV scaling, and optional
-    /// DGX Segmentator routing. The PET Engine owns that clinical plumbing,
+    /// remote PET lesion routing. The PET Engine owns that clinical plumbing,
     /// so chat commands use it instead of launching raw nnU-Net directly.
     private func runPETEngineFromAssistant() {
         let engineName = pet.selectedEngine.displayName

@@ -81,12 +81,15 @@ struct StudyBrowserView: View {
     @State private var indexReloadTask: Task<Void, Never>?
     @State private var adminAuditEvents: [PACSAdminAuditEvent] = []
     @State private var adminRouteQueue: [PACSAdminRouteQueueItem] = []
+    @State private var watchedArchiveRootIDs: Set<String> = []
+    @State private var archiveWatcher = PACSArchiveWatcher()
 
     private let worklistDisplayPageSize = 300
     private let statusDefaultsKey = "Tracer.WorklistStudyStatuses"
     private let removedWorklistDefaultsKey = "Tracer.WorklistRemovedStudyIDs"
     private let adminAuditStore = PACSAdminAuditStore()
     private let adminRouteQueueStore = PACSAdminRoutingQueueStore()
+    private let archiveWatchStore = PACSArchiveWatchStore()
 
     private struct OpenedWorklistBucket {
         var id: String
@@ -137,6 +140,8 @@ struct StudyBrowserView: View {
             dgxConfig = DGXSparkConfig.load()
             reloadAdminStores()
             syncVNAConnectionForm()
+            watchedArchiveRootIDs = archiveWatchStore.load()
+            syncArchiveWatchers()
             reloadIndexResults()
         }
         .onChange(of: searchText) { _, _ in
@@ -180,6 +185,10 @@ struct StudyBrowserView: View {
         .onChange(of: vm.indexRevision) { _, _ in
             vm.reloadSavedArchiveRoots()
             reloadIndexResults()
+            syncArchiveWatchers()
+        }
+        .onChange(of: vm.savedArchiveRoots) { _, _ in
+            syncArchiveWatchers()
         }
         // Accept DICOM files / directories / NIfTI files dropped from Finder.
         // `UTType.fileURL` matches anything dragged off the filesystem; the
@@ -413,6 +422,19 @@ struct StudyBrowserView: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
 
+                Button {
+                    exportCurrentMetadataCSV()
+                } label: {
+                    Image(systemName: "tablecells.badge.ellipsis")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(width: 28, height: 22)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(currentExportStudies.isEmpty)
+                .help("Export current study metadata as CSV")
+                .accessibilityLabel("Export metadata CSV")
+
                 adminModeButton
             }
 
@@ -499,18 +521,31 @@ struct StudyBrowserView: View {
         }
     }
 
+    private var currentExportStudies: [PACSWorklistStudy] {
+        switch browserMode {
+        case .worklist:
+            return filteredWorklistStudies
+        case .archives:
+            return indexedArchiveStudies
+        case .admin:
+            return adminStudies
+        case .vna, .viewer:
+            return []
+        }
+    }
+
     private var searchPrompt: String {
         switch browserMode {
         case .worklist:
-            return "Search previously opened studies..."
+            return "Search or use Modality:PT StudyDate:[20250101 TO 20251231]"
         case .vna:
             return "Search patient, accession, or study date..."
         case .archives:
-            return "Search archives..."
+            return "Search archives or DICOM fields..."
         case .viewer:
             return "Search viewer session or files..."
         case .admin:
-            return "Search PACS admin index..."
+            return "Search DICOM fields..."
         }
     }
 
@@ -992,7 +1027,8 @@ struct StudyBrowserView: View {
                             showSavedArchiveRoot(root)
                         } label: {
                             SavedArchiveRootRow(root: root,
-                                                stats: archiveStats(for: root))
+                                                stats: archiveStats(for: root),
+                                                isWatched: watchedArchiveRootIDs.contains(root.id))
                         }
                         .buttonStyle(.plain)
                         .contextMenu {
@@ -1013,6 +1049,13 @@ struct StudyBrowserView: View {
                                 Label("Refresh Index", systemImage: "arrow.clockwise")
                             }
                             .disabled(!root.exists || vm.isIndexing)
+                            Button {
+                                toggleArchiveWatcher(for: root)
+                            } label: {
+                                Label(watchedArchiveRootIDs.contains(root.id) ? "Stop Watching" : "Watch for Changes",
+                                      systemImage: watchedArchiveRootIDs.contains(root.id) ? "eye.slash" : "eye")
+                            }
+                            .disabled(!root.exists)
                             Button(role: .destructive) {
                                 forgetSavedArchiveRoot(root)
                             } label: {
@@ -1068,12 +1111,12 @@ struct StudyBrowserView: View {
 
     @ViewBuilder
     private var sparkArchiveSection: some View {
-        Section("DGX Spark Archives") {
+        Section("Remote Workstation Archives") {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 6) {
                     Image(systemName: "bolt.horizontal.fill")
                         .foregroundColor(TracerTheme.accentBright)
-                    Text("Spark archive root")
+                    Text("Remote archive root")
                         .font(.system(size: 11, weight: .semibold))
                     Spacer()
                     if sparkArchiveIsLoading || sparkArchiveIsStaging {
@@ -1158,7 +1201,7 @@ struct StudyBrowserView: View {
                 EmptyBrowserRow(
                     systemImage: "folder",
                     title: "No remote entries",
-                    subtitle: "This Spark archive folder is empty or filtered out"
+                    subtitle: "This remote archive folder is empty or filtered out"
                 )
             }
         }
@@ -1358,16 +1401,20 @@ struct StudyBrowserView: View {
         )
     }
 
+    private var parsedSearchQuery: PACSAdvancedSearchQuery {
+        PACSAdvancedSearchQuery.parse(searchText)
+    }
+
     private var indexedArchiveStudies: [PACSWorklistStudy] {
-        PACSWorklistStudy.grouped(from: indexedSeries, statuses: studyStatuses)
+        let query = parsedSearchQuery
+        let source = query.isEmpty ? indexedSeries : indexedSeries.filter { query.matches($0) }
+        return PACSWorklistStudy.grouped(from: source, statuses: studyStatuses)
     }
 
     private var adminStudies: [PACSWorklistStudy] {
-        indexedArchiveStudies.filter {
-            $0.matches(searchText: searchText,
-                       statusFilter: .all,
-                       modalityFilter: "All",
-                       dateFilter: .all)
+        let query = parsedSearchQuery
+        return indexedArchiveStudies.filter {
+            query.matches($0)
         }
     }
 
@@ -1376,7 +1423,8 @@ struct StudyBrowserView: View {
     }
 
     private var filteredWorklistStudies: [PACSWorklistStudy] {
-        worklistStudies.filter {
+        let query = parsedSearchQuery
+        return worklistStudies.filter {
             if archiveFilterID != PACSArchiveScope.allID {
                 if let root = selectedSavedArchiveRoot {
                     guard study($0, belongsTo: root) else { return false }
@@ -1386,12 +1434,11 @@ struct StudyBrowserView: View {
                     return false
                 }
             }
-            return $0.matches(
-                searchText: searchText,
-                statusFilter: statusFilter,
-                modalityFilter: modalityFilter,
-                dateFilter: dateFilter
-            )
+            guard query.matches($0) else { return false }
+            return $0.matches(searchText: "",
+                              statusFilter: statusFilter,
+                              modalityFilter: modalityFilter,
+                              dateFilter: dateFilter)
         }
     }
 
@@ -1704,6 +1751,7 @@ struct StudyBrowserView: View {
     private var filteredArchiveTreeRoots: [PACSArchiveTreeNode] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return archiveTreeRoots }
+        guard !parsedSearchQuery.usesFieldSyntax else { return archiveTreeRoots }
         return archiveTreeRoots.compactMap { $0.filtered(matching: query) }
     }
 
@@ -1728,6 +1776,7 @@ struct StudyBrowserView: View {
     private var filteredSavedArchiveRoots: [PACSArchiveRoot] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !query.isEmpty else { return vm.savedArchiveRoots }
+        guard !parsedSearchQuery.usesFieldSyntax else { return vm.savedArchiveRoots }
         return vm.savedArchiveRoots.filter { root in
             root.displayName.lowercased().contains(query)
             || root.path.lowercased().contains(query)
@@ -1753,6 +1802,7 @@ struct StudyBrowserView: View {
     private var filteredArchiveScopes: [PACSArchiveScope] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !query.isEmpty else { return archiveScopes }
+        guard !parsedSearchQuery.usesFieldSyntax else { return archiveScopes }
         return archiveScopes.filter { scope in
             scope.title.lowercased().contains(query)
             || scope.subtitle.lowercased().contains(query)
@@ -2031,6 +2081,39 @@ struct StudyBrowserView: View {
         Task { await vm.openVNASeries(series, study: study) }
     }
 
+    private func exportCurrentMetadataCSV() {
+        let studies = currentExportStudies
+        guard !studies.isEmpty else {
+            vm.statusMessage = "No studies available for metadata export."
+            return
+        }
+        let data = PACSMetadataExporter.csvData(studies: studies, granularity: .series)
+        #if os(macOS)
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.commaSeparatedText]
+        panel.nameFieldStringValue = "Tracer-Metadata-\(metadataExportTimestamp()).csv"
+        panel.message = "Export the current filtered study metadata as a series-level CSV."
+        if panel.runModal() == .OK, let url = panel.url {
+            do {
+                try data.write(to: url, options: [.atomic])
+                vm.statusMessage = "Exported metadata CSV for \(studies.count) studies"
+            } catch {
+                vm.statusMessage = "Metadata export failed: \(error.localizedDescription)"
+            }
+        }
+        #else
+        vm.statusMessage = "Metadata CSV export is available on macOS."
+        #endif
+    }
+
+    private func metadataExportTimestamp() -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return formatter.string(from: Date())
+    }
+
     private func indexLocalArchive(_ shortcut: LocalArchiveShortcut) {
         guard !vm.isIndexing else { return }
         browserMode = .archives
@@ -2065,10 +2148,49 @@ struct StudyBrowserView: View {
         Task { @MainActor in
             await vm.indexDirectory(url: root.url, modelContext: modelContext)
             reloadIndexResults()
+            syncArchiveWatchers()
+        }
+    }
+
+    private func toggleArchiveWatcher(for root: PACSArchiveRoot) {
+        let shouldWatch = !watchedArchiveRootIDs.contains(root.id)
+        watchedArchiveRootIDs = archiveWatchStore.setWatched(shouldWatch, rootID: root.id)
+        syncArchiveWatchers()
+        vm.statusMessage = shouldWatch
+            ? "Watching \(root.displayName) for new studies"
+            : "Stopped watching \(root.displayName)"
+    }
+
+    private func syncArchiveWatchers() {
+        let available = Dictionary(uniqueKeysWithValues: vm.savedArchiveRoots.map { ($0.id, $0) })
+        let validWatchedIDs = watchedArchiveRootIDs.intersection(Set(available.keys))
+        if validWatchedIDs != watchedArchiveRootIDs {
+            watchedArchiveRootIDs = archiveWatchStore.save(validWatchedIDs)
+        }
+
+        for rootID in archiveWatcher.watchedRootIDs where !validWatchedIDs.contains(rootID) {
+            archiveWatcher.stopWatching(rootID: rootID)
+        }
+
+        for rootID in validWatchedIDs {
+            guard let root = available[rootID], !archiveWatcher.isWatching(rootID: rootID) else { continue }
+            archiveWatcher.startWatching(root: root) { event in
+                Task { @MainActor in
+                    guard !vm.isIndexing else {
+                        vm.statusMessage = "Archive changed; waiting for current index task to finish."
+                        return
+                    }
+                    vm.statusMessage = "Archive changed; refreshing \(root.displayName)..."
+                    await vm.indexDirectory(url: event.rootURL, modelContext: modelContext)
+                    reloadIndexResults()
+                }
+            }
         }
     }
 
     private func forgetSavedArchiveRoot(_ root: PACSArchiveRoot) {
+        watchedArchiveRootIDs = archiveWatchStore.setWatched(false, rootID: root.id)
+        archiveWatcher.stopWatching(rootID: root.id)
         vm.forgetArchiveDirectory(id: root.id)
         if archiveFilterID == root.scopeID {
             archiveFilterID = PACSArchiveScope.allID
@@ -2096,7 +2218,7 @@ struct StudyBrowserView: View {
     private func openSparkArchiveRoot() {
         let trimmed = sparkArchiveRootPath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            sparkArchiveError = "Set a Spark archive path first."
+            sparkArchiveError = "Set a remote archive path first."
             return
         }
         setSparkArchiveDirectory(trimmed)
@@ -2116,7 +2238,7 @@ struct StudyBrowserView: View {
         sparkArchiveTask?.cancel()
         sparkArchiveIsLoading = true
         sparkArchiveError = nil
-        vm.statusMessage = "Browsing Spark archive \(path)..."
+        vm.statusMessage = "Browsing remote archive \(path)..."
         let config = dgxConfig
         sparkArchiveTask = Task { @MainActor [path, config] in
             let result = await Task.detached(priority: .userInitiated) {
@@ -2136,7 +2258,7 @@ struct StudyBrowserView: View {
             } else {
                 sparkArchiveEntries = result.entries
                 sparkArchiveError = nil
-                vm.statusMessage = "Spark archive: \(result.entries.count) entries at \(path)"
+                vm.statusMessage = "Remote archive: \(result.entries.count) entries at \(path)"
             }
             sparkArchiveTask = nil
         }
@@ -2197,7 +2319,7 @@ struct StudyBrowserView: View {
         }
         sparkArchiveIsStaging = true
         sparkArchiveError = nil
-        vm.statusMessage = "Staging Spark archive \(sparkLastPathComponent(path))..."
+        vm.statusMessage = "Staging remote archive \(sparkLastPathComponent(path))..."
         let config = dgxConfig
         Task { @MainActor [path, isDirectory, config] in
             let result = await Task.detached(priority: .userInitiated) {
@@ -2213,11 +2335,11 @@ struct StudyBrowserView: View {
             sparkArchiveIsStaging = false
             if let error = result.error {
                 sparkArchiveError = error
-                vm.statusMessage = "Spark stage error: \(error)"
+                vm.statusMessage = "Remote stage error: \(error)"
                 return
             }
             guard let localURL = result.url else { return }
-            vm.statusMessage = "Staged Spark archive to \(localURL.lastPathComponent)"
+            vm.statusMessage = "Staged remote archive to \(localURL.lastPathComponent)"
             completion(localURL)
         }
     }
@@ -2354,22 +2476,12 @@ struct StudyBrowserView: View {
     }
 
     private func indexFetchDescriptor() -> FetchDescriptor<PACSIndexedSeries> {
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let sort = [
             SortDescriptor(\PACSIndexedSeries.indexedAt, order: .reverse),
             SortDescriptor(\PACSIndexedSeries.patientName),
             SortDescriptor(\PACSIndexedSeries.studyDate, order: .reverse),
         ]
-        var descriptor: FetchDescriptor<PACSIndexedSeries>
-        if query.isEmpty {
-            descriptor = FetchDescriptor(sortBy: sort)
-        } else {
-            descriptor = FetchDescriptor(
-                predicate: #Predicate { $0.searchableTextLower.contains(query) },
-                sortBy: sort
-            )
-        }
-        return descriptor
+        return FetchDescriptor(sortBy: sort)
     }
 
     private func deleteIndexedStudy(_ study: PACSWorklistStudy) {
@@ -3203,6 +3315,7 @@ private struct ArchiveTreeStudyRow: View {
 
     var body: some View {
         HStack(spacing: 9) {
+            PACSStudyThumbnailView(study: study)
             WorklistStatusBadge(status: study.status)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
@@ -3241,6 +3354,41 @@ private struct ArchiveTreeStudyRow: View {
         .padding(.leading, CGFloat(max(0, depth)) * 8)
         .padding(.vertical, 2)
         .contentShape(Rectangle())
+    }
+}
+
+private struct PACSStudyThumbnailView: View {
+    let study: PACSWorklistStudy
+    @State private var thumbnail: PACSThumbnail?
+    private let store = PACSThumbnailStore()
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 4)
+                .fill(TracerTheme.panelRaised)
+            if let image = thumbnail?.cgImage {
+                Image(decorative: image, scale: 1, orientation: .up)
+                    .resizable()
+                    .interpolation(.medium)
+                    .scaledToFit()
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+            } else {
+                Image(systemName: "photo")
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+            }
+        }
+        .frame(width: 34, height: 34)
+        .overlay(
+            RoundedRectangle(cornerRadius: 4)
+                .stroke(TracerTheme.hairline, lineWidth: 1)
+        )
+        .task(id: study.id) {
+            let loaded = await Task.detached(priority: .utility) {
+                store.thumbnail(for: study)
+            }.value
+            thumbnail = loaded
+        }
     }
 }
 
@@ -3864,7 +4012,7 @@ private struct SparkArchiveHeaderRow: View {
                 .buttonStyle(.borderless)
                 .controlSize(.small)
                 .disabled(isBusy)
-                .help("Refresh Spark directory")
+                .help("Refresh remote directory")
             }
 
             Text(path)
@@ -4124,6 +4272,7 @@ private struct LocalArchiveShortcutRow: View {
 private struct SavedArchiveRootRow: View {
     let root: PACSArchiveRoot
     let stats: ArchiveStudyStats
+    let isWatched: Bool
 
     var body: some View {
         HStack(spacing: 10) {
@@ -4151,6 +4300,10 @@ private struct SavedArchiveRootRow: View {
 
                 HStack(spacing: 8) {
                     Text(root.exists ? "Available" : "Missing")
+                    if isWatched {
+                        Label("Watching", systemImage: "eye")
+                            .labelStyle(.titleAndIcon)
+                    }
                     if stats.seriesCount > 0 {
                         Text(stats.seriesLabel)
                     }

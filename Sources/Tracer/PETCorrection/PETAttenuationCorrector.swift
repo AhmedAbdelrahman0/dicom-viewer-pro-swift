@@ -23,11 +23,11 @@ import Foundation
 ///   • `SubprocessPETACCorrector` — local Python script (PyTorch / TF). User
 ///     supplies the script path + an env if needed.
 ///   • `RemotePETACCorrector`     — same Python script but executed on the
-///     user's DGX Spark over SSH.
+///     user's configured remote workstation over SSH.
 ///
 /// Adding a CoreML backend is a follow-up — most public deep-AC models are
 /// PyTorch and converting them to CoreML is non-trivial (3D U-Nets with
-/// custom blocks). Subprocess + DGX cover the realistic deployment paths.
+/// custom blocks). Subprocess + remote execution cover the realistic deployment paths.
 public protocol PETAttenuationCorrector: Sendable {
     /// Stable id for routing / config / cohort job records.
     var id: String { get }

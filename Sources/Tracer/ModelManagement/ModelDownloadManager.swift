@@ -208,7 +208,7 @@ public enum ModelDownloadError: Error, LocalizedError {
         switch self {
         case .noSourceURL: return "Model has no source URL."
         case .noResponse:  return "Download produced no response."
-        case .remoteArtifact: return "Remote (DGX) artifacts don't download locally."
+        case .remoteArtifact: return "Remote artifacts don't download locally."
         case .cancelled:   return "Download cancelled."
         case .hashMismatch(let expected, let actual):
             return "SHA-256 mismatch: expected \(expected), got \(actual)."

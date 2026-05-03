@@ -46,7 +46,7 @@ public final class ModelManagerViewModel: ObservableObject {
         if newKind == .remoteArtifact {
             let path = newRemotePath.trimmingCharacters(in: .whitespaces)
             guard !path.isEmpty else {
-                statusMessage = "Remote artifacts need a path on the DGX."
+                statusMessage = "Remote artifacts need a path on the remote workstation."
                 return
             }
             model = TracerModel(
@@ -179,13 +179,13 @@ public final class ModelManagerViewModel: ObservableObject {
     @discardableResult
     public func adoptSegmentatorLesionTracer() -> TracerModel? {
         guard let artifact = NNUnetModelInspector.knownSegmentatorLesionTracerArtifact() else {
-            statusMessage = "Could not find the PET Segmentator LesionTracer model folder."
+            statusMessage = "Could not find the compatible PET lesion model folder."
             return nil
         }
         return registerExternalNNUnetFolder(
             artifact.modelFolder,
             bindTo: "LesionTracer-AutoPETIII",
-            displayNameOverride: "LesionTracer AutoPET III (PET Segmentator)"
+            displayNameOverride: "AutoPET III-compatible PET lesion model"
         )
     }
 

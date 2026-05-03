@@ -2,7 +2,7 @@ import Foundation
 
 /// Inspects an unpacked nnU-Net v2 model folder without copying the weights.
 ///
-/// The important case for Tracer is the legacy PET Segmentator LesionTracer
+/// The important case for Tracer is a user-provided compatible PET lesion
 /// bundle, which already contains a valid trained-model folder:
 ///
 /// `Dataset222_AutoPETIII_2024/autoPET3_Trainer__nnUNetResEncUNetLPlansMultiTalent__3d_fullres_bs3`
@@ -178,7 +178,7 @@ public enum NNUnetModelInspector {
 
     private static func displayName(datasetID: String, trainer: String) -> String {
         if datasetID.lowercased().contains("autopetiii") || trainer.lowercased().contains("autopet3") {
-            return "LesionTracer AutoPET III"
+            return "AutoPET III-compatible PET lesion model"
         }
         return datasetID
     }

@@ -2,6 +2,19 @@ import XCTest
 @testable import Tracer
 
 final class GAAINReferencePipelineTests: XCTestCase {
+    func testRemoteConfigurationDefaultsToWorkdirScopedDataImportPath() {
+        let config = DGXSparkConfig(host: "remote.local",
+                                    user: "tester",
+                                    remoteWorkdir: "~/tracer-remote",
+                                    enabled: true)
+        let remote = RemoteGAAINReferenceBuilder.Configuration(dgx: config)
+
+        XCTAssertEqual(remote.remoteDataRoot, "~/tracer-remote/gaain-centiloid-data")
+        XCTAssertEqual(remote.timeoutSeconds, 24 * 60 * 60)
+        XCTAssertTrue(remote.uploadArchivesIfMissing)
+        XCTAssertFalse(remote.removeRemoteScratch)
+    }
+
     func testDiscoversDownloadedGAAINManifestAndWritesBuildPackage() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("gaain-pipeline-\(UUID().uuidString)", isDirectory: true)
@@ -43,6 +56,8 @@ final class GAAINReferencePipelineTests: XCTestCase {
         XCTAssertTrue(plan.jobs.contains { $0.tracer == .flutemetamol })
         XCTAssertTrue(plan.jobs.contains { $0.tracer == .nav4694 })
         XCTAssertFalse(plan.jobs.contains { $0.tracer == .mri })
+        XCTAssertTrue(plan.notes.contains { $0.contains("user-downloaded GAAIN") })
+        XCTAssertTrue(plan.notes.contains { $0.contains("does not bundle GAAIN data") })
 
         let package = try GAAINReferencePipeline.writeBuildPackage(root: root, packageRoot: packageRoot)
         XCTAssertTrue(FileManager.default.fileExists(atPath: package.planURL.path))
@@ -53,9 +68,46 @@ final class GAAINReferencePipelineTests: XCTestCase {
         let script = try String(contentsOf: package.workerScriptURL, encoding: .utf8)
         XCTAssertTrue(script.contains("nibabel"))
         XCTAssertTrue(script.contains("normal_database_"))
+        let readme = try String(contentsOf: package.readmeURL, encoding: .utf8)
+        XCTAssertTrue(readme.contains("GAAIN Centiloid Data Import Package"))
+        XCTAssertTrue(readme.contains("Tracer does not bundle GAAIN data"))
     }
 
-    func testRemotePlanRewritesSparkPathsAndShellPathExpandsTilde() throws {
+    func testBuildPackageScriptsUseDataImportNamingAndNoBundledDataPromise() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gaain-script-copy-\(UUID().uuidString)", isDirectory: true)
+        let packageRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gaain-script-package-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: packageRoot)
+        }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let filename = "Florbetapir_Young_Control_florbetapir.zip"
+        let manifest = """
+        filename\turl\tstatus\tcontent_length\tcontent_type\tlast_modified
+        \(filename)\thttps://example.test/\(filename)\t200\t4\tapplication/octet-stream\tMon, 01 Jan 2024 00:00:00 GMT
+        """
+        try Data(repeating: 0x2A, count: 4).write(to: root.appendingPathComponent(filename))
+        try Data(manifest.utf8).write(to: root.appendingPathComponent("download_manifest.tsv"))
+
+        let package = try GAAINReferencePipeline.writeBuildPackage(root: root, packageRoot: packageRoot)
+        let readme = try String(contentsOf: package.readmeURL, encoding: .utf8)
+        let runScript = try String(contentsOf: package.runScriptURL, encoding: .utf8)
+        let plan = try String(contentsOf: package.planURL, encoding: .utf8)
+
+        XCTAssertTrue(readme.contains("Data Import Package"))
+        XCTAssertTrue(readme.contains("does not bundle GAAIN data"))
+        XCTAssertTrue(runScript.contains("gaain_reference_build.py"))
+        XCTAssertTrue(plan.contains("user-downloaded GAAIN"))
+        XCTAssertFalse(readme.contains("reference " + "builder"))
+        XCTAssertFalse(readme.contains("Spark " + "archive"))
+        XCTAssertFalse(runScript.contains("Spark " + "Job"))
+        XCTAssertFalse(plan.contains("Spark " + "Dataset"))
+    }
+
+    func testRemotePlanRewritesRemotePathsAndShellPathExpandsTilde() throws {
         let plan = GAAINReferenceBuildPlan(
             id: "plan",
             createdAt: Date(timeIntervalSince1970: 1),

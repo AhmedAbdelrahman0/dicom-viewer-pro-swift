@@ -4545,18 +4545,18 @@ public final class ViewerViewModel: ObservableObject {
         return isScannerGeometryPETMRCandidate(candidate) ||
             label.contains("scanner geometry") ||
             label.contains("rigid rotation") ||
-            label.contains("simpleitk mi on scanner") ||
-            label.contains("3d slicer brainsfit on scanner") ||
-            label.contains("itk-snap greedy on scanner") ||
+            label.contains("python mi refinement on scanner") ||
+            label.contains("brainsfit on scanner") ||
+            label.contains("greedy on scanner") ||
             note.contains("scanner/world geometry") ||
             note.contains("rigid rotation")
     }
 
     private func isExternalBrainPETMRRefinement(_ candidate: PETMRFusionCandidate) -> Bool {
-        candidate.label.localizedCaseInsensitiveContains("ITK-SNAP Greedy") ||
-            candidate.note.localizedCaseInsensitiveContains("ITK-SNAP Greedy") ||
-            candidate.label.localizedCaseInsensitiveContains("3D Slicer BRAINSFit") ||
-            candidate.note.localizedCaseInsensitiveContains("3D Slicer BRAINSFit")
+        candidate.label.localizedCaseInsensitiveContains("Greedy") ||
+            candidate.note.localizedCaseInsensitiveContains("Greedy") ||
+            candidate.label.localizedCaseInsensitiveContains("BRAINSFit") ||
+            candidate.note.localizedCaseInsensitiveContains("BRAINSFit")
     }
 
     private func hasStrongExternalBrainPETMRRefinement(in candidates: [PETMRFusionCandidate]) -> Bool {
@@ -4573,7 +4573,7 @@ public final class ViewerViewModel: ObservableObject {
     private func brainPETMRExternalSeeds(from candidates: [PETMRFusionCandidate]) -> [PETMRFusionCandidate] {
         var safeSeeds = candidates
             .filter(isBrainSafePETMRCandidate)
-            .filter { !$0.label.localizedCaseInsensitiveContains("SimpleITK") }
+            .filter { !$0.label.localizedCaseInsensitiveContains("Python MI") }
             .filter { !$0.label.localizedCaseInsensitiveContains("BRAINSFit") }
             .filter { !$0.label.localizedCaseInsensitiveContains("Greedy") }
         var pinned: [PETMRFusionCandidate] = []
@@ -4644,7 +4644,7 @@ public final class ViewerViewModel: ObservableObject {
         if isBrainStagedPETMRCandidate(candidate) {
             penalty -= 0.025
         }
-        if label.contains("simpleitk") || note.contains("simpleitk") {
+        if label.contains("python mi") || note.contains("python mi") {
             penalty += 0.03
         }
         if candidate.deformationQuality != nil {
@@ -4724,8 +4724,8 @@ public final class ViewerViewModel: ObservableObject {
                 return true
             }
             let isPrecisionRefinement =
-                candidate.label.localizedCaseInsensitiveContains("SimpleITK") ||
-                candidate.note.localizedCaseInsensitiveContains("SimpleITK") ||
+                candidate.label.localizedCaseInsensitiveContains("Python MI") ||
+                candidate.note.localizedCaseInsensitiveContains("Python MI") ||
                 candidate.label.localizedCaseInsensitiveContains("segmentation polish") ||
                 candidate.note.localizedCaseInsensitiveContains("segmentation polish") ||
                 candidate.label.localizedCaseInsensitiveContains("brain landmark") ||
@@ -5324,9 +5324,9 @@ public final class ViewerViewModel: ObservableObject {
 
     private func automaticPETMRExternalConfigurations() -> [PETMRDeformableRegistrationConfiguration] {
         var configs: [PETMRDeformableRegistrationConfiguration] = []
-        let selectedSimpleITK = petMRDeformableRegistration.backend == .simpleITKMI
+        let selectedPythonMI = petMRDeformableRegistration.backend == .pythonMI
         let selectedBRAINSFit = petMRDeformableRegistration.backend == .brainsFit
-        let selectedGreedy = petMRDeformableRegistration.backend == .itkSnapGreedy
+        let selectedGreedy = petMRDeformableRegistration.backend == .greedy
         let selectedExtraArguments = petMRDeformableRegistration.extraArguments
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -5347,16 +5347,16 @@ public final class ViewerViewModel: ObservableObject {
             configs.append(config)
         }
 
-        var simpleITK = PETMRDeformableRegistrationConfiguration(
-            backend: .simpleITKMI,
-            executablePath: selectedSimpleITK ? petMRDeformableRegistration.executablePath : "",
+        var pythonMI = PETMRDeformableRegistrationConfiguration(
+            backend: .pythonMI,
+            executablePath: selectedPythonMI ? petMRDeformableRegistration.executablePath : "",
             timeoutSeconds: min(max(petMRDeformableRegistration.timeoutSeconds, 120), 300),
-            metricPreset: selectedSimpleITK ? petMRDeformableRegistration.metricPreset : .multimodalMI
+            metricPreset: selectedPythonMI ? petMRDeformableRegistration.metricPreset : .multimodalMI
         )
-        simpleITK.extraArguments = selectedSimpleITK && !selectedExtraArguments.isEmpty
+        pythonMI.extraArguments = selectedPythonMI && !selectedExtraArguments.isEmpty
             ? selectedExtraArguments
             : "--sampling 0.05 --iterations 120 --bins 64"
-        appendIfReady(simpleITK)
+        appendIfReady(pythonMI)
 
         if selectedBRAINSFit {
             var brainsFit = PETMRDeformableRegistrationConfiguration(
@@ -5378,7 +5378,7 @@ public final class ViewerViewModel: ObservableObject {
 
         if selectedGreedy {
             var greedy = PETMRDeformableRegistrationConfiguration(
-                backend: .itkSnapGreedy,
+                backend: .greedy,
                 executablePath: petMRDeformableRegistration.executablePath,
                 timeoutSeconds: min(max(petMRDeformableRegistration.timeoutSeconds, 180), 420),
                 metricPreset: petMRDeformableRegistration.metricPreset
@@ -5387,17 +5387,17 @@ public final class ViewerViewModel: ObservableObject {
             appendIfReady(greedy)
         } else {
             appendIfReady(PETMRDeformableRegistrationConfiguration(
-                backend: .itkSnapGreedy,
-                executablePath: PETMRDeformableBackend.itkSnapGreedy.defaultExecutableName,
+                backend: .greedy,
+                executablePath: PETMRDeformableBackend.greedy.defaultExecutableName,
                 timeoutSeconds: 420,
                 metricPreset: .multimodalMI
             ))
         }
 
         if petMRDeformableRegistration.isExternalConfigured,
-           petMRDeformableRegistration.backend != .simpleITKMI,
+           petMRDeformableRegistration.backend != .pythonMI,
            petMRDeformableRegistration.backend != .brainsFit,
-           petMRDeformableRegistration.backend != .itkSnapGreedy {
+           petMRDeformableRegistration.backend != .greedy {
             appendIfReady(petMRDeformableRegistration)
         }
         return configs
@@ -5428,8 +5428,8 @@ public final class ViewerViewModel: ObservableObject {
         if !failedEngines.isEmpty {
             note += " Skipped/failed: \(failedEngines.joined(separator: "; "))."
         }
-        if best.note.localizedCaseInsensitiveContains("SimpleITK") {
-            note += " SimpleITK contributed to the selected fit."
+        if best.note.localizedCaseInsensitiveContains("Python MI") {
+            note += " Python MI refinement contributed to the selected fit."
         } else if best.note.localizedCaseInsensitiveContains("precision QA nudge") {
             note += " Precision QA nudge contributed to the selected fit."
         } else if best.note.localizedCaseInsensitiveContains("brain landmark") {
@@ -7160,7 +7160,7 @@ public final class ViewerViewModel: ObservableObject {
         autoWLHistogram(preset: .balanced)
     }
 
-    /// Histogram-driven W/L picker, inspired by ITK-SNAP's auto-contrast.
+    /// Histogram-driven W/L picker using percentile clipping.
     /// `preset` maps to a percentile clip range (see `HistogramAutoWindow.Preset`).
     public func autoWLHistogram(preset: HistogramAutoWindow.Preset = .balanced) {
         guard let v = currentVolume else { return }

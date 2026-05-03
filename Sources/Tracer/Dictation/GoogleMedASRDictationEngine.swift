@@ -1,6 +1,6 @@
 import Foundation
 
-/// Dictation engine backed by Google's public MedASR model through a
+/// Dictation engine backed by a MedASR-compatible model through a
 /// local worker process.
 ///
 /// MedASR is not exposed as a native Apple streaming recogniser. Tracer
@@ -31,7 +31,7 @@ public final class GoogleMedASRDictationEngine: DictationEngine, @unchecked Send
                 workerFactory: @escaping @Sendable () -> WorkerProcess = { LocalWorkerProcess() }) {
         self.configuration = configuration
         self.locale = configuration.locale
-        self.displayName = "Google MedASR (\(configuration.modelIdentifier))"
+        self.displayName = "MedASR model (\(configuration.modelIdentifier))"
         self.makeWorker = workerFactory
         var c: AsyncStream<DictationEvent>.Continuation!
         self.events = AsyncStream<DictationEvent> { c = $0 }

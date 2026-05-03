@@ -5,7 +5,7 @@ import Foundation
 ///     (auto-saved on every change so the user doesn't lose a 12-field
 ///     configuration when the inspector closes)
 ///   • Saved as a named preset under `UserDefaults["Tracer.Cohort.Presets"]`
-///     for cohorts that the user runs repeatedly (e.g. "AutoPET DGX run",
+///     for cohorts that the user runs repeatedly (e.g. "AutoPET remote run",
 ///     "Local lung CT cohort")
 ///   • Round-tripped into a `CohortJob` for the batch processor
 ///

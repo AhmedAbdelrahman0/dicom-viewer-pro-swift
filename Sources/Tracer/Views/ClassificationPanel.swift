@@ -178,12 +178,12 @@ public struct ClassificationPanel: View {
 
     private var subprocessConfig: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Toggle("Run on DGX Spark (remote Python)", isOn: $classifier.runOnDGX)
+            Toggle("Run on Remote Workstation (remote Python)", isOn: $classifier.runOnDGX)
                 .toggleStyle(.switch)
-                .help("Upload the VOI + mask to the DGX, run the Python script there, and pull the JSON result back. Honours Settings → DGX Spark.")
+                .help("Upload the VOI + mask to the remote workstation, run the Python script there, and pull the JSON result back. Honours Settings -> Remote Workstation.")
 
             Text(classifier.runOnDGX
-                 ? "Remote script path on DGX"
+                 ? "Remote workstation script path"
                  : "Python script")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(.secondary)
@@ -218,7 +218,7 @@ public struct ClassificationPanel: View {
                         .frame(width: 8, height: 8)
                     Text(cfg.isConfigured && cfg.enabled
                          ? "Connected to \(cfg.sshDestination):\(cfg.port)"
-                         : "Configure Settings → DGX Spark first")
+                         : "Configure Settings -> Remote Workstation first")
                         .font(.system(size: 10))
                         .foregroundColor(.secondary)
                 }

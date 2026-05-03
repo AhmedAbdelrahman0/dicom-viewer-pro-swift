@@ -3009,7 +3009,7 @@ final class GeometryAndIOTests: XCTestCase {
             .appendingPathComponent("labels-\(UUID().uuidString).seg.nrrd")
         defer { try? FileManager.default.removeItem(at: url) }
 
-        try LabelIO.saveSlicerSeg(map, to: url, parentVolume: volume)
+        try LabelIO.saveSegmentationNRRD(map, to: url, parentVolume: volume)
         let loaded = try LabelIO.loadNRRDLabelmap(from: url, parentVolume: volume)
 
         XCTAssertEqual(loaded.voxels, map.voxels)
@@ -4267,22 +4267,22 @@ final class GeometryAndIOTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
     }
 
-    // MARK: - ITK-SNAP presets
+    // MARK: - Anatomical label presets
 
-    func testITKSNAPPresetsExposeExpectedTaxonomies() {
-        let names = ITKSNAPPresets.all.map(\.name)
-        XCTAssertTrue(names.contains("Brain MRI (ITK-SNAP style)"))
+    func testAnatomicalLabelPresetsExposeExpectedTaxonomies() {
+        let names = AnatomicalLabelPresets.all.map(\.name)
+        XCTAssertTrue(names.contains("Brain MRI Classic"))
         XCTAssertTrue(names.contains("Cardiac Cine MRI"))
         XCTAssertTrue(names.contains("Liver Couinaud Segments"))
-        XCTAssertEqual(ITKSNAPPresets.liverSegments.classes.count, 8,
+        XCTAssertEqual(AnatomicalLabelPresets.liverSegments.classes.count, 8,
                        "Couinaud segments I–VIII")
     }
 
-    func testLabelPresetsIncludeITKSNAPExtensions() {
+    func testLabelPresetsIncludeAnatomicalExtensions() {
         let registered = LabelPresets.all.map(\.name)
-        XCTAssertTrue(registered.contains("Brain MRI (ITK-SNAP style)"))
+        XCTAssertTrue(registered.contains("Brain MRI Classic"))
         XCTAssertTrue(registered.contains("TotalSegmentator"),
-                      "ITK-SNAP registration must not remove existing presets")
+                      "Anatomical preset registration must not remove existing presets")
     }
 
     // MARK: - nnU-Net integration

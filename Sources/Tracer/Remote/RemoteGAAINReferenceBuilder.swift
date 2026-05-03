@@ -40,15 +40,15 @@ public final class RemoteGAAINReferenceBuilder: @unchecked Sendable {
         public var errorDescription: String? {
             switch self {
             case .notConfigured:
-                return "DGX Spark is not configured. Configure Settings -> DGX Spark first."
+                return "Remote workstation is not configured. Configure Settings -> Remote Workstation first."
             case .missingLocalFile(let path):
                 return "Local GAAIN file is missing: \(path)."
             case .remoteFailed(let message):
-                return "GAAIN Spark build failed: \(message)"
+                return "GAAIN remote data import failed: \(message)"
             case .missingResultsArchive(let path):
-                return "GAAIN Spark build did not produce results archive: \(path)."
+                return "GAAIN remote data import did not produce results archive: \(path)."
             case .extractionFailed(let message):
-                return "Could not unpack GAAIN Spark results: \(message)"
+                return "Could not unpack GAAIN remote data import results: \(message)"
             }
         }
     }
@@ -77,7 +77,7 @@ public final class RemoteGAAINReferenceBuilder: @unchecked Sendable {
             }
         }
 
-        logSink("Preparing GAAIN Spark build at \(configuration.dgx.sshDestination):\(remoteBase)\n")
+        logSink("Preparing GAAIN remote data import at \(configuration.dgx.sshDestination):\(remoteBase)\n")
         try executor.ensureRemoteDirectory(remotePackage)
         try executor.ensureRemoteDirectory(remoteOutput)
         try executor.ensureRemoteDirectory(configuration.remoteDataRoot)
@@ -112,7 +112,7 @@ public final class RemoteGAAINReferenceBuilder: @unchecked Sendable {
             "tar -C \(RemoteExecutor.shellPath(remoteOutput)) -czf \(RemoteExecutor.shellPath(remoteResultsTGZ)) ."
         ].joined(separator: " && ")
 
-        logSink("Launching GAAIN reference build on Spark\n")
+        logSink("Launching GAAIN data import on remote workstation\n")
         let result = try executor.run(command,
                                       timeoutSeconds: configuration.timeoutSeconds,
                                       logSink: logSink)
@@ -200,7 +200,7 @@ public final class RemoteGAAINReferenceBuilder: @unchecked Sendable {
             guard let expected = file.actualByteCount else { continue }
             let remotePath = "\(remoteDataRoot)/\(file.filename)"
             if try remoteFileSize(remotePath, executor: executor) == expected {
-                logSink("Spark data \(index + 1)/\(completeFiles.count): \(file.filename) already present\n")
+                logSink("Remote data \(index + 1)/\(completeFiles.count): \(file.filename) already present\n")
                 continue
             }
             guard FileManager.default.fileExists(atPath: file.localPath) else {
