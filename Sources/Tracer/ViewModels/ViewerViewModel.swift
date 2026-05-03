@@ -539,6 +539,8 @@ public final class ViewerViewModel: ObservableObject {
     @Published public private(set) var segmentationRuns: [SegmentationRunRecord] = []
     @Published public private(set) var activePETOncologyReview: PETOncologyReview?
     @Published public private(set) var activeSegmentationQualityReport: SegmentationQualityReport?
+    @Published public private(set) var autoContourSession: AutoContourSession?
+    @Published public private(set) var autoContourQAReport: AutoContourQAReport?
     @Published public private(set) var brainPETReport: BrainPETReport?
     @Published public private(set) var brainPETAnatomyAwareReport: BrainPETAnatomyAwareReport?
     @Published public private(set) var brainPETNormalDatabase: BrainPETNormalDatabase?
@@ -2272,6 +2274,256 @@ public final class ViewerViewModel: ObservableObject {
         activeSegmentationQualityReport = report
         statusMessage = "Segmentation QA: \(report.compactSummary)"
         return report
+    }
+
+    @discardableResult
+    public func planAutoContour(templateID: String,
+                                availableMONAIModels: [String] = []) -> AutoContourSession? {
+        guard let template = AutoContourWorkflow.template(id: templateID) else {
+            statusMessage = "Auto-contour protocol was not found"
+            return nil
+        }
+        guard let volume = autoContourPrimaryVolume(for: template) ?? currentVolume else {
+            statusMessage = "Load a CT, MR, or PET/CT study before planning auto-contours"
+            return nil
+        }
+
+        let session = AutoContourWorkflow.plan(template: template,
+                                               volume: volume,
+                                               availableMONAIModels: availableMONAIModels)
+        autoContourSession = session
+        autoContourQAReport = nil
+        let routeLabel = session.preferredNNUnetEntry?.displayName
+            ?? session.primaryRoute?.modelName
+            ?? "review checklist"
+        statusMessage = "Auto-contour plan ready: \(template.shortName) via \(routeLabel)"
+        return session
+    }
+
+    @discardableResult
+    public func prepareAutoContourStructureSet(templateID: String? = nil) -> LabelMap? {
+        let template: AutoContourProtocolTemplate?
+        if let templateID {
+            template = AutoContourWorkflow.template(id: templateID)
+        } else {
+            template = autoContourSession?.protocolTemplate
+        }
+        guard let template else {
+            statusMessage = "Pick an auto-contour protocol first"
+            return nil
+        }
+        guard let volume = autoContourPrimaryVolume(for: template) ?? currentVolume else {
+            statusMessage = "Load a review volume before preparing auto-contours"
+            return nil
+        }
+
+        let map: LabelMap
+        if let active = labeling.activeLabelMap, sameGrid(volume, active) {
+            map = active
+        } else if let existing = labeling.labelMaps.first(where: { sameGrid(volume, $0) }) {
+            labeling.activeLabelMap = existing
+            map = existing
+        } else {
+            map = labeling.createLabelMap(for: volume,
+                                          name: "\(template.shortName) AutoContour",
+                                          presetSet: AutoContourWorkflow.labelPreset(for: template))
+        }
+
+        let added = AutoContourWorkflow.installMissingStructures(from: template, into: map)
+        if let first = map.classes.first {
+            labeling.activeClassID = first.labelID
+        }
+        autoContourQAReport = AutoContourWorkflow.qaReport(labelMap: map,
+                                                           template: template,
+                                                           referenceVolume: volume)
+        if var session = autoContourSession, session.protocolTemplate.id == template.id {
+            session.status = .draft
+            session.qaReport = autoContourQAReport
+            autoContourSession = session
+        }
+        statusMessage = added > 0
+            ? "Prepared \(template.shortName) structure set (+\(added) class(es))"
+            : "Prepared \(template.shortName) structure set"
+        return map
+    }
+
+    @discardableResult
+    public func refreshAutoContourQA(templateID: String? = nil) -> AutoContourQAReport? {
+        guard let map = labeling.activeLabelMap else {
+            autoContourQAReport = nil
+            statusMessage = "No active label map for auto-contour QA"
+            return nil
+        }
+        let template: AutoContourProtocolTemplate?
+        if let templateID {
+            template = AutoContourWorkflow.template(id: templateID)
+        } else {
+            template = autoContourSession?.protocolTemplate
+        }
+        guard let template else {
+            statusMessage = "Pick an auto-contour protocol before running QA"
+            return nil
+        }
+        let referenceVolume = autoContourPrimaryVolume(for: template) ?? currentVolume
+        let report = AutoContourWorkflow.qaReport(labelMap: map,
+                                                  template: template,
+                                                  referenceVolume: referenceVolume)
+        autoContourQAReport = report
+        if var session = autoContourSession, session.protocolTemplate.id == template.id {
+            session.qaReport = report
+            session.status = report.hasBlockingFindings ? .blocked : .needsReview
+            autoContourSession = session
+        }
+        statusMessage = "Auto-contour QA: \(report.compactSummary)"
+        return report
+    }
+
+    @discardableResult
+    public func completeAutoContourInference(labelMap: LabelMap,
+                                             templateID: String,
+                                             engine: String,
+                                             backend: String,
+                                             modelID: String,
+                                             metadata: [String: String] = [:]) -> AutoContourQAReport? {
+        guard let template = AutoContourWorkflow.template(id: templateID) else {
+            statusMessage = "Auto-contour protocol was not found"
+            return nil
+        }
+        if !labeling.labelMaps.contains(where: { $0.id == labelMap.id }) {
+            labeling.labelMaps.append(labelMap)
+        }
+        labeling.activeLabelMap = labelMap
+        AutoContourWorkflow.installMissingStructures(from: template, into: labelMap)
+        labelMap.name = "\(template.shortName) AutoContour Draft"
+
+        let referenceVolume = autoContourPrimaryVolume(for: template) ?? currentVolume
+        let report = AutoContourWorkflow.qaReport(labelMap: labelMap,
+                                                  template: template,
+                                                  referenceVolume: referenceVolume)
+        autoContourQAReport = report
+
+        var session = autoContourSession
+        if session?.protocolTemplate.id != template.id,
+           let volume = referenceVolume {
+            session = AutoContourWorkflow.plan(template: template, volume: volume)
+        }
+        if var updated = session {
+            updated.status = report.hasBlockingFindings ? .blocked : .needsReview
+            updated.qaReport = report
+            let workflowMetadata = AutoContourWorkflow.metadata(for: updated, report: report)
+            let record = recordSegmentationRun(
+                labelMap: labelMap,
+                name: "\(template.shortName) AutoContour Draft",
+                engine: engine,
+                backend: backend,
+                modelID: modelID,
+                metadata: metadata.merging(workflowMetadata) { explicit, _ in explicit }
+            )
+            updated.generatedRunID = record?.id
+            autoContourSession = updated
+        }
+        statusMessage = "Auto-contour draft ready: \(report.compactSummary)"
+        return report
+    }
+
+    @discardableResult
+    public func approveAutoContourSession() -> SegmentationRunRecord? {
+        guard var session = autoContourSession else {
+            statusMessage = "No auto-contour session to approve"
+            return nil
+        }
+        guard labeling.activeLabelMap != nil else {
+            statusMessage = "No active auto-contour label map to approve"
+            return nil
+        }
+        let report = autoContourQAReport ?? refreshAutoContourQA(templateID: session.protocolTemplate.id)
+        guard let report else { return nil }
+        guard !report.hasBlockingFindings else {
+            session.status = .blocked
+            session.qaReport = report
+            autoContourSession = session
+            statusMessage = "Auto-contour approval blocked: \(report.compactSummary)"
+            return nil
+        }
+
+        session.status = .approved
+        session.approvedAt = Date()
+        session.qaReport = report
+        let modelID = session.preferredNNUnetEntry?.datasetID
+            ?? session.primaryRoute?.nnunetDatasetID
+            ?? session.primaryRoute?.matchedMONAIModel
+            ?? "workflow"
+        let record = captureActiveSegmentationRun(
+            name: "\(session.protocolTemplate.shortName) AutoContour Approved",
+            engine: "Tracer AutoContour",
+            backend: session.primaryRoute?.preferredEngine.displayName ?? "Protocol QA",
+            modelID: modelID,
+            metadata: AutoContourWorkflow.metadata(for: session, report: report)
+        )
+        session.generatedRunID = record?.id
+        autoContourSession = session
+        statusMessage = record == nil
+            ? "Auto-contour approved"
+            : "Auto-contour approved and saved: \(session.protocolTemplate.shortName)"
+        return record
+    }
+
+    public func autoContourPrimaryVolume(for template: AutoContourProtocolTemplate) -> ImageVolume? {
+        let candidates = autoContourVolumeCandidates(near: currentVolume)
+        if let currentVolume,
+           template.modalities.contains(Modality.normalize(currentVolume.modality)) {
+            return currentVolume
+        }
+        for modality in template.modalities {
+            if let match = candidates.first(where: { Modality.normalize($0.modality) == modality }) {
+                return match
+            }
+        }
+        return currentVolume ?? candidates.first
+    }
+
+    public func autoContourPrimaryVolume(for entry: NNUnetCatalog.Entry,
+                                         template: AutoContourProtocolTemplate? = nil) -> ImageVolume? {
+        let candidates = autoContourVolumeCandidates(near: currentVolume)
+        if entry.multiChannel,
+           let firstDescription = entry.channelDescriptions.first,
+           let match = autoContourVolume(matching: firstDescription,
+                                         in: candidates,
+                                         excluding: []) {
+            return match
+        }
+        if let currentVolume, Modality.normalize(currentVolume.modality) == entry.modality {
+            return currentVolume
+        }
+        if let match = candidates.first(where: { Modality.normalize($0.modality) == entry.modality }) {
+            return match
+        }
+        if let template {
+            return autoContourPrimaryVolume(for: template)
+        }
+        return currentVolume ?? candidates.first
+    }
+
+    public func autoContourAuxiliaryChannels(for entry: NNUnetCatalog.Entry,
+                                             primary: ImageVolume) -> [ImageVolume] {
+        guard entry.requiredChannels > 1 else { return [] }
+        let candidates = autoContourVolumeCandidates(near: primary)
+        var selectedIdentities = Set([primary.sessionIdentity])
+        var channels: [ImageVolume] = []
+
+        for index in 1..<entry.requiredChannels {
+            let description = entry.channelDescriptions.indices.contains(index)
+                ? entry.channelDescriptions[index]
+                : ""
+            guard let match = autoContourVolume(matching: description,
+                                                in: candidates,
+                                                excluding: selectedIdentities) else {
+                break
+            }
+            channels.append(match)
+            selectedIdentities.insert(match.sessionIdentity)
+        }
+        return channels
     }
 
     @discardableResult
@@ -7670,6 +7922,42 @@ public final class ViewerViewModel: ObservableObject {
         volume.width == labelMap.width &&
         volume.height == labelMap.height &&
         volume.depth == labelMap.depth
+    }
+
+    private func autoContourVolumeCandidates(near volume: ImageVolume?) -> [ImageVolume] {
+        if let volume {
+            let study = studyVolumes(anchoredAt: volume)
+            if !study.isEmpty { return study }
+        }
+        if !activeSessionVolumes.isEmpty { return activeSessionVolumes }
+        return loadedVolumes
+    }
+
+    private func autoContourVolume(matching description: String,
+                                   in candidates: [ImageVolume],
+                                   excluding excludedIdentities: Set<String>) -> ImageVolume? {
+        let text = description.lowercased()
+        let requestedModality: Modality?
+        if text.contains("pet") || text.contains("suv") || text.contains("psma") || text.contains("fdg") {
+            requestedModality = .PT
+        } else if text.contains("ct") || text.contains("hu") {
+            requestedModality = .CT
+        } else if text.contains("mr") ||
+                    text.contains("mri") ||
+                    text.contains("t1") ||
+                    text.contains("t2") ||
+                    text.contains("flair") ||
+                    text.contains("adc") {
+            requestedModality = .MR
+        } else {
+            requestedModality = nil
+        }
+
+        guard let requestedModality else { return nil }
+        return candidates.first {
+            !excludedIdentities.contains($0.sessionIdentity) &&
+            Modality.normalize($0.modality) == requestedModality
+        }
     }
 
     private func radiomicsBounds(for labelMap: LabelMap,

@@ -30,6 +30,7 @@ struct ControlsPanel: View {
     }
 
     enum SegSub: String, CaseIterable, Identifiable, Hashable {
+        case autoContour = "Auto"
         case labels = "Labels"
         case runs = "Runs"
         case registration = "Landmarks"
@@ -89,6 +90,7 @@ struct ControlsPanel: View {
                     ScrollView { BrainPETPanel().padding(16) }
                 case .segmentation:
                     switch segSub {
+                    case .autoContour: ScrollView { AutoContourPanel() }
                     case .labels:       ScrollView { LabelingPanel() }
                     case .runs:         ScrollView { SegmentationRunsPanel().padding(16) }
                     case .registration: ScrollView { RegistrationPanel() }
